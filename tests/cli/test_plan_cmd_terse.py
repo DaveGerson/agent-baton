@@ -100,10 +100,15 @@ def _run_handler(
         patch("agent_baton.cli.commands.execution.plan_cmd.PolicyEngine", return_value=MagicMock()),
         patch("agent_baton.core.orchestration.context.ContextManager", return_value=MagicMock()),
         patch("agent_baton.cli.commands.execution.plan_cmd._persist_plan_to_db", MagicMock()),
+        # Compare Path objects (not `str(self)`) -- on Windows str(Path(...))
+        # renders with backslashes, so a literal "/"-separated string never
+        # matches and the fallback would leave ".claude/team-context"
+        # unresolved relative to the real cwd instead of redirecting to
+        # tmp_path's ctx_dir.
         patch.object(
             Path,
             "resolve",
-            lambda self: ctx_dir if str(self) == ".claude/team-context" else Path(str(self)),
+            lambda self: ctx_dir if self == Path(".claude/team-context") else Path(str(self)),
         ),
     ]
 

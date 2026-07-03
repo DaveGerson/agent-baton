@@ -694,6 +694,54 @@ class TestBeadPromotionF9:
         updated = pack_yaml.read_text(encoding="utf-8")
         assert doc_name in updated
 
+    def test_promote_hoists_newline_guard_before_any_append(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression: the trailing-newline guard must run before ANY append
+        to knowledge.yaml, not only when the "documents:" key is missing.
+
+        A knowledge.yaml that already has a "documents:" key but lacks a
+        trailing newline used to get corrupted: the appended list item was
+        glued onto the final existing line, producing invalid YAML.
+
+        Uses a fake bead store (no real ``bd`` subprocess involved) so the
+        test stays hermetic and isolates the bug to the knowledge.yaml
+        append logic in ``_handle_promote`` itself.
+        """
+        import yaml
+
+        from agent_baton.cli.commands import bead_cmd
+
+        monkeypatch.chdir(tmp_path)
+
+        bead = _make_bead("bd-yaml2", bead_type="discovery", content="New discovery")
+        fake_store = MagicMock()
+        fake_store.read.return_value = bead
+        monkeypatch.setattr(bead_cmd, "_get_bead_store", lambda: fake_store)
+
+        pack_dir = tmp_path / ".claude" / "knowledge" / "test-pack"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        knowledge_yaml = pack_dir / "knowledge.yaml"
+        # No trailing newline -- the bug-triggering shape.
+        knowledge_yaml.write_text(
+            "name: p\ndocuments:\n  - path: a.md", encoding="utf-8"
+        )
+
+        args = argparse.Namespace(bead_id="bd-yaml2", pack_name="test-pack")
+        bead_cmd._handle_promote(args)
+
+        fake_store.close.assert_called_once()
+
+        text = knowledge_yaml.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)  # must not raise a YAML parse error
+
+        assert data is not None
+        documents = data.get("documents") or []
+        paths = {doc["path"] for doc in documents}
+        assert "a.md" in paths
+        assert "bead-yaml2-discovery.md" in paths
+        assert len(documents) == 2
+
 
 # ---------------------------------------------------------------------------
 # F10 — Central Analytics View

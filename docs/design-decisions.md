@@ -1285,3 +1285,67 @@ never wired end-to-end and has been fully deleted.
 
 **Status**: Implemented (2026-05-12). Design doc:
 `docs/internal/agent-teams-and-goal-design.md`.
+
+---
+
+## ADR-25: Manager-Mode PMO Layer — Post-Processor, Sidecar Artifacts, `knowledge.yaml` Extension
+
+**Decision**: Ship the manager-mode PMO layer (`agent_baton/core/manager/`)
+as a **post-processor** around `IntelligentPlanner.create_plan()`, not as
+new stages in the 7-stage planning pipeline
+(`planning/planner.py::_build_default_pipeline()`). `ManagerModePlanner`
+runs after `create_plan()` returns a `MachinePlan`, building a project
+charter, scope map, team blueprint, role cards, knowledge plan, scope
+contracts, and context bundles from that already-complete plan. The one
+component that mutates the plan graph itself, `PhasePolicyApplier`
+(adversarial-review step injection, gate rescoping), runs as a pure
+function over the finished `MachinePlan` before `--save` writes
+`plan.json`/`plan.md` — so the pipeline's 7 stages stay untouched and
+non-manager plans have zero behavioral or import-time difference.
+
+**Sidecar artifacts, not plan fields**: `MachinePlan`/`PlanStep` use
+`extra="ignore"` plus a hand-written `to_dict()` allow-list, so
+undeclared fields silently do not survive a save/load round-trip. Rather
+than widen that allow-list per PMO artifact, every PMO output (charter,
+scope map, blueprint, role cards, knowledge plan, scope contracts,
+context bundles, manager brief/report, decision log) is written by
+convention to
+`.claude/team-context/executions/<task_id>/` (path builder:
+`ManagerArtifactPaths`, `core/manager/paths.py`) and re-derived from
+that directory on read (`baton report`, `baton team`). The single plan
+mutation is one additive, declared field: `MachinePlan.manager_mode:
+bool = False`.
+
+**`knowledge.yaml` extension over a new `pack.yaml`**: manager-mode's
+knowledge-pack lifecycle (`status: active|draft|stale|deprecated`,
+`confidence: low|medium|high`, `source_files`, `last_reviewed`,
+`stale_after_days`) extends the existing `knowledge.yaml` manifest that
+`KnowledgeRegistry` already parses, rather than introducing a parallel
+`pack.yaml`. `pack.yaml` existed only as a stale docstring reference
+(never read by the registry) and a dead write in the bead-promotion path
+(`cli/commands/bead_cmd.py`, historically appended to `pack.yaml`
+instead of `knowledge.yaml`); both were fixed in passing as part of this
+work, in the same file the registry actually reads.
+
+**Accepted debt** (this increment):
+
+- `ManagerConfig.gates.mode` accepts `project_configured | focused |
+  full | smoke | off`, but only `project_configured` (the default) has
+  behavior: `PhasePolicyApplier` rescopes phase gates to
+  `gates.gate_scope` only when `mode == "project_configured"` and the
+  CLI did not pass an explicit `--gate-scope`. Other `mode` values are
+  recorded on `PolicyDecisions.gates_mode` (surfaced via `baton team`/
+  `baton report`) but do not change gate commands yet.
+- Review steps injected by `PhasePolicyApplier` use the existing
+  `step_type: "reviewing"` value from
+  `planning/rules/step_types.py::AGENT_STEP_TYPE` — no new step type was
+  added, and knowledge packs gated on `required_for_code_steps` never
+  attach to a review step as a result.
+- Workstream ownership has exactly one authority:
+  `TeamBlueprint.workstream_assignments`. `Workstream.owner_role` is
+  never read by `baton team`, `baton report`, or the `--explain`
+  rendering path — a role that owns zero workstreams is listed as a
+  support role, never as a workstream owner.
+
+**Status**: Implemented (2026-07-02). Design doc:
+`docs/internal/manager-mode-pmo-design.md`.

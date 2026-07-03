@@ -1,0 +1,6 @@
+# Byte-identity golden fixtures must never be line-ending-converted by
+# core.autocrlf (which defaults to true on many Windows dev machines) --
+# a CRLF-converted checkout would silently break exact-string comparisons
+# against these files. See tests/engine/test_manager_context_prompt.py
+# (Wave 2 review F2).
+tests/engine/golden/*.txt text eol=lf

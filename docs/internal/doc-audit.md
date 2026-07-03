@@ -471,3 +471,77 @@ Code lives under `agent_baton/core/engine/{goal_evaluator,mailbox,team_backends}
 `core/engine/executor.py` (the goal-at-gate-boundary helper and the
 mailbox emission inside `_team_dispatch_action` / `record_team_member_result`).
 Tests live alongside in `tests/engine/`, `tests/cli/`, `tests/api/`.
+
+---
+
+## 2026-07-02 — Manager-mode PMO layer (Waves 0-3, ADR-25)
+
+Docs matrix pass for the manager-mode PMO layer (`agent_baton/core/manager/`),
+verified against `--help` output and source in worktree `w4-docs`
+(base commit `8ebcf07`).
+
+Captured in:
+
+- **Public**:
+  - `docs/design-decisions.md` — new ADR-25 (post-processor architecture,
+    sidecar-by-convention artifacts, `knowledge.yaml` extension over a
+    new `pack.yaml`, accepted debt on `gates.mode`/review step type/
+    workstream-ownership authority).
+  - `docs/cli-reference.md` — new "Manager Mode Commands" section
+    (`baton config`, `baton report`, `baton team status|show`, and the
+    `baton knowledge list/scan/show/audit/propose` pack-lifecycle verbs);
+    `baton plan` options table gained `--manager-mode`, `--dry-run`,
+    `--gate-scope` rows plus a "Manager mode" interaction subsection;
+    `baton execute` intro gained one sentence on manager-mode dispatch
+    prompt sections and phase-handoff/manager-report refresh (M9 detail
+    intentionally deferred to the parallel executor-hooks branch).
+  - `docs/architecture/package-layout.md` — new `core/manager/` module
+    table (13 modules); `models/manager.py` row added to the models
+    table (flagged as the one Pydantic `BaseModel` file among otherwise
+    plain-dataclass model modules); `core/config/manager.py` row added
+    to the `core/config/` table.
+  - `CLAUDE.md` (root) and `GEMINI.md` — `BATON_MANAGER_ENRICH` env var
+    row; `agent_baton/core/manager/` reference-architecture / repo-layout
+    row.
+
+- **Internal**: design doc already existed at
+  `docs/internal/manager-mode-pmo-design.md` (not modified by this pass).
+
+**Discrepancies found vs. the design doc's recon notes** (resolved by
+documenting the shipped reality, not the recon notes — no code changed):
+
+1. The design doc's recon list implies `baton knowledge` already had
+   `doctor`/`search`/`resolve` subcommands that `audit` would "extend."
+   In this worktree, `baton knowledge --help` lists no `doctor`,
+   `search`, or `resolve` verb — only `ab`, `brief`, `effectiveness`,
+   `harvest`, `stale`, `deprecate`, `retire`, `sweep`, `usage`, `list`,
+   `show`, `scan`, `audit`, `propose`, `ranking`. Documented the actual
+   `audit` semantics (own standalone check, not an extension of a
+   `doctor` verb that doesn't exist here) and did not invent doc entries
+   for the missing verbs.
+2. Locked decision 2 in the design doc says to "fix the latent
+   bead-promotion bug in passing" (a dead write to `pack.yaml` instead
+   of `knowledge.yaml`). Verified this fix already landed in
+   `agent_baton/cli/commands/bead_cmd.py` (the append now targets
+   `knowledge.yaml`) prior to this docs pass — cited as fact in ADR-25,
+   no further code change made.
+3. `docs/cli-reference.md`'s `baton plan` section was missing several
+   pre-existing flags unrelated to manager-mode (`--release`,
+   `--template`, `--save-as-template`, `--from-template`, `--skip-init`,
+   `--model`, `--complexity`, `--import`) before this pass. Only added
+   the flags load-bearing for the manager-mode interaction notes
+   (`--manager-mode`, `--dry-run`, `--gate-scope`); left the other gaps
+   as pre-existing, out of scope for this task.
+4. `baton knowledge` as a whole (the pre-existing `brief`/
+   `effectiveness`/`harvest`/`stale`/`deprecate`/`retire`/`sweep`/
+   `usage`/`ranking`/`ab` verbs) had zero coverage in
+   `docs/cli-reference.md` before this pass. Added only the five
+   manager-mode verbs in scope for this task; the rest remains an
+   open gap (worth a follow-up entry in "Coverage Gaps" above).
+
+Code lives under `agent_baton/core/manager/`, `agent_baton/core/config/manager.py`,
+`agent_baton/models/manager.py`, `agent_baton/cli/commands/config_cmd.py`,
+`agent_baton/cli/commands/report_cmd.py`, `agent_baton/cli/commands/team_cmd.py`,
+`agent_baton/cli/commands/knowledge/pack_cmds.py`. Tests live under
+`tests/manager/`, `tests/cli/`, `tests/e2e/` (see
+`docs/internal/manager-mode-pmo-design.md` "Testing").

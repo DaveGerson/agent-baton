@@ -16,6 +16,11 @@ This file is read by every Claude Code agent dispatched inside this repo. It is 
 
 ```
 agent_baton/       Python package (the orchestration engine)
+  core/manager/     Manager-mode PMO layer: post-processor around
+                     create_plan() (charter, scope map, team blueprint,
+                     role cards, knowledge plan, scope contracts, context
+                     bundles). Config: core/config/manager.py. Models:
+                     models/manager.py. See docs/internal/manager-mode-pmo-design.md.
 agents/            Distributable agent definitions (30 .md)
 references/        Distributable reference procedures (19 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
@@ -94,6 +99,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_TEAMS_BACKEND` | Selects the execution backend for team steps (A1). Two supported backends: `worktree` (default — parallel worktree-isolated dispatch, resumable via `baton execute resume`, nesting + full agent frontmatter honored) or `claude-teams` (native Agent Teams UX — inter-teammate messaging, shared task list, lead plan-approval; requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; constraints: no resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates). Unknown values warn and fall back to `worktree`. | `worktree` |
 | `BATON_TEAMS_STRICT_RESUMABILITY` | When `1` AND `BATON_TEAMS_BACKEND=claude-teams` AND the plan has team phases the claude-teams backend cannot resume mid-flight under `long-running` budget, `baton plan`/`baton goal` refuses to save and exits 2. Default (`0`) downgrades the refusal to a warning. | `0` |
 | `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |
+| `BATON_MANAGER_ENRICH` | Optional LLM polish of the manager-mode project charter's `objective`/`background`/`assumptions` wording (never new scope/paths/facts): `off` (default) \| `haiku` \| `sonnet` \| `opus`. Runs post-deterministic-build — `ProjectCharterBuilder` itself stays fully deterministic; only `--manager-mode` plans call this. Requires `ANTHROPIC_API_KEY`; any failure (missing SDK/key, network, malformed response) silently falls back to the deterministic charter. | `off` |
 
 ## Regulated-domain rules
 

@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_baton.cli.errors import validation_error
 from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.govern.classifier import DataClassifier
 from agent_baton.core.govern.policy import PolicyEngine
@@ -70,6 +71,20 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--explain",
         action="store_true",
         help="Show explanation of why this plan was chosen",
+    )
+    p.add_argument(
+        "--manager-mode",
+        dest="manager_mode",
+        action="store_true",
+        help=(
+            "Post-process the plan into manager-mode PMO sidecar artifacts "
+            "(project charter, scope map, team blueprint, role cards, "
+            "knowledge plan, scope contracts, context bundles, manager "
+            "brief) under .claude/team-context/executions/<task_id>/. Also "
+            "enabled by manager_mode.enabled_by_default in "
+            ".claude/baton.yaml. See "
+            "docs/internal/manager-mode-pmo-design.md."
+        ),
     )
     p.add_argument(
         "--knowledge",
@@ -179,14 +194,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p.add_argument(
         "--gate-scope",
         dest="gate_scope",
-        default="focused",
+        default=None,
         choices=["focused", "full", "smoke"],
         help=(
             "How broadly gate commands run (bd-124f). "
             "'focused' (default) scopes pytest to the test files that cover "
             "changed source paths — fast, permission-policy-safe. "
             "'full' produces legacy unscoped pytest / pytest --cov (escape hatch). "
-            "'smoke' runs import-only (build gates) or collect-only (test gates)."
+            "'smoke' runs import-only (build gates) or collect-only (test gates). "
+            "Default sentinel is None (not 'focused') so the handler can "
+            "tell whether this flag was explicitly passed vs. defaulted — "
+            "see cli_gate_scope_explicit in handler()."
         ),
     )
     p.add_argument(
@@ -379,6 +397,93 @@ def _render_dry_run_forecast(plan: MachinePlan) -> str:
     return "\n".join(lines)
 
 
+def _render_manager_mode_explain_section(manager_artifacts, manager_config) -> str:
+    """Render the ``## Manager Mode`` section appended to ``explanation.md``
+    when ``--manager-mode --explain`` are both set (W3).
+
+    Reads only public fields off *manager_artifacts*
+    (``agent_baton.core.manager.artifacts.ManagerArtifacts``) and
+    *manager_config* (``agent_baton.core.config.manager.ManagerConfig``) --
+    workstream ownership is read exclusively from
+    ``TeamBlueprint.workstream_assignments`` (never
+    ``Workstream.owner_role``), matching the binding rule documented on
+    ``ManagerModePlanner``.
+    """
+    lines: list[str] = ["## Manager Mode", ""]
+
+    scope_map = manager_artifacts.scope_map
+    blueprint = manager_artifacts.blueprint
+
+    lines.append("### Workstreams")
+    if scope_map is not None and scope_map.workstreams:
+        for ws in scope_map.workstreams:
+            owner = "(unassigned)"
+            if blueprint is not None:
+                owner = blueprint.workstream_assignments.get(ws.id) or owner
+            lines.append(f"- {ws.name or ws.id} — owner: {owner}")
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("### Team")
+    if blueprint is not None and blueprint.roles:
+        for card in blueprint.roles:
+            lines.append(f"- {card.role}: {card.mission or '(no mission set)'}")
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("### Policies")
+    lines.append(
+        f"- Phase adversarial review: {manager_config.policies.phase_completion.adversarial_review}"
+    )
+    lines.append(
+        f"- Project adversarial review: {manager_config.policies.project_completion.adversarial_review}"
+    )
+    lines.append(
+        f"- Handoff required: {manager_config.policies.phase_completion.handoff_required}"
+    )
+    if blueprint is not None:
+        gate_scope_applied = blueprint.phase_policies.get("gate_scope_applied")
+        if gate_scope_applied:
+            lines.append(f"- Gate scope applied: {gate_scope_applied}")
+        injected = blueprint.phase_policies.get("injected_review_steps") or []
+        if injected:
+            lines.append(f"- Injected review steps: {', '.join(injected)}")
+        final_review = blueprint.phase_policies.get("final_review_step")
+        if final_review:
+            lines.append(f"- Final project review step: {final_review}")
+    lines.append("")
+
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _print_manager_mode_artifacts(ctx_dir: Path, plan: MachinePlan, manager_artifacts) -> None:
+    """Print the ``Artifacts:`` block for a manager-mode ``--save`` run.
+
+    Matches PRD §20's example shape: an ``Artifacts:`` header followed by
+    one indented path per line. Reuses ``preview_paths`` (see
+    ``agent_baton.core.manager.artifacts``), which mirrors ``write_all``'s
+    traversal order exactly, so this reports precisely what was just
+    persisted to disk -- charter, scope map, team blueprint, role cards,
+    knowledge plan, scope contracts, context bundles, and the manager
+    brief (PRD's "full write_all list acceptable").
+
+    Manager-mode only: callers must gate this behind
+    ``manager_artifacts is not None`` so non-manager ``--save`` output
+    stays byte-identical.
+    """
+    from agent_baton.core.manager.artifacts import preview_paths
+    from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+    paths = ManagerArtifactPaths(ctx_dir, plan.task_id)
+    items = preview_paths(paths, manager_artifacts)
+    print()
+    print("Artifacts:")
+    for artifact_path, _description in items:
+        print(f"  {artifact_path}")
+
+
 def handler(args: argparse.Namespace) -> None:
     # --dry-run + --save are mutually exclusive: don't let the user
     # accidentally believe nothing was written when --save is set, and
@@ -551,6 +656,17 @@ def handler(args: argparse.Namespace) -> None:
         bead_store=bead_store,
     )
     print("  Creating execution plan...", file=sys.stderr)
+    # M6 prep: record whether --gate-scope was explicitly passed (argparse
+    # default sentinel is None, not "focused" -- see register() above) so
+    # PhasePolicyApplier can tell "user asked for X" apart from "nothing
+    # specified, use the project-configured default" (threaded into
+    # ManagerModePlanner as `cli_gate_scope_explicit` below).
+    # getattr (not direct attribute access) because several existing test
+    # fixtures hand-construct an argparse.Namespace without a gate_scope
+    # attribute at all; that must keep behaving like "not explicit".
+    _gate_scope_arg = getattr(args, "gate_scope", None)
+    cli_gate_scope_explicit = _gate_scope_arg is not None
+    gate_scope = _gate_scope_arg or "focused"
     plan = planner.create_plan(
         args.summary,
         task_type=args.task_type,
@@ -561,7 +677,7 @@ def handler(args: argparse.Namespace) -> None:
         explicit_knowledge_docs=args.knowledge,
         intervention_level=args.intervention,
         default_model=getattr(args, "model", None),
-        gate_scope=getattr(args, "gate_scope", "focused"),
+        gate_scope=gate_scope,
     )
     print("  Done.", file=sys.stderr)
 
@@ -601,8 +717,79 @@ def handler(args: argparse.Namespace) -> None:
         plan.completion_condition = goal_text
         plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
 
+    # Manager-mode PMO layer (M1, see docs/internal/manager-mode-pmo-design.md).
+    # ManagerConfig is only loaded when it can matter -- --manager-mode was
+    # passed, or a project baton.yaml exists that could set
+    # manager_mode.enabled_by_default -- so a plain `baton plan` with no
+    # manager-mode footprint anywhere skips the lookup entirely. The
+    # heavier `agent_baton.core.manager` builder package is only imported
+    # further below when manager mode is actually requested, so
+    # non-manager plans have zero core.manager import side effects and
+    # `plan.to_dict()` is unchanged apart from the `manager_mode: False`
+    # field added in this milestone.
+    #
+    # ManagerConfig.load() fails early (ManagerConfigError) on malformed
+    # YAML or an invalid nested policy value -- by design, so `baton
+    # config validate` surfaces problems loudly. But a plain `baton plan`
+    # (manager mode not requested) must never crash on someone else's
+    # broken baton.yaml/~/.baton/config.yaml: downgrade to a warning and
+    # fall back to defaults in that case. Only when the user explicitly
+    # asked for manager mode (--manager-mode) do we treat a bad config as
+    # a hard, user-facing error (typed, no raw traceback).
+    from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
+
+    _manager_mode_flag = bool(getattr(args, "manager_mode", False))
+    manager_config = ManagerConfig()
+    if _manager_mode_flag or ManagerConfig.find_config_file(project_root) is not None:
+        try:
+            manager_config = ManagerConfig.load(project_root)
+        except ManagerConfigError as exc:
+            if _manager_mode_flag:
+                validation_error(
+                    f"invalid manager config: {exc}",
+                    hint=(
+                        "Fix .claude/baton.yaml (or ~/.baton/config.yaml), "
+                        "or omit --manager-mode."
+                    ),
+                    docs="docs/internal/manager-mode-pmo-design.md",
+                )
+            _log.warning(
+                "Ignoring invalid manager config (non-fatal, manager mode "
+                "not requested): %s",
+                exc,
+            )
+
+    manager_requested = _manager_mode_flag or manager_config.manager_mode.enabled_by_default
+    if manager_requested:
+        plan.manager_mode = True
+
     # --dry-run: print compact forecast and exit without writing anything.
     if getattr(args, "dry_run", False):
+        # Manager-mode PMO preview (W3): build the full composition
+        # in-memory (never touches disk -- see
+        # agent_baton.core.manager.planner.ManagerModePlanner.build) so the
+        # forecast below and the artifact-preview list both reflect the
+        # FINAL plan shape, including any adversarial-review steps the
+        # policy applier injects and any gate rescoping it applies.
+        manager_preview: list[tuple[Path, str]] = []
+        if manager_requested:
+            from agent_baton.core.manager.artifacts import preview_paths
+            from agent_baton.core.manager.paths import ManagerArtifactPaths
+            from agent_baton.core.manager.planner import ManagerModePlanner
+
+            preview_ctx_dir = Path(".claude/team-context").resolve()
+            manager_planner = ManagerModePlanner(
+                manager_config,
+                project_root=project_root,
+                team_context_dir=preview_ctx_dir,
+                knowledge_registry=knowledge_registry,
+                cli_gate_scope_explicit=cli_gate_scope_explicit,
+            )
+            manager_artifacts = manager_planner.build(plan, plan.task_summary)
+            manager_preview = preview_paths(
+                ManagerArtifactPaths(preview_ctx_dir, plan.task_id), manager_artifacts
+            )
+
         # bd-47b4: when paired with --json, emit a structured payload that
         # includes the ±50% range so machine consumers (CI dashboards,
         # forge, etc.) cannot mistake the central estimate for an
@@ -638,9 +825,19 @@ def handler(args: argparse.Namespace) -> None:
                     "total_minutes": agent_min + gate_min,
                 },
             }
+            if manager_preview:
+                payload["manager_mode_artifacts"] = [
+                    {"path": str(path), "description": description}
+                    for path, description in manager_preview
+                ]
             print(json.dumps(payload, indent=2))
             return
         print(_render_dry_run_forecast(plan))
+        if manager_preview:
+            print()
+            print("Manager Mode artifacts (preview only -- nothing written):")
+            for path, description in manager_preview:
+                print(f"  {path}  ({description})")
         return
 
     if args.save:
@@ -648,6 +845,26 @@ def handler(args: argparse.Namespace) -> None:
 
         ctx_dir = Path(".claude/team-context").resolve()
         ctx_dir.mkdir(parents=True, exist_ok=True)
+
+        manager_artifacts = None
+        if manager_requested:
+            # Import here (not at module top) so non-manager plans never
+            # import agent_baton.core.manager. Runs BEFORE the plan itself
+            # is persisted below: PhasePolicyApplier (invoked inside
+            # build_and_write) mutates `plan` in place -- injecting
+            # adversarial-review steps and optionally rescaling gates --
+            # so plan.json/plan.md must reflect the FINAL, policy-applied
+            # step list, not the pre-policy draft.
+            from agent_baton.core.manager.planner import ManagerModePlanner
+
+            manager_planner = ManagerModePlanner(
+                manager_config,
+                project_root=project_root,
+                team_context_dir=ctx_dir,
+                knowledge_registry=knowledge_registry,
+                cli_gate_scope_explicit=cli_gate_scope_explicit,
+            )
+            manager_artifacts = manager_planner.build_and_write(plan, plan.task_summary)
 
         # Write to task-scoped directory (executions/<task_id>/)
         ctx = ContextManager(team_context_dir=ctx_dir, task_id=plan.task_id)
@@ -667,8 +884,13 @@ def handler(args: argparse.Namespace) -> None:
             _tag_plan_with_release(ctx_dir, plan.task_id, release_id)
 
         if args.explain:
+            explanation_text = planner.explain_plan(plan)
+            if manager_artifacts is not None:
+                explanation_text += "\n\n" + _render_manager_mode_explain_section(
+                    manager_artifacts, manager_config
+                )
             explanation_path = ctx_dir / "explanation.md"
-            explanation_path.write_text(planner.explain_plan(plan), encoding="utf-8")
+            explanation_path.write_text(explanation_text, encoding="utf-8")
             print(f"Plan saved: {json_path}")
             print(f"Plan markdown: {md_path}")
             n_phases = len(plan.phases)
@@ -678,6 +900,8 @@ def handler(args: argparse.Namespace) -> None:
                 f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
             )
             print(f"Plan explanation: {explanation_path}")
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         elif getattr(args, "verbose", False):
             print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
@@ -685,6 +909,8 @@ def handler(args: argparse.Namespace) -> None:
             print()
             print(plan.to_markdown())
             print()
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         else:
             print(f"Plan saved: {json_path}")
@@ -695,6 +921,8 @@ def handler(args: argparse.Namespace) -> None:
                 f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
                 f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
             )
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         return
 
