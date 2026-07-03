@@ -184,6 +184,24 @@ def test_manager_mode_planning_produces_full_pmo_packet(
         "this hermetic planning run"
     )
 
+    # --- I1 regression: context_files must not pollute likely_repo_areas ---
+    # Planning stage 13 (_inject_context_files) defaults every step without
+    # explicit context_files to ["CLAUDE.md"] -- that is a read-this hint,
+    # not a repo area, and must never surface as a workstream's allowed
+    # path. likely_repo_areas is either real fixture directories (e.g.
+    # "app") or empty-with-recorded-assumption; "CLAUDE.md" is neither.
+    assert "CLAUDE.md" not in artifacts.charter.likely_repo_areas
+    real_dirs = {p.name for p in fixture_repo.iterdir() if p.is_dir()}
+    assert set(artifacts.charter.likely_repo_areas) <= real_dirs
+    if not artifacts.charter.likely_repo_areas:
+        assert any(
+            "no repo areas could be confidently inferred" in a.lower()
+            for a in artifacts.charter.assumptions
+        )
+    for workstream in artifacts.scope_map.workstreams:
+        assert workstream.allowed_paths != ["CLAUDE.md"]
+        assert "CLAUDE.md" not in workstream.allowed_paths
+
 
 def test_non_manager_plan_has_no_pmo_artifacts(fixture_repo: Path) -> None:
     """Control case: the same fixture, same task, WITHOUT manager mode --

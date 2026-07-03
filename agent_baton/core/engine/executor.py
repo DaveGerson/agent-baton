@@ -1061,16 +1061,33 @@ class ExecutionEngine:
                 "Phase-summary bead creation skipped (non-fatal): %s", _ps_exc
             )
 
-        # ── Manager-mode (M9) phase-completion hook ───────────────────────
-        # Writes handoffs/phase-<n>-handoff.md (PRD §13.4) when
-        # policies.phase_completion.handoff_required, then refreshes
-        # manager-report.md. Fires only for manager_mode plans. Independent
-        # of the phase-summary-bead block above (which early-returns when
-        # phase_results is empty) -- reloads state/phase data fresh so a
-        # transient issue in bead synthesis never suppresses the PMO
-        # handoff. Best-effort: any failure is logged at debug and never
-        # blocks phase advancement. See docs/internal/manager-mode-pmo-plan.md
-        # Task 13.
+    def _write_manager_phase_artifacts(self) -> None:
+        """Manager-mode (M9) phase-completion hook.
+
+        Writes ``handoffs/phase-<n>-handoff.md`` (PRD §13.4) when
+        ``policies.phase_completion.handoff_required``, then refreshes
+        ``manager-report.md``. Fires only for ``manager_mode`` plans.
+
+        Extracted into its OWN method (I2 fix, release-review binding
+        decision) rather than living as a trailing block inside
+        ``_synthesize_beads_post_phase`` -- that method has three early
+        returns of its own (no bead store, no derived store, zero
+        *complete* step results in the completing phase) that are purely
+        bead-graph-synthesis concerns, but previously ALSO silently
+        skipped this PMO handoff/report block despite its own comment
+        claiming independence. Callers MUST invoke this method
+        unconditionally at every phase boundary alongside (not nested
+        inside) ``_synthesize_beads_post_phase``.
+
+        Reloads state/phase data fresh from storage so a transient issue
+        elsewhere never suppresses the PMO handoff. Bead-store queries are
+        internally None-guarded -- when no bead store is available the
+        handoff still writes, just with empty decision/warning-bead
+        sections (``_render_manager_phase_handoff_markdown`` already
+        renders "_None recorded._" for empty inputs). Best-effort: any
+        failure is logged at debug and never blocks phase advancement.
+        See docs/internal/manager-mode-pmo-plan.md Task 13.
+        """
         try:
             state = self._load_execution()
             if state is None or state.plan is None or not state.plan.manager_mode:
@@ -1084,7 +1101,19 @@ class ExecutionEngine:
                 r for r in state.step_results
                 if r.step_id in phase_step_ids and r.status == "complete"
             ]
-            phase_beads = self._bead_store.query(task_id=state.task_id, limit=500)
+            if self._bead_store is not None:
+                try:
+                    phase_beads = self._bead_store.query(
+                        task_id=state.task_id, limit=500,
+                    )
+                except Exception as _bq_exc:
+                    _log.debug(
+                        "Manager-mode phase-artifact bead query failed "
+                        "(non-fatal, degrading to no beads): %s", _bq_exc,
+                    )
+                    phase_beads = []
+            else:
+                phase_beads = []
             decision_beads = [
                 b for b in phase_beads
                 if b.bead_type == "decision" and b.step_id in phase_step_ids
@@ -2569,11 +2598,26 @@ class ExecutionEngine:
 
         # ── Scope expansion signal protocol ──────────────────────────────────
         # Parse SCOPE_EXPANSION signals and queue for processing at the next
-        # phase boundary.  Skipped for automation steps.
+        # phase boundary.  Skipped for automation steps AND for manager_mode
+        # plans (C1 fix, release-review binding decision): the loose
+        # ``SCOPE_EXPANSION: <description>`` pattern parsed here also
+        # matches the stricter manager-mode ``<path> — <reason>`` shape
+        # (both share the ``SCOPE_EXPANSION:`` prefix -- see
+        # agent_baton.core.engine.manager_scope_signal's module docstring),
+        # which previously caused a double-route: the manager-mode block
+        # below creates a decision packet / bead note / step failure per
+        # ``scoping.scope_expansion_policy`` while THIS block ALSO queued
+        # the same signal for the adaptive replanner, which auto-amends the
+        # plan at the next phase boundary -- work got silently auto-planned
+        # while a manager decision was still open (or a blocked step's
+        # expansion queued anyway). Manager-mode plans now route
+        # exclusively through manager_scope_signal below; non-manager plans
+        # keep this pre-existing adaptive-replanner behavior unchanged.
         if (
             status in ("complete", "interrupted")
             and outcome
             and (_plan_step is None or _plan_step.step_type != "automation")
+            and (state.plan is None or not state.plan.manager_mode)
         ):
             try:
                 from agent_baton.core.engine.bead_signal import parse_scope_expansions
@@ -2637,16 +2681,20 @@ class ExecutionEngine:
 
         # ── Manager-mode scope-expansion signal protocol (M9) ─────────────────
         # Parses the stricter SCOPE_EXPANSION: <path> — <reason> format (see
-        # agent_baton.core.engine.manager_scope_signal -- intentionally
-        # independent of the free-text SCOPE_EXPANSION: <description> signal
-        # parsed above by bead_signal.parse_scope_expansions for the
-        # unrelated adaptive-replanning feature). Only active for
-        # manager_mode plans. Routes per
-        # ManagerConfig.scoping.scope_expansion_policy. Parsing + config
-        # loading are best-effort; the "block" policy's step-failure is
-        # deliberately NOT swallowed by the outer try/except -- a blocked
-        # scope expansion must fail the step visibly (Task 13 binding
-        # constraint).
+        # agent_baton.core.engine.manager_scope_signal). Only active for
+        # manager_mode plans, which is also why the free-text
+        # SCOPE_EXPANSION: <description> block above (bead_signal.
+        # parse_scope_expansions, feeding the unrelated adaptive-replanning
+        # queue) is now gated OFF for manager_mode plans (C1 fix): both
+        # patterns share the SCOPE_EXPANSION: prefix and can match the same
+        # outcome text, so manager-mode plans must route exclusively
+        # through THIS block to avoid double-routing (auto-replanning work
+        # while a manager decision on the same signal is still open).
+        # Routes per ManagerConfig.scoping.scope_expansion_policy. Parsing +
+        # config loading are best-effort; the "block" policy's step-failure
+        # is deliberately NOT swallowed by the outer try/except -- a
+        # blocked scope expansion must fail the step visibly (Task 13
+        # binding constraint).
         if (
             state.plan is not None
             and state.plan.manager_mode
@@ -6588,6 +6636,12 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            # I2 fix: invoked unconditionally alongside (not nested inside)
+            # _synthesize_beads_post_phase, whose early returns (no bead
+            # store / no derived store / zero complete step results) are
+            # purely bead-graph-synthesis concerns and must never suppress
+            # the PMO handoff/report.
+            self._write_manager_phase_artifacts()
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=False)
             self._publish_phase_started(state)
@@ -6759,6 +6813,8 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            # I2 fix: see EMPTY_PHASE_ADVANCE above for rationale.
+            self._write_manager_phase_artifacts()
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=True)
             self._publish_phase_started(state)

@@ -196,6 +196,34 @@ def _engine_with_fake_beads(
     return engine, fake_store
 
 
+def _engine_with_no_bead_store(
+    ctx_dir: Path, task_id: str, monkeypatch: pytest.MonkeyPatch
+) -> ExecutionEngine:
+    """Engine construction with ``self._bead_store`` forced to ``None``
+    (I2 regression fixture) -- proves the M9 phase-artifact hook
+    (handoff + manager-report refresh) is wired independently of bead-graph
+    synthesis, which early-returns immediately when no bead store is
+    available (see ``ExecutionEngine._synthesize_beads_post_phase``)."""
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+    db_path = ctx_dir / "baton.db"
+    db_path.touch()
+
+    def _patched_make_bead_store(path, *, soul_router=None, repo_root=None):
+        return None
+
+    storage = SqliteStorage(db_path)
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        _patched_make_bead_store,
+    )
+    return ExecutionEngine(
+        team_context_root=ctx_dir,
+        bus=EventBus(),
+        storage=storage,
+        task_id=task_id,
+    )
+
+
 def _paths(project_root: Path, task_id: str) -> ManagerArtifactPaths:
     return ManagerArtifactPaths(project_root / ".claude" / "team-context", task_id)
 
@@ -388,6 +416,34 @@ class TestPhaseCompletionHooks:
             assert section in text, f"missing required handoff section: {section}"
         assert "1.1" in text
 
+    def test_handoff_written_when_bead_store_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I2 regression: ``_synthesize_beads_post_phase`` early-returns
+        immediately (before ever reaching the M9 handoff/report block)
+        when ``self._bead_store is None`` -- a purely bead-graph-synthesis
+        concern that must never suppress the PMO handoff. The M9 phase
+        hook must be invoked unconditionally at the phase boundary, not
+        nested inside bead-graph synthesis."""
+        task_id = "task-m9-handoff-no-beads"
+        plan = _single_phase_plan(task_id, manager_mode=True)
+        ctx_dir = tmp_path / ".claude" / "team-context"
+        _build_manager_sidecars(plan, tmp_path, ctx_dir)
+
+        engine = _engine_with_no_bead_store(ctx_dir, task_id, monkeypatch)
+        assert engine._bead_store is None
+        _drive_through_phase_one(engine, plan)
+
+        paths = _paths(tmp_path, task_id)
+        assert paths.phase_handoff(1).is_file(), (
+            "handoffs/phase-1-handoff.md must exist even when the bead "
+            "store is unavailable"
+        )
+        assert paths.manager_report.is_file(), (
+            "manager-report.md must be refreshed even when the bead "
+            "store is unavailable"
+        )
+
     def test_no_handoff_written_when_manager_mode_off(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -464,6 +520,11 @@ class TestScopeExpansionRouting:
         assert result.status == "failed"
         assert "app/auth/session.py" in result.error
         assert "block" in result.error.lower()
+        # C1 regression: manager-mode scope-expansion signals must route
+        # EXCLUSIVELY through manager_scope_signal -- the pre-existing
+        # free-text adaptive-replanner queue (bead_signal.py) must never
+        # also pick up the same outcome text (double-routing).
+        assert state.pending_scope_expansions == []
 
     def test_allow_with_note_writes_warning_bead(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -493,6 +554,9 @@ class TestScopeExpansionRouting:
         scope_warnings = [b for b in warnings if "scope-expansion" in (b.tags or [])]
         assert scope_warnings, "expected a warning bead noting the scope expansion"
         assert "app/auth/session.py" in scope_warnings[0].content
+        # C1 regression: allow_with_note must record + proceed, NOT also
+        # queue the signal for the adaptive replanner to auto-amend later.
+        assert state.pending_scope_expansions == []
 
     def test_queue_for_manager_creates_decision_packet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -529,6 +593,10 @@ class TestScopeExpansionRouting:
         log_lines = paths.decision_log.read_text(encoding="utf-8").splitlines()
         entries = [json.loads(line) for line in log_lines if line.strip()]
         assert any(e.get("decision_type") == "scope_expansion" for e in entries)
+        # C1 regression: the decision packet must be the ONLY routing
+        # outcome -- the work must not ALSO be auto-planned into the next
+        # phase boundary while the manager decision packet sits open.
+        assert state.pending_scope_expansions == []
 
     def test_no_routing_when_manager_mode_off(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -554,6 +622,49 @@ class TestScopeExpansionRouting:
         state = engine._load_state()
         result = state.get_step_result("1.1")
         assert result.status == "complete"
+
+        paths = _paths(tmp_path, task_id)
+        assert not paths.decisions_dir.exists()
+        # C1 inverse: manager-mode routing is inert, but the PRE-EXISTING
+        # free-text adaptive-replanner queueing (bead_signal.py) is
+        # UNCHANGED for non-manager plans -- the same outcome text also
+        # matches the loose SCOPE_EXPANSION: <description> pattern and
+        # must still be queued for the next phase boundary.
+        assert len(state.pending_scope_expansions) == 1
+        assert state.pending_scope_expansions[0]["step_id"] == "1.1"
+
+    def test_free_text_scope_expansion_still_queues_when_manager_mode_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C1 inverse (dedicated case): a purely free-text
+        ``SCOPE_EXPANSION: <description>`` signal -- one that does NOT
+        match the stricter manager-mode ``<path> — <reason>`` shape at
+        all -- must still queue into ``state.pending_scope_expansions``
+        for the pre-existing adaptive-replanner to pick up at the next
+        phase boundary when ``manager_mode=False``. Proves the C1 fix
+        only gates manager-mode plans, never touching the non-manager
+        replanner behavior."""
+        task_id = "task-m9-freetext-non-manager"
+        plan = _routing_plan(task_id)
+        plan.manager_mode = False
+        ctx_dir = tmp_path / ".claude" / "team-context"
+        _write_baton_yaml(tmp_path, "block")  # policy must be irrelevant here
+
+        engine, _ = _engine_with_fake_beads(ctx_dir, task_id, monkeypatch)
+        engine.start(plan)
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="SCOPE_EXPANSION: needed to touch the auth module too\n",
+        )
+
+        state = engine._load_state()
+        result = state.get_step_result("1.1")
+        assert result.status == "complete"
+        assert len(state.pending_scope_expansions) == 1
+        assert state.pending_scope_expansions[0]["step_id"] == "1.1"
+        assert "auth module" in state.pending_scope_expansions[0]["description"]
 
         paths = _paths(tmp_path, task_id)
         assert not paths.decisions_dir.exists()

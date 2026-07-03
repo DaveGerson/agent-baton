@@ -245,12 +245,29 @@ def _likely_repo_areas(
 
     Preference order:
 
-    1. First path segment of every step's ``allowed_paths``/
-       ``context_files`` (the planner already knows real repo paths).
+    1. First path segment of every step's ``allowed_paths`` (the planner
+       already knows real repo paths). ``context_files`` is deliberately
+       EXCLUDED (I1 fix, release-review binding decision): the planning
+       pipeline defaults every step without explicit context files to
+       ``["CLAUDE.md"]`` (see
+       ``agent_baton.core.engine.planning.stages.enrichment.
+       _inject_context_files``) -- a read-this hint, not a repo area, so
+       including it here polluted every fallback ``Allowed Paths`` with
+       ``CLAUDE.md``. When *project_root* exists on disk, candidate
+       segments are further filtered down to those that are real
+       directories under it -- a step's allowed path can name a directory
+       the plan intends to *create*, but "likely repo areas" should only
+       point at what's already there.
     2. Top-level directories of *project_root* whose name appears as a
        whole word in the task summary (a repo signal independent of the
        planner).
     3. Empty -- the caller records an assumption instead of guessing.
+
+    Falls through to the next step whenever the current step yields no
+    surviving candidates (e.g. every ``allowed_paths`` segment is filtered
+    out by the directory-existence check) rather than returning early, so
+    step 2's word-matching still gets a chance before step 3's
+    recorded-assumption fallback.
 
     Returns ``(areas, was_assumed)``; ``was_assumed`` is ``True`` only for
     the empty-list case (step 3), so the caller knows to record an
@@ -258,10 +275,12 @@ def _likely_repo_areas(
     """
     segments: list[str] = []
     for step in plan.all_steps:
-        for raw_path in (*step.allowed_paths, *step.context_files):
+        for raw_path in step.allowed_paths:
             segment = _first_segment(raw_path)
             if segment and segment not in segments:
                 segments.append(segment)
+    if segments and project_root.is_dir():
+        segments = [s for s in segments if (project_root / s).is_dir()]
     if segments:
         return segments, False
 

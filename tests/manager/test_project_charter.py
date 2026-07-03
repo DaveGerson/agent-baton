@@ -14,7 +14,11 @@ import pytest
 
 from agent_baton.core.config.manager import ManagerConfig
 from agent_baton.core.manager.artifacts import ManagerArtifacts, write_all
-from agent_baton.core.manager.charter import ProjectCharterBuilder, charter_to_markdown
+from agent_baton.core.manager.charter import (
+    ProjectCharterBuilder,
+    _likely_repo_areas,
+    charter_to_markdown,
+)
 from agent_baton.core.manager.enrich import maybe_enrich_charter
 from agent_baton.core.manager.paths import ManagerArtifactPaths
 from agent_baton.core.manager.scope import ScopeMapBuilder
@@ -162,6 +166,95 @@ def test_ambiguous_task_records_assumptions(tmp_path: Path) -> None:
     assert len(charter.assumptions) >= 1
     # No repo areas could be inferred -- must not invent paths.
     assert charter.likely_repo_areas == []
+
+
+def test_context_files_do_not_pollute_likely_repo_areas(tmp_path: Path) -> None:
+    """I1 regression: ``context_files`` (conventionally ``CLAUDE.md`` --
+    a read-this hint, not a repo area) must never contribute a segment to
+    ``likely_repo_areas``. Every step here has ``context_files`` but no
+    ``allowed_paths``, so pre-fix this returned ``["CLAUDE.md"]``."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="backend-engineer",
+                    task_description="Build the reporting endpoint.",
+                    deliverables=["reporting endpoint"],
+                    context_files=["CLAUDE.md"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+
+    areas, was_assumed = _likely_repo_areas(plan, plan.task_summary, tmp_path)
+
+    assert "CLAUDE.md" not in areas
+    assert areas == []
+    assert was_assumed is True
+
+
+def test_likely_repo_areas_filtered_to_existing_directories(tmp_path: Path) -> None:
+    """I1: candidate segments are filtered to those that exist as real
+    directories under ``project_root`` -- a step pointing at a directory
+    that doesn't exist on disk must not surface as a likely repo area,
+    but a segment that IS a real directory survives."""
+    (tmp_path / "app").mkdir()
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="backend-engineer",
+                    task_description="Build the reporting endpoint.",
+                    deliverables=["reporting endpoint"],
+                    allowed_paths=["app/reporting/service.py", "ghost/nowhere.py"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+
+    areas, was_assumed = _likely_repo_areas(plan, plan.task_summary, tmp_path)
+
+    assert areas == ["app"]
+    assert was_assumed is False
+
+
+def test_likely_repo_areas_falls_back_to_assumption_when_no_segment_survives(
+    tmp_path: Path,
+) -> None:
+    """I1: when every candidate segment is filtered out (none exist as
+    real directories under project_root) and no directory name matches a
+    word in the task summary either, the builder records an assumption
+    instead of guessing -- it must NOT silently keep the filtered-out
+    (nonexistent) segments."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="backend-engineer",
+                    task_description="Build the reporting endpoint.",
+                    deliverables=["reporting endpoint"],
+                    allowed_paths=["ghost/nowhere.py"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+
+    areas, was_assumed = _likely_repo_areas(plan, plan.task_summary, tmp_path)
+
+    assert areas == []
+    assert was_assumed is True
 
 
 def test_high_impact_ambiguity_creates_decision_point(tmp_path: Path) -> None:

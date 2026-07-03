@@ -175,7 +175,12 @@ For a plan saved with `plan.manager_mode = true` (see [`baton plan
 scope-contract and context-bundle section per step, and phase
 completion/final completion best-effort refresh the phase handoff and
 `manager-report.md` sidecars -- the action loop and `_print_action()`
-output shape are unchanged.
+output shape are unchanged. When a dispatched agent reports a
+`SCOPE_EXPANSION: <path> — <reason>` signal, `scoping.scope_expansion_policy`
+(`.claude/baton.yaml`) routes it to one of three outcomes: `allow_with_note`
+(proceed, record a bead), `queue_for_manager` (create a manager decision
+packet, proceed), or `block` (the step fails immediately, pending a plan
+amendment to bring the work into scope).
 
 #### `baton execute start`
 
