@@ -170,6 +170,14 @@ def test_manager_mode_planning_produces_full_pmo_packet(
     assert "repo-architecture" in missing_names
     assert "testing-strategy" in missing_names
     assert "coding-conventions" not in missing_names
+    # bd-t8u: the review role cards hard-require review-rubric, which the
+    # fixture registry does not have -- reported with a role reason, not
+    # attached as a phantom (path="") bundle ref.
+    assert "review-rubric" in missing_names
+    rubric_missing = next(
+        p for p in artifacts.knowledge_plan.missing_packs if p.name == "review-rubric"
+    )
+    assert rubric_missing.reason.startswith("role: ")
 
     # manager-brief.md is readable with workstreams/team/policies.
     brief_text = paths.manager_brief.read_text(encoding="utf-8")

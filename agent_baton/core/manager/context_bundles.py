@@ -476,8 +476,17 @@ class ContextBundleBuilder:
             if name in packs_by_name:
                 packs.append(packs_by_name[name])
             else:
-                reason = "required" if name in required else "step attachment"
-                packs.append(KnowledgePackReference(name=name, reason=reason))
+                # bd-t8u: a pack name the knowledge plan never selected
+                # (canonical case: a role-required pack absent from the
+                # registry, e.g. review-rubric) must NOT attach as a phantom
+                # reference (path="", token_estimate=0) -- the knowledge
+                # plan already reports it under ``missing_packs``; surface
+                # it on the bundle as a warning naming the pack instead.
+                origin = "role-required" if name in required else "step-attached"
+                truncation_warnings.append(
+                    f"Missing knowledge pack: {name} "
+                    f"({origin}; not in knowledge plan selected_packs)"
+                )
         return packs
 
     @staticmethod
