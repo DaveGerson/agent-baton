@@ -35,12 +35,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# A workstream-shaped stand-in for the rare defensive case where a step's
-# phase has no positionally-aligned Workstream (should not happen given
-# ScopeMapBuilder always builds one workstream per plan phase -- see
-# ManagerModePlanner._compose -- but ScopeContractBuilder.build requires a
-# non-None Workstream, so this keeps that call site total).
-_EMPTY_WORKSTREAM = _WorkstreamModel()
+def _empty_workstream() -> _WorkstreamModel:
+    """A fresh workstream-shaped stand-in for the rare defensive case where
+    a step's phase has no positionally-aligned Workstream (should not
+    occur given ScopeMapBuilder always builds one workstream per plan
+    phase -- see ManagerModePlanner._compose -- but
+    ScopeContractBuilder.build requires a non-None Workstream, so this
+    keeps that call site total).
+
+    Built per-call rather than as a shared module-level instance: a single
+    shared ``BaseModel`` instance reused across every call site is a
+    mutable-default hazard (any future code path that mutates the
+    "empty" workstream in place would silently corrupt every other step
+    that happens to hit this fallback), even though today's call site is
+    read-only.
+    """
+    return _WorkstreamModel()
 
 
 class ManagerModePlanner:
@@ -271,7 +281,7 @@ class ManagerModePlanner:
                 if role_card.role not in artifacts.role_cards_md:
                     artifacts.role_cards_md[role_card.role] = render_role_card(role_card)
 
-                contract_workstream = workstream if workstream is not None else _EMPTY_WORKSTREAM
+                contract_workstream = workstream if workstream is not None else _empty_workstream()
                 contract = ScopeContractBuilder(config).build(
                     step, contract_workstream, role_card, scope_map=scope_map
                 )
@@ -343,8 +353,21 @@ def _resolve_role_card(
     if owner_role:
         card = role_cards.get(owner_role)
         if card is not None:
+            logger.warning(
+                "No role card found for step %r (agent %r); using "
+                "workstream owner %r's card instead.",
+                step.step_id,
+                step.agent_name,
+                owner_role,
+            )
             return card
 
+    logger.warning(
+        "No role card found for step %r (agent %r); using a minimal "
+        "fallback card.",
+        step.step_id,
+        step.agent_name,
+    )
     warnings.append(
         f"No role card found for step {step.step_id!r} (agent "
         f"{step.agent_name!r}); using a minimal fallback card."

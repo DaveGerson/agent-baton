@@ -79,6 +79,12 @@ def _empty_registry() -> KnowledgeRegistry:
 
 
 def _registry_with_review_rubric(tmp_path: Path) -> KnowledgeRegistry:
+    """A registry with ``review-rubric`` plus the two default
+    ``required_for_code_steps`` packs (``coding-conventions``,
+    ``testing-strategy``) -- the latter two exist so
+    ``test_review_bundle_integration`` can assert they are attached to
+    implementation steps but never leak into review-step bundles (see
+    that test's docstring)."""
     pack_dir = tmp_path / "knowledge" / "review-rubric"
     pack_dir.mkdir(parents=True)
     (pack_dir / "knowledge.yaml").write_text(
@@ -91,6 +97,35 @@ def _registry_with_review_rubric(tmp_path: Path) -> KnowledgeRegistry:
         "---\nname: rubric\ndescription: Review rubric\n---\n\n# Rubric\n",
         encoding="utf-8",
     )
+
+    coding_dir = tmp_path / "knowledge" / "coding-conventions"
+    coding_dir.mkdir(parents=True)
+    (coding_dir / "knowledge.yaml").write_text(
+        "name: coding-conventions\n"
+        "description: Project coding conventions.\n"
+        "target_agents: [backend-engineer]\n",
+        encoding="utf-8",
+    )
+    (coding_dir / "conventions.md").write_text(
+        "---\nname: conventions\ndescription: Coding conventions\n---\n\n"
+        "# Conventions\n",
+        encoding="utf-8",
+    )
+
+    testing_dir = tmp_path / "knowledge" / "testing-strategy"
+    testing_dir.mkdir(parents=True)
+    (testing_dir / "knowledge.yaml").write_text(
+        "name: testing-strategy\n"
+        "description: Project testing strategy.\n"
+        "target_agents: [test-engineer]\n",
+        encoding="utf-8",
+    )
+    (testing_dir / "strategy.md").write_text(
+        "---\nname: strategy\ndescription: Testing strategy\n---\n\n"
+        "# Strategy\n",
+        encoding="utf-8",
+    )
+
     registry = KnowledgeRegistry()
     registry.load_directory(tmp_path / "knowledge")
     return registry
@@ -204,12 +239,47 @@ def test_composition_order(tmp_path: Path) -> None:
 def test_review_bundle_integration(tmp_path: Path) -> None:
     """Deferred PRD M6 case: a review step's context bundle includes the
     latest phase handoff ref (when a prior phase exists) and the
-    review-rubric pack when the registry has it."""
+    review-rubric pack when the registry has it.
+
+    Also pins the absence half of review-bundle gating (Wave 3 review Fix
+    2): ``knowledge_packs.required_for_code_steps`` (``coding-conventions``,
+    ``testing-strategy``) must never leak into a review step's bundle even
+    though the registry has both packs available -- they are attached only
+    to implementation steps (``step_type in {"developing", "testing"}``),
+    never to review steps (``step_type="reviewing"``, whose knowledge comes
+    exclusively from the review role card's ``required_knowledge_packs``,
+    i.e. ``review-rubric``). See ``KnowledgePlanBuilder``'s
+    ``_IMPLEMENTATION_STEP_TYPES`` gate and
+    ``TeamBlueprintBuilder._build_review_role_card``.
+    """
     plan = _two_phase_plan()
+    config = ManagerConfig()
     registry = _registry_with_review_rubric(tmp_path)
-    planner = _planner(tmp_path, registry=registry)
+    planner = _planner(tmp_path, config=config, registry=registry)
 
     artifacts = planner.build(plan, plan.task_summary)
+
+    required_for_code_steps = set(config.knowledge_packs.required_for_code_steps)
+
+    # Absence half: review-step bundles never carry a
+    # required_for_code_steps pack name, even though the registry has both
+    # available (added to _registry_with_review_rubric above).
+    for review_step_id in ("review-1", "review-2", "review-2-final"):
+        bundle = artifacts.context_bundles[review_step_id]
+        bundle_pack_names = {p.name for p in bundle.knowledge_packs}
+        assert bundle_pack_names.isdisjoint(required_for_code_steps), (
+            f"{review_step_id} bundle unexpectedly carries a "
+            f"required_for_code_steps pack: {bundle_pack_names & required_for_code_steps}"
+        )
+
+    # Presence half: the implementation steps DO carry them.
+    for impl_step_id in ("1.1", "2.1"):
+        bundle = artifacts.context_bundles[impl_step_id]
+        bundle_pack_names = {p.name for p in bundle.knowledge_packs}
+        assert required_for_code_steps <= bundle_pack_names, (
+            f"{impl_step_id} bundle missing required_for_code_steps packs: "
+            f"{required_for_code_steps - bundle_pack_names}"
+        )
 
     paths = ManagerArtifactPaths(tmp_path / ".claude" / "team-context", plan.task_id)
 

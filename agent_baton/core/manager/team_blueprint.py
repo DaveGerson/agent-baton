@@ -53,11 +53,17 @@ to reverse-engineer them from behavior):
    *headers*, in order, are what's normative; per-role content is
    necessarily data-driven.
 5. **The adversarial-review role card is a fixed template**
-   (mission/owns/does_not_own from the plan's Task 6 instructions
-   verbatim) with ``required_knowledge_packs=["review-rubric"]`` -- not
-   computed from the registry (that's M5's ``KnowledgePlanBuilder``) but
-   matching the PRD §20 example brief ("review-rubric -- required for
-   adversarial review").
+   (owns/does_not_own from the plan's Task 6 instructions verbatim) with
+   ``required_knowledge_packs=["review-rubric"]`` -- not computed from the
+   registry (that's M5's ``KnowledgePlanBuilder``) but matching the PRD
+   §20 example brief ("review-rubric -- required for adversarial
+   review"). ``mission`` is the one field that differs between the two
+   review role cards this template produces (see :meth:`_review_role_name`
+   / :meth:`_project_review_role_name`): the phase-completion review role
+   gets "Adversarial phase review", the project-completion review role
+   gets "Adversarial project-completion review" -- distinct strings so a
+   manager brief or role-card listing that shows both roles never implies
+   they review the same scope.
 
 Determinism: all iteration is over ordered lists (``plan.phases``,
 ``phase.steps``, ``scope_map.workstreams``) or dicts built by inserting in
@@ -140,12 +146,16 @@ class TeamBlueprintBuilder:
 
         review_role = self._review_role_name()
         if review_role is not None and review_role not in role_cards:
-            role_cards[review_role] = self._build_review_role_card(review_role)
+            role_cards[review_role] = self._build_review_role_card(
+                review_role, mission="Adversarial phase review"
+            )
             role_order.append(review_role)
 
         project_review_role = self._project_review_role_name()
         if project_review_role is not None and project_review_role not in role_cards:
-            role_cards[project_review_role] = self._build_review_role_card(project_review_role)
+            role_cards[project_review_role] = self._build_review_role_card(
+                project_review_role, mission="Adversarial project-completion review"
+            )
             role_order.append(project_review_role)
 
         blueprint = TeamBlueprint(
@@ -369,11 +379,11 @@ class TeamBlueprintBuilder:
             return self.config.policies.review_agents.project_review
         return None
 
-    def _build_review_role_card(self, role: str) -> RoleCard:
+    def _build_review_role_card(self, role: str, *, mission: str) -> RoleCard:
         return RoleCard(
             role=role,
             agent_name=role,
-            mission="Adversarial phase review",
+            mission=mission,
             owns=["phase review verdicts"],
             does_not_own=["implementation"],
             required_knowledge_packs=list(_REVIEW_ROLE_KNOWLEDGE_PACKS),

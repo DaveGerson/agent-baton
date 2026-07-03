@@ -280,6 +280,7 @@ def test_adversarial_off_no_review_role() -> None:
 
     role_names = {card.role for card in blueprint.roles}
     assert config.policies.review_agents.adversarial_review not in role_names
+    assert config.policies.review_agents.project_review not in role_names
 
 
 def test_blueprint_round_trip() -> None:

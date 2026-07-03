@@ -458,6 +458,32 @@ def _render_manager_mode_explain_section(manager_artifacts, manager_config) -> s
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _print_manager_mode_artifacts(ctx_dir: Path, plan: MachinePlan, manager_artifacts) -> None:
+    """Print the ``Artifacts:`` block for a manager-mode ``--save`` run.
+
+    Matches PRD §20's example shape: an ``Artifacts:`` header followed by
+    one indented path per line. Reuses ``preview_paths`` (see
+    ``agent_baton.core.manager.artifacts``), which mirrors ``write_all``'s
+    traversal order exactly, so this reports precisely what was just
+    persisted to disk -- charter, scope map, team blueprint, role cards,
+    knowledge plan, scope contracts, context bundles, and the manager
+    brief (PRD's "full write_all list acceptable").
+
+    Manager-mode only: callers must gate this behind
+    ``manager_artifacts is not None`` so non-manager ``--save`` output
+    stays byte-identical.
+    """
+    from agent_baton.core.manager.artifacts import preview_paths
+    from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+    paths = ManagerArtifactPaths(ctx_dir, plan.task_id)
+    items = preview_paths(paths, manager_artifacts)
+    print()
+    print("Artifacts:")
+    for artifact_path, _description in items:
+        print(f"  {artifact_path}")
+
+
 def handler(args: argparse.Namespace) -> None:
     # --dry-run + --save are mutually exclusive: don't let the user
     # accidentally believe nothing was written when --save is set, and
@@ -874,6 +900,8 @@ def handler(args: argparse.Namespace) -> None:
                 f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
             )
             print(f"Plan explanation: {explanation_path}")
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         elif getattr(args, "verbose", False):
             print(f"Plan saved: {ctx.plan_json_path} and {ctx.plan_path}")
@@ -881,6 +909,8 @@ def handler(args: argparse.Namespace) -> None:
             print()
             print(plan.to_markdown())
             print()
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         else:
             print(f"Plan saved: {json_path}")
@@ -891,6 +921,8 @@ def handler(args: argparse.Namespace) -> None:
                 f"Task ID: {plan.task_id} | Risk: {plan.risk_level} | "
                 f"Budget: {plan.budget_tier} | Phases: {n_phases} | Steps: {n_steps}"
             )
+            if manager_artifacts is not None:
+                _print_manager_mode_artifacts(ctx_dir, plan, manager_artifacts)
             print("Next: baton execute start")
         return
 
