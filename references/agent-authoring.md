@@ -5,11 +5,7 @@ description: Standard contract for authoring generated Agent Baton agent files.
 
 # Agent Authoring
 
-Use this reference when `talent-builder` creates or updates an agent. The
-legacy name `talent-manager` is a compatibility alias for `talent-builder`;
-prefer `talent-builder` in new docs and prompts, and only mention
-`talent-manager` when integrating with older workflows that still use that
-name.
+Use this reference when `talent-builder` creates or updates an agent.
 
 ## Generated-Agent Contract
 

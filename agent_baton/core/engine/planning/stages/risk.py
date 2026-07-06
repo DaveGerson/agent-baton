@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 class RiskStage:
     """Stage 3: knowledge setup + risk and sensitivity classification."""
 

@@ -77,10 +77,6 @@ generated-agent contract in [`references/agent-authoring.md`](../references/agen
 |-------|-------|----------|
 | `talent-builder` | opus | **Pillar 2 — compose the right team.** Researches a domain and creates a bespoke specialist agent + knowledge pack + skills, so no generalist drowns in whole-codebase context. |
 
-`talent-manager` is a compatibility alias for `talent-builder` in older docs,
-prompts, or integrations. Use `talent-builder` for new references unless a
-downstream compatibility surface explicitly requires the legacy name.
-
 ## Domain & governance
 
 | Agent | Model | Use when |

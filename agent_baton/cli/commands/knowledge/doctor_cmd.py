@@ -180,7 +180,8 @@ def handler(args: argparse.Namespace) -> None:
 
 def _run_doctor(args: argparse.Namespace) -> None:
     roots = _knowledge_roots_from_args(args)
-    issues, summary = validate_knowledge_roots(roots)
+    explicit = bool(getattr(args, "knowledge_root", None))
+    issues, summary = validate_knowledge_roots(roots, require_roots=explicit)
     payload = {
         "ok": not issues,
         "summary": summary,
@@ -239,12 +240,18 @@ def _run_resolve(args: argparse.Namespace) -> None:
 
 def validate_knowledge_roots(
     roots: Iterable[Path],
+    *,
+    require_roots: bool = False,
 ) -> tuple[list[DoctorIssue], dict[str, int]]:
     """Validate all pack directories under *roots*.
 
     The registry intentionally degrades on bad packs so planning can continue.
     Doctor is stricter: it reports the same tolerance points as actionable
     edits without changing runtime loading semantics.
+
+    With *require_roots* (explicit ``--knowledge-root`` arguments), a root
+    that does not exist is itself an issue; default roots are allowed to be
+    absent.
     """
     issues: list[DoctorIssue] = []
     summary = {
@@ -253,6 +260,21 @@ def validate_knowledge_roots(
         "documents": 0,
         "warnings": 0,
     }
+
+    if require_roots:
+        for root in roots:
+            resolved = root.expanduser()
+            if not resolved.is_dir():
+                issues.append(_issue(
+                    code="missing-root",
+                    path=resolved,
+                    pack="",
+                    message=(
+                        f"Knowledge root '{root}' does not exist or is not a "
+                        "directory. Fix the --knowledge-root argument or "
+                        "create the directory."
+                    ),
+                ))
 
     for root in _unique_existing_roots(roots):
         summary["roots"] += 1
@@ -454,9 +476,11 @@ def _declared_doc_exists(pack_dir: Path, rel_path: str) -> bool:
     doc_path = pack_dir / rel_path
     if doc_path.is_file():
         return True
-    if Path(rel_path).suffix:
+    # Only treat the declaration as extensionless when it does not already
+    # end in .md — Path.suffix would misread dotted stems like "notes.v2".
+    if rel_path.lower().endswith(".md"):
         return False
-    return doc_path.with_suffix(".md").is_file()
+    return doc_path.with_name(doc_path.name + ".md").is_file()
 
 
 def _read_doc_metadata(
@@ -551,7 +575,7 @@ def _load_knowledge_registry(raw_roots: list[str] | None = None) -> KnowledgeReg
     registry = KnowledgeRegistry()
     if raw_roots:
         for root in raw_roots:
-            registry.load_directory(Path(root), override=True)
+            registry.load_directory(Path(root).expanduser(), override=True)
     else:
         registry.load_default_paths()
     return registry

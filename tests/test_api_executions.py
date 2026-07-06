@@ -334,6 +334,36 @@ class TestRecordStep:
         assert r.status_code == 500
         assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
 
+    def test_unknown_backend_mid_run_keeps_execution_running(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mid-run strict backend errors are recoverable: status stays running.
+
+        Start stamps failed (nothing has run, re-POST the plan); mid-run the
+        misconfiguration is fixable via env, so completed work must remain
+        resumable. See _collect_next_actions in api/routes/executions.py.
+        """
+        monkeypatch.delenv("BATON_TEAMS_BACKEND", raising=False)
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
+        plan = make_plan_unlocking_team(task_id="strict-team-midrun")
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+        assert r.status_code == 201, r.text
+
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        r = client.post(
+            "/api/v1/executions/strict-team-midrun/record",
+            json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
+        )
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+        status = client.get("/api/v1/executions/strict-team-midrun")
+        assert status.status_code == 200
+        assert status.json()["status"] == "running"
+
     def test_record_on_nonexistent_task_returns_404(self, client: TestClient) -> None:
         r = client.post(
             "/api/v1/executions/no-such-task/record",

@@ -17,7 +17,9 @@ from agent_baton.core.engine.team_backends import (
     audit_agents_for_teammate_safety,
     build_team_readiness_diagnostics,
     check_resumability_constraints,
+    format_team_readiness_summary,
     select_team_backend,
+    write_team_readiness_report,
 )
 from agent_baton.models.execution import (
     MachinePlan,
@@ -307,6 +309,42 @@ class TestTeamReadinessDiagnostics:
         assert "fixed permissions" in warnings
         assert "skills/mcp" in warnings or "mcpservers" in warnings
         assert diagnostics["warning_count"] >= 5
+
+    def test_step_specific_warnings_precede_static_caveats(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = TestSpawnPromptFidelity()._nested_plan()
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=plan.phases[0].steps[0],
+            backend_name="claude-teams",
+            team_context_root=tmp_path,
+        )
+
+        # The dispatch summary caps warning_notes; actionable step-specific
+        # warnings must come before the static claude-teams caveats.
+        assert "nested team" in diagnostics.warnings[0]
+        assert "nested team" in format_team_readiness_summary(diagnostics)
+
+    def test_report_path_is_posix_relative(self, tmp_path: Path) -> None:
+        plan = _plan_with_team()
+        step = plan.phases[0].steps[0]
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=step,
+            backend_name="worktree",
+            team_context_root=tmp_path,
+        )
+
+        written = write_team_readiness_report(
+            diagnostics=diagnostics,
+            team_context_root=tmp_path,
+        )
+
+        assert written.report_path == (
+            f"teams/team-{step.step_id}/team-report.json"
+        )
+        assert "\\" not in written.report_path
 
 
 class TestSpawnPromptFidelity:

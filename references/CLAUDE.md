@@ -1,6 +1,6 @@
 # references/ — distributable reference procedures
 
-18 reference procedures installed into user projects under `.claude/references/`. Cross-cutting rules: [../CLAUDE.md](../CLAUDE.md).
+20 reference procedures installed into user projects under `.claude/references/`. Cross-cutting rules: [../CLAUDE.md](../CLAUDE.md).
 
 ## What a reference is
 
@@ -16,12 +16,14 @@ frameworks, escalation chains, formatting standards.
 | Engine protocol from the agent side | `baton-engine.md` |
 | Common Baton patterns | `baton-patterns.md` |
 | Adaptive execution heuristics | `adaptive-execution.md` |
+| Agent authoring contract for generated agents | `agent-authoring.md` |
 | Agent routing rules | `agent-routing.md` |
 | Communication protocols | `comms-protocols.md` |
 | Compliance & audit chain | `compliance-audit-chain.md` |
 | Cost / budget rules | `cost-budget.md` |
 | Decision framework | `decision-framework.md` |
 | Doc generation conventions | `doc-generation.md` |
+| Evidence bundles (produce, verify, interpret) | `evidence-bundle.md` |
 | Failure handling | `failure-handling.md` |
 | Git strategy | `git-strategy.md` |
 | Guardrail presets | `guardrail-presets.md` |

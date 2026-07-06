@@ -103,6 +103,17 @@ GOLDEN_CASES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _clear_planner_gate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Golden shapes assume default gate behavior; strip ambient overrides."""
+    for var in (
+        "BATON_DEV_MODE",
+        "BATON_PLANNER_WARN_ONLY",
+        "BATON_PLANNER_HARD_GATE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.mark.parametrize(("case_id", "prompt", "kwargs"), GOLDEN_CASES)
 def test_representative_plan_shapes_match_golden_snapshots(
     case_id: str, prompt: str, kwargs: dict[str, Any]

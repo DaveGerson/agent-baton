@@ -17,7 +17,7 @@ This file is read by every Claude Code agent dispatched inside this repo. It is 
 ```
 agent_baton/       Python package (the orchestration engine)
 agents/            Distributable agent definitions (30 .md)
-references/        Distributable reference procedures (19 .md)
+references/        Distributable reference procedures (20 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
 scripts/           install.sh, install.ps1, record_spec_audit_beads.py
 tests/             pytest suite

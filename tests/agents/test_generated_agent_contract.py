@@ -65,22 +65,24 @@ def test_bundled_talent_builder_matches_source_agent() -> None:
     assert bundled.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
-def test_agent_authoring_reference_defines_contract_and_alias() -> None:
+def test_agent_authoring_reference_defines_contract() -> None:
     text = _read("references/agent-authoring.md")
 
     assert "# Agent Authoring" in text
-    assert "`talent-manager`" in text
+    # talent-manager was never resolvable in the AgentRegistry; docs must
+    # not advertise the alias.
+    assert "talent-manager" not in text
     assert "`talent-builder`" in text
     _assert_contract_fields(text)
     _assert_contract_sections(text)
 
 
-def test_agent_roster_links_contract_and_documents_talent_manager_alias() -> None:
+def test_agent_roster_links_contract_without_phantom_alias() -> None:
     text = _read("docs/agent-roster.md")
 
     assert "references/agent-authoring.md" in text
     assert "permissionMode" in text
-    assert "`talent-manager`" in text
+    assert "talent-manager" not in text
     assert "`talent-builder`" in text
 
 

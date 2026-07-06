@@ -214,7 +214,8 @@ def _generate_starter_plan(
 
     knowledge_registry = KnowledgeRegistry()
     try:
-        knowledge_registry.load_default_paths()
+        # Load project-scoped packs from the quickstart target repo, not cwd.
+        knowledge_registry.load_default_paths(project_root=repo_root)
     except Exception:
         # KnowledgeRegistry is best-effort -- a fresh project may not have
         # any documents to load yet.

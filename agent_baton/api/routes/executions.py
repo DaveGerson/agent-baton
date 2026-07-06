@@ -470,6 +470,13 @@ def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
     method fails. Returns an empty list if both fail, except for strict
     team-backend configuration errors, which are surfaced to callers.
 
+    Deliberate semantic split for ``UnknownTeamBackendError``: at start
+    time the caller marks the execution failed (nothing has run, the plan
+    can be re-POSTed), but mid-run the 500 leaves status ``running`` — the
+    error is a recoverable env misconfiguration and completed work must
+    stay resumable. Pinned by
+    ``test_unknown_backend_mid_run_keeps_execution_running``.
+
     Args:
         engine: The ``ExecutionEngine`` to query.
 

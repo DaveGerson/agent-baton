@@ -512,7 +512,8 @@ def build_team_readiness_diagnostics(
     warnings: list[str] = []
 
     if backend_name == ClaudeTeamsBackend.name:
-        warnings.extend(CLAUDE_TEAMS_CAVEATS)
+        # Step-specific warnings come first: the dispatch summary caps
+        # warning_notes, and the static caveats would otherwise consume it.
         if nested_team_count:
             warnings.append(
                 f"team has {nested_team_count} nested team(s); claude-teams "
@@ -532,6 +533,7 @@ def build_team_readiness_diagnostics(
                     f"agent {agent_name} declares {'/'.join(fields)} "
                     "frontmatter; claude-teams teammates will miss it"
                 )
+        warnings.extend(CLAUDE_TEAMS_CAVEATS)
 
     shared_contracts = [
         {
@@ -572,9 +574,9 @@ def write_team_readiness_report(
     team_dir.mkdir(parents=True, exist_ok=True)
     report = team_dir / "team-report.json"
     try:
-        report_path = str(report.relative_to(team_context_root))
+        report_path = report.relative_to(team_context_root).as_posix()
     except ValueError:
-        report_path = str(report)
+        report_path = report.as_posix()
     diagnostics = diagnostics.with_report_path(report_path)
     report.write_text(
         json.dumps(diagnostics.to_dict(), indent=2, sort_keys=True) + "\n",

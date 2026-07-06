@@ -708,6 +708,14 @@ def _git(args: list[str], cwd: Path) -> dict[str, Any]:
     }
 
 
+# os.access(W_OK) reads POSIX permission bits only; on Windows it ignores
+# NTFS ACLs, so a directory can pass this check yet still refuse writes.
+_WRITABLE_CHECK_CAVEAT = (
+    "metadata check only; NTFS ACLs are not evaluated, so writes may still "
+    "be denied at runtime"
+)
+
+
 def _check_team_context(project_root: Path) -> DoctorCheck:
     path = project_root / ".claude" / "team-context"
     if not path.is_dir():
@@ -720,6 +728,7 @@ def _check_team_context(project_root: Path) -> DoctorCheck:
                 "path": str(path),
                 "writable": False,
                 "writable_check": "metadata-only",
+                "writable_check_caveat": _WRITABLE_CHECK_CAVEAT,
             },
         )
     writable, error = _probe_writable_directory(path)
@@ -733,6 +742,7 @@ def _check_team_context(project_root: Path) -> DoctorCheck:
                 "path": str(path),
                 "writable": False,
                 "writable_check": "metadata-only",
+                "writable_check_caveat": _WRITABLE_CHECK_CAVEAT,
             },
         )
     return DoctorCheck(
@@ -744,6 +754,7 @@ def _check_team_context(project_root: Path) -> DoctorCheck:
             "path": str(path),
             "writable": True,
             "writable_check": "metadata-only",
+            "writable_check_caveat": _WRITABLE_CHECK_CAVEAT,
         },
     )
 

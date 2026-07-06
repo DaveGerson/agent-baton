@@ -988,7 +988,9 @@ def test_documented_terminology_is_canonical() -> None:
     )
 
     assert "`talent-builder`" in roster
-    assert "`talent-manager` is a compatibility alias" in roster
+    # talent-manager was documented as an alias but never resolvable in the
+    # AgentRegistry; the claim was removed rather than implemented.
+    assert "talent-manager" not in roster
     assert "knowledge.yaml" in terminology
     assert "Knowledge pack" in terminology
     assert "Assurance pack" in terminology

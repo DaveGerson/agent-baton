@@ -20,6 +20,7 @@ Commands are organized into functional groups:
 | **Observe** | Traces, usage, dashboards, telemetry | `dashboard`, `trace`, `usage`, `telemetry`, `context-profile`, `retro`, `context`, `cleanup` |
 | **Guardrails** | Risk, policy, compliance, validation | `classify`, `compliance`, `policy`, `escalations`, `validate`, `spec-check`, `detect` |
 | **Improve** | Scoring, learning, patterns, budgets | `scores`, `learn`, `patterns`, `budget`, `changelog`, `anomalies` |
+| **Knowledge** | Knowledge pack validation, search, briefing, lifecycle, effectiveness | `knowledge doctor`, `knowledge search`, `knowledge resolve`, `knowledge brief`, `knowledge harvest`, `knowledge stale`, `knowledge deprecate`, `knowledge retire`, `knowledge sweep`, `knowledge usage`, `knowledge effectiveness`, `knowledge ranking`, `knowledge ab` |
 | **Distribute** | Packaging, publishing, installation | `package`, `publish`, `pull`, `install`, `transfer` |
 | **Agents** | Agent discovery, routing, events | `agents`, `route`, `events`, `incident` |
 | **PMO** | Portfolio management overlay | `pmo serve`, `pmo status`, `pmo add`, `pmo health` |
@@ -1652,6 +1653,271 @@ baton learn improve --run
 # Instantiate and execute the learning cycle
 baton learn run-cycle --run
 ```
+
+---
+
+## Knowledge Commands
+
+### `baton knowledge`
+
+Knowledge utilities: validate packs, search metadata, simulate resolver
+attachments, generate codebase briefings, harvest knowledge from existing
+artefacts, manage item lifecycle, and report effectiveness. This is a
+command group with subcommands.
+
+```
+baton knowledge SUBCOMMAND [options]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `doctor` | Validate knowledge packs and print actionable warnings |
+| `search` | Search knowledge metadata with the registry TF-IDF index |
+| `resolve` | Simulate knowledge attachments for an agent and task |
+| `brief` | Generate a concise codebase briefing for new agents |
+| `harvest` | Harvest knowledge entries from existing artefacts (ADRs, PR reviews) |
+| `stale` | List active knowledge items that look stale |
+| `deprecate` | Flag a knowledge item as deprecated |
+| `retire` | Retire a knowledge item immediately (skips grace window) |
+| `sweep` | Auto-retire deprecated items whose grace period has elapsed |
+| `usage` | Show usage count and last-used time for a single item |
+| `effectiveness` | Show per-doc effectiveness + ROI scores |
+| `ranking` | Show all known docs ranked by historical effectiveness |
+| `ab` | Manage knowledge A/B experiments |
+
+#### `baton knowledge doctor`
+
+Validate knowledge packs and print actionable warnings (missing or
+invalid `knowledge.yaml`, declared documents that don't exist, empty
+descriptions, duplicate document names, documents too large for inline
+delivery). Runtime loading tolerates these issues; doctor reports them
+as actionable edits without changing loading semantics.
+
+```
+baton knowledge doctor [--knowledge-root DIR ...] [--format text|json] [--json] [--strict]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--knowledge-root DIR` | global + project | Knowledge root to validate; repeatable (default: `~/.claude/knowledge` and `./.claude/knowledge`) |
+| `--format FORMAT` | `text` | Output format: `text` or `json` |
+| `--json` | -- | Alias for `--format json` |
+| `--strict` | false | Exit non-zero when any warning is found |
+
+#### `baton knowledge search`
+
+Search knowledge metadata with the registry TF-IDF index.
+
+```
+baton knowledge search QUERY... [options]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `QUERY` | Yes | -- | Search query text (one or more words) |
+| `--knowledge-root DIR` | No | global + project | Knowledge root to search; repeatable |
+| `--limit N` | No | `10` | Maximum results to return |
+| `--format FORMAT` | No | `table` | Output format: `table` or `json` |
+| `--json` | No | -- | Alias for `--format json` |
+
+#### `baton knowledge resolve`
+
+Simulate the knowledge attachments the resolver would produce for an
+agent and task, without dispatching anything.
+
+```
+baton knowledge resolve --agent NAME --task TEXT [options]
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--agent NAME` | Yes | -- | Agent name |
+| `--task TEXT` | Yes | -- | Task description |
+| `--knowledge-root DIR` | No | global + project | Knowledge root to load; repeatable |
+| `--task-type TYPE` | No | -- | Optional task type used by resolver keyword extraction |
+| `--risk LEVEL` | No | `LOW` | Risk level passed through to resolver simulation |
+| `--knowledge-pack PACK` | No | -- | Explicit pack to include; repeatable |
+| `--knowledge PATH` | No | -- | Explicit document path to include; repeatable |
+| `--format FORMAT` | No | `table` | Output format: `table` or `json` |
+| `--json` | No | -- | Alias for `--format json` |
+
+#### `baton knowledge brief`
+
+Generate a concise codebase briefing (stack, layout, entry points,
+conventions, tests, health snapshot) that dispatched agents can read
+instead of re-discovering the basics every run.
+
+```
+baton knowledge brief [--project DIR] [--save] [--format markdown|json]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--project DIR` | cwd | Project directory to brief |
+| `--save` | false | Write to `.claude/team-context/codebase-brief.md` (or `codebase-brief.json` with `--format json`) instead of stdout |
+| `--format FORMAT` | `markdown` | Output format: `markdown` or `json` |
+
+#### `baton knowledge harvest`
+
+Convert existing artefacts into knowledge entries. Both harvesters are
+idempotent: re-running on unchanged input is a no-op.
+
+```
+baton knowledge harvest adrs [--source-dir DIR] [--target-pack PACK] [--knowledge-root DIR]
+baton knowledge harvest reviews --pr N [--repo OWNER/NAME] [--knowledge-root DIR]
+```
+
+`adrs` walks a docs tree for Architecture Decision Records and converts
+each into a knowledge document:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--source-dir DIR` | `docs/` | Root to walk for ADR markdown files |
+| `--target-pack PACK` | `decisions` | Knowledge pack name to write into |
+| `--knowledge-root DIR` | `.claude/knowledge` | Override the knowledge root |
+
+`reviews` pulls PR review comments via the `gh` CLI and distils salient
+ones into a lessons document:
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--pr N` | Yes | -- | Pull-request number to harvest |
+| `--repo OWNER/NAME` | No | auto-detect via `gh` | Repository slug |
+| `--knowledge-root DIR` | No | `.claude/knowledge` | Override the knowledge root |
+
+#### `baton knowledge stale`
+
+List active knowledge items that look stale. Lifecycle subcommands
+(`stale`, `deprecate`, `retire`, `sweep`, `usage`) operate on the
+project database at `.claude/team-context/baton.db`.
+
+```
+baton knowledge stale [--days N] [--max-usage N]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--days N` | `90` | Days since last use threshold |
+| `--max-usage N` | `5` | Items with a usage count below this are eligible |
+
+#### `baton knowledge deprecate`
+
+Flag a knowledge item as deprecated; schedules retirement after the
+grace period elapses.
+
+```
+baton knowledge deprecate KNOWLEDGE_ID [--grace N] [--reason TEXT]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `KNOWLEDGE_ID` | Yes | -- | Item ID in the form `<pack_name>/<doc_name>` |
+| `--grace N` | No | `30` | Grace period in days before auto-retirement |
+| `--reason TEXT` | No | -- | Optional human-readable reason recorded with the deprecation |
+
+#### `baton knowledge retire`
+
+Retire a knowledge item immediately, skipping the grace window.
+
+```
+baton knowledge retire KNOWLEDGE_ID
+```
+
+#### `baton knowledge sweep`
+
+Auto-retire deprecated items whose grace period has elapsed. Safe to
+schedule (e.g. in a daily cron) — it only retires items the operator
+has already deprecated.
+
+```
+baton knowledge sweep
+```
+
+#### `baton knowledge usage`
+
+Show lifecycle state, usage count, last-used time, and staleness for a
+single item.
+
+```
+baton knowledge usage KNOWLEDGE_ID
+```
+
+#### `baton knowledge effectiveness`
+
+Show per-doc effectiveness + ROI scores as a sorted Markdown table or
+JSON document.
+
+```
+baton knowledge effectiveness [--pack PACK] [--since-days N] [--format markdown|json] [--stale] [--threshold-days N]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pack PACK` | all packs | Restrict the report to a single knowledge pack |
+| `--since-days N` | `30` | Rolling window in days for the effectiveness rollup (`0` = all time) |
+| `--format FORMAT` | `markdown` | Output format: `markdown` or `json` |
+| `--stale` | false | Show only stale candidates |
+| `--threshold-days N` | `90` | Stale-by-age threshold in days (used with `--stale`) |
+
+#### `baton knowledge ranking`
+
+Show all known docs ranked by historical effectiveness. Reads
+`v_knowledge_effectiveness` from the central database.
+
+```
+baton knowledge ranking [--output table|json] [--db PATH]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output FORMAT` | `table` | Output format: `table` or `json` |
+| `--db PATH` | `~/.baton/central.db` | Path to the SQLite database |
+
+#### `baton knowledge ab`
+
+Manage knowledge A/B experiments.
+
+```
+baton knowledge ab list
+baton knowledge ab create --kid KNOWLEDGE_ID --a PATH_A --b PATH_B [--ratio RATIO]
+baton knowledge ab results EXPERIMENT_ID
+baton knowledge ab stop EXPERIMENT_ID
+```
+
+`create` flags:
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--kid KNOWLEDGE_ID` | Yes | -- | Canonical pack/doc id (e.g. `security/owasp.md`) |
+| `--a PATH_A` | Yes | -- | Relative path to the variant A document |
+| `--b PATH_B` | Yes | -- | Relative path to the variant B document |
+| `--ratio RATIO` | No | `0.5` | Fraction routed to variant A (between 0.0 and 1.0) |
+
+**Examples:**
+
+```bash
+# Validate knowledge packs, failing CI on warnings
+baton knowledge doctor --strict
+
+# Search the knowledge index
+baton knowledge search payment idempotency --limit 5
+
+# Preview what the resolver would attach for a dispatch
+baton knowledge resolve --agent backend-engineer--python \
+    --task "Add JWT authentication middleware" --risk MEDIUM
+
+# Generate and save a codebase brief
+baton knowledge brief --save
+
+# Harvest ADRs into the decisions pack
+baton knowledge harvest adrs --source-dir docs
+
+# Lifecycle: deprecate with a 14-day grace period, then sweep later
+baton knowledge deprecate security/owasp --grace 14 --reason "superseded"
+baton knowledge sweep
+```
+
+**Related:** `baton plan --knowledge / --knowledge-pack`, `baton learn`
 
 ---
 

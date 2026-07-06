@@ -115,7 +115,7 @@ between Claude and the engine — specifically `_print_action()` in
 ```
                     ┌────────────────────────────────────┐
                     │           ORCHESTRATOR              │
-                    │  Reads 19 reference procedures      │
+                    │  Reads 20 reference procedures      │
                     └───────────────┬────────────────────┘
                                     │
                     baton plan ─────┴───── baton execute
@@ -158,7 +158,7 @@ scripts/install.sh          # Linux/macOS
 
 The installer prompts for scope: user-level (`~/.claude/`) for all projects, or
 project-level (`.claude/`) for the current project only. It copies 30 agent
-definitions, 19 reference procedures, a template `CLAUDE.md`, `settings.json`
+definitions, 20 reference procedures, a template `CLAUDE.md`, `settings.json`
 hooks, and skills. It also attempts to install `bd` (the bead backend) via npm or
 Homebrew.
 
@@ -875,7 +875,7 @@ on every invocation. Update scripts to use the new paths.
 
 ```
 agents/            <- 30 agent definitions (Markdown + YAML frontmatter)
-references/        <- 19 reference procedures (shared knowledge)
+references/        <- 20 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md, settings.json, skills, packs, and playbooks
 scripts/           <- Install scripts (Linux/macOS + Windows) and maintenance
 docs/              <- Architecture docs, ADRs, invariants, CLI/API reference,
@@ -1003,7 +1003,7 @@ Requires Python 3.10+. Runtime dependencies: `pyyaml`, `pydantic`, `cryptography
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine, all 30
-agents, 19 reference procedures, knowledge delivery, bead memory system, PMO
+agents, 20 reference procedures, knowledge delivery, bead memory system, PMO
 subsystem with end-to-end plan-to-merge workflow, REST API with webhooks,
 federated sync, event system, learning automation, and the improvement pipeline
 are implemented and tested.

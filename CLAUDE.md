@@ -35,7 +35,7 @@ Apply these to every change before declaring it done:
 | `agent_baton/core/federate/` | Spec Federation subsystem: `SpecDraftStore` (SQLite), `enrich.py` (DataClassifier + cost forecast), `importers.py` (GitHub/ADO importers) | — |
 | `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
 | `agents/` | 30 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
-| `references/` | 19 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
+| `references/` | 20 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
 | `templates/` | `CLAUDE.md` + `settings.json` + skills installed to user projects | (do not modify `templates/CLAUDE.md` — it's a distributable artifact) |
 | `pmo-ui/` | React/Vite frontend served at `/pmo/` | [pmo-ui/CLAUDE.md](pmo-ui/CLAUDE.md) |
 | `tests/` | pytest suite (unit + integration) | [tests/CLAUDE.md](tests/CLAUDE.md) |

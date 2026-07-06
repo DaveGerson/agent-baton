@@ -69,6 +69,9 @@ def read_active_task_id_from_db_copy(db_path: Path) -> ActiveTaskProbe:
             finally:
                 conn.close()
     except Exception as exc:
+        # Deliberate exception to the "never swallow OperationalError" rule:
+        # this read-only diagnostic probe surfaces failures as a degraded
+        # ActiveTaskProbe in doctor check details instead of raising.
         return ActiveTaskProbe(
             task_id=None,
             db_path=db_path,

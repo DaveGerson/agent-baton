@@ -305,3 +305,60 @@ def test_doctor_reports_non_utf8_doc_as_unreadable_doc(
         issue["code"] == "empty-doc-description"
         for issue in data["issues"]
     )
+
+
+def test_declared_doc_with_dotted_stem_resolves_md_fallback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "dotted-stem"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "dotted-stem",
+                "description": "Dotted stem fixtures",
+                "documents": ["notes.v2"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_doc(
+        pack / "notes.v2.md",
+        name="notes.v2",
+        description="Versioned notes",
+        tags=["versioned"],
+    )
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert not any(
+        issue["code"] == "missing-declared-file" for issue in data["issues"]
+    )
+
+
+def test_strict_missing_explicit_root_emits_issue_and_fails(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    missing_root = tmp_path / "does-not-exist"
+
+    rc = _run_cli([
+        "knowledge",
+        "doctor",
+        "--json",
+        "--knowledge-root",
+        str(missing_root),
+        "--strict",
+    ])
+    data = json.loads(capsys.readouterr().out)
+    missing = [
+        issue for issue in data["issues"] if issue["code"] == "missing-root"
+    ]
+
+    assert rc == 1
+    assert len(missing) == 1
+    assert "does-not-exist" in missing[0]["message"]

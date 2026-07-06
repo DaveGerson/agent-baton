@@ -705,7 +705,13 @@ def handler(args: argparse.Namespace) -> None:
             print("Next: baton execute start")
         return
 
-    if args.explain:
+    if args.explain and args.json:
+        # Honor both flags: keep the payload machine-parseable and attach
+        # the explanation instead of silently dropping --json.
+        payload = plan.to_dict()
+        payload["explanation"] = planner.explain_plan(plan)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif args.explain:
         print(planner.explain_plan(plan))
     elif args.json:
         print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False))
