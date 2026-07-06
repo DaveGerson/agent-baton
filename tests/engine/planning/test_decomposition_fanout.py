@@ -389,3 +389,57 @@ class TestDecompositionPropagatesResearchConcerns:
         assert draft.concerns == [], (
             "draft.concerns must stay empty when research_concerns is None"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — Regression (bd-pz4 part 2): explicit complexity override must
+# pair the roster with the phase list it actually built
+# ---------------------------------------------------------------------------
+
+class TestComplexityOverrideRosterPhasePairing:
+    """``create_plan(complexity="medium")`` takes the explicit-override
+    path: phases come from ``KeywordClassifier._select_phases()`` (which
+    drops "Review" at medium complexity), while the roster comes from the
+    static ``rules/default_agents.py`` ``DEFAULT_AGENTS`` table (which
+    unconditionally includes ``code-reviewer`` for e.g. "new-feature").
+
+    Without pairing the two, a rostered ``code-reviewer`` with no Review
+    phase to live in gets folded into the Implement phase instead, and
+    ``ValidationStage``'s ``review_missing`` hard gate then rejects the
+    plan with ``PlanQualityError``.
+    """
+
+    def test_medium_override_with_default_reviewer_builds_without_review_missing(
+        self,
+    ) -> None:
+        from agent_baton.core.engine.planner import IntelligentPlanner
+
+        # No PlanQualityError should be raised on this path.
+        plan = IntelligentPlanner().create_plan(
+            "Add a reporting endpoint with tests and docs",
+            task_type="new-feature",
+            complexity="medium",
+        )
+
+        # KeywordClassifier._select_phases drops "Review" at medium
+        # complexity for "new-feature" -- confirm no Review phase exists.
+        phase_names = {
+            p.name.lower().split(":")[0].strip() for p in plan.phases
+        }
+        assert "review" not in phase_names, (
+            "medium-complexity 'new-feature' plans should have no Review "
+            "phase (KeywordClassifier drops it at this tier)"
+        )
+
+        # ...and therefore code-reviewer (rostered unconditionally by
+        # DEFAULT_AGENTS["new-feature"]) must have been dropped from the
+        # roster rather than stranded inside the Implement phase.
+        all_agents = {
+            step.agent_name.split("--")[0]
+            for phase in plan.phases
+            for step in phase.steps
+        }
+        assert "code-reviewer" not in all_agents, (
+            "code-reviewer must be dropped from the roster when the "
+            "complexity-override phase list has no Review phase to hold it"
+        )
