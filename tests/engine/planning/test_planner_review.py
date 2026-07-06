@@ -4,6 +4,17 @@ Covers three scenarios:
 1. Flag unset → HeadlessClaude is never constructed.
 2. Flag set to a recognised model alias → review runs with the correct model.
 3. Flag set to an unrecognised value → warning logged, HeadlessClaude not constructed.
+
+These tests target ``IntelligentPlanner._review_plan_with_llm`` in isolation
+from ``FallbackClassifier``'s *separate* ``TalentAgentClassifier`` ->
+``HeadlessClaude`` probe that the classification stage runs unconditionally
+(regardless of ``BATON_PLAN_REVIEW``) to decide between LLM-backed and
+keyword-heuristic classification. The planner's ``task_classifier`` is
+pinned to the deterministic ``KeywordClassifier`` -- the same pattern used
+by ``tests/e2e/test_manager_mode_planning.py`` -- so the single
+``HeadlessClaude`` mock installed in each test below observes only the
+post-pipeline review call under test, not the unrelated classification
+probe.
 """
 from __future__ import annotations
 
@@ -15,9 +26,17 @@ import pytest
 
 @pytest.fixture
 def planner():
-    """Build a fresh IntelligentPlanner for each test."""
+    """Build a fresh IntelligentPlanner for each test.
+
+    ``task_classifier=KeywordClassifier()`` bypasses ``FallbackClassifier``'s
+    default ``TalentAgentClassifier``, which would otherwise construct its
+    own ``HeadlessClaude`` instance during classification and confound the
+    ``HeadlessClaude`` mocks these tests install to observe the (unrelated)
+    ``BATON_PLAN_REVIEW`` review step.
+    """
+    from agent_baton.core.engine.classifier import KeywordClassifier
     from agent_baton.core.engine.planning.planner import IntelligentPlanner
-    return IntelligentPlanner()
+    return IntelligentPlanner(task_classifier=KeywordClassifier())
 
 
 class TestPlanReview:
