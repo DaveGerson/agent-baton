@@ -40,7 +40,10 @@ from agent_baton.models.execution import (
     ExecutionState,
     GateResult,
     MachinePlan,
+    PlanPhase,
+    PlanStep,
     StepResult,
+    TeamMember,
 )
 
 
@@ -724,3 +727,81 @@ class TestResumeParserDeclaresTakeoverFlags:
         ns = root.parse_args(["execute", "resume"])
         assert getattr(ns, "abort", None) is False
         assert getattr(ns, "no_rerun_gate", None) is False
+
+
+def _team_resume_plan() -> MachinePlan:
+    """Single-phase plan whose only step is a team step, so resume() walks
+    straight into _team_dispatch_action (which selects the team backend)."""
+    return MachinePlan(
+        task_id="team-resume-strict",
+        task_summary="team resume strict backend",
+        phases=[PlanPhase(
+            phase_id=1, name="Build",
+            steps=[PlanStep(
+                step_id="1.1", agent_name="team",
+                task_description="implement and review", model="sonnet",
+                team=[
+                    TeamMember(
+                        member_id="1.1.a", agent_name="backend-engineer",
+                        role="implementer", task_description="impl",
+                        model="sonnet",
+                    ),
+                    TeamMember(
+                        member_id="1.1.b", agent_name="code-reviewer",
+                        role="reviewer", task_description="review",
+                        model="sonnet",
+                    ),
+                ],
+            )],
+        )],
+    )
+
+
+class TestResumeUnknownStrictBackend:
+    """C3 regression: `baton execute resume` must translate an
+    UnknownTeamBackendError (raised through _team_dispatch_action when
+    BATON_TEAMS_BACKEND is unknown under BATON_TEAMS_BACKEND_STRICT=1) into a
+    clean, non-zero exit with the API's message shape — never a raw
+    traceback. The API maps this deliberately (executions.py:93-104); the CLI
+    previously had no handler.
+    """
+
+    def test_resume_unknown_strict_backend_clean_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-a-real-backend")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+
+        plan = _team_resume_plan()
+        state = ExecutionState(
+            task_id=plan.task_id, plan=plan,
+            current_phase=0, status="running",
+        )
+        StatePersistence(tmp_path, task_id=plan.task_id).save(state)
+
+        args = argparse.Namespace(
+            subcommand="resume",
+            task_id=plan.task_id,
+            output="text",
+            abort=False,
+            no_rerun_gate=False,
+            force_override=False,
+            override_justification="",
+        )
+        patches = _patches_for_run(tmp_path)
+        with (
+            patches[0], patches[1], patches[2], patches[3],
+            patches[4], patches[5], patches[6],
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _mod.handler(args)
+
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "Unknown BATON_TEAMS_BACKEND" in out
+        # No traceback leaked to the user.
+        assert "Traceback" not in out

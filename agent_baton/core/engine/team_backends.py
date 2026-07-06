@@ -318,13 +318,17 @@ class ClaudeTeamsBackend:
             team_context_root.parent.parent / "agents",  # repo agents/
         ]
         for agents_dir in candidate_dirs:
+            # Honor the FIRST EXISTING directory authoritatively: a present but
+            # clean .claude/agents must not be overridden by a stale divergent
+            # repo-level agents/ copy (and vice versa). Only fall through when
+            # the higher-priority directory is absent.
+            if not agents_dir.exists():
+                continue
             try:
                 flagged = audit_agents_for_teammate_safety(agents_dir)
             except Exception:  # noqa: BLE001 — degrade loudly, never throw
                 continue
-            scoped = {a: f for a, f in flagged.items() if a in team_agents}
-            if scoped:
-                return scoped
+            return {a: f for a, f in flagged.items() if a in team_agents}
         return {}
 
     def hook_record_command(

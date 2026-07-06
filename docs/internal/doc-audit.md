@@ -545,3 +545,37 @@ Code lives under `agent_baton/core/manager/`, `agent_baton/core/config/manager.p
 `agent_baton/cli/commands/knowledge/pack_cmds.py`. Tests live under
 `tests/manager/`, `tests/cli/`, `tests/e2e/` (see
 `docs/internal/manager-mode-pmo-design.md` "Testing").
+
+---
+
+## 2026-07-06 — Bug-fix wave doc sync: signal-forge 422 + doctor `plan_selection` + knowledge-doctor hardening (bd-ftd)
+
+Captured in:
+
+- **Public**:
+  - `docs/api-reference.md` — `422` `plan_quality_error` row added to the
+    Error Responses tables for `POST /pmo/forge/plan`,
+    `POST /pmo/forge/regenerate`, and `POST /pmo/signals/{signal_id}/forge`;
+    new §8 "Plan Quality Errors (422)" subsection documenting the
+    `plan_quality_error_detail()` response shape (`error`/`message`/`defects`).
+  - `docs/cli-reference.md` — new "Diagnostics Commands" / `baton doctor`
+    section (the top-level command had no prior entry) covering the
+    `planner_validation` check's `plan_selection` field
+    (`active-task` vs. `fallback-first-found`), the fallback caveat text,
+    and the `BATON_DB_PATH`-aware active-task probe; `baton knowledge
+    doctor` section updated for the `unreadable-pack` issue code, the
+    tightened `_KNOWN_NON_MD_EXTENSIONS` fallback (a declared `config.json`
+    is no longer satisfied by `config.json.md`), and de-duplicated
+    `--knowledge-root` missing-root reporting.
+
+No internal design doc accompanied this pass — it is a documentation-only
+sync for bug fixes already merged in commits `3e67452`, `1bf0cfc`,
+`129bac4`, `30283b5`, `e674e5d`, `c6ee617`, and `5dc5cc2` (bd-c40, bd-6cr,
+bd-j9f).
+
+Code lives in `agent_baton/api/routes/pmo.py` (`forge_plan`,
+`forge_regenerate`, `forge_signal`) + `agent_baton/api/planner_errors.py`,
+and `agent_baton/cli/commands/diagnostics_cmd.py` +
+`agent_baton/cli/commands/knowledge/doctor_cmd.py`. Tests live in
+`tests/test_api_pmo.py`, `tests/cli/test_doctor.py`, and
+`tests/knowledge/test_knowledge_doctor.py`.

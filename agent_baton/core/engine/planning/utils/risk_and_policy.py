@@ -136,6 +136,19 @@ def audit_coverage_requirement(
     if preset.lower() == "regulated data":
         return f"guardrail_preset={preset}"
 
+    # Pack-classified regulated tasks carry a ``pack:<name>`` preset rather
+    # than the ``Regulated Data`` literal (classifier.py:317-328, packs.py:120),
+    # so the exact-match branch above misses them.  Risk-gate to HIGH/CRITICAL
+    # so only genuinely sensitive pack tasks pull in an auditor.  ``risk_level``
+    # is a RiskLevel enum on a live ClassificationResult but a string when the
+    # classification is rebuilt from a persisted plan (_classification_from_plan);
+    # coerce via ``.value`` before comparing.  No registry lookups here.
+    if preset.startswith("pack:"):
+        risk = getattr(classification, "risk_level", None)
+        risk_name = str(getattr(risk, "value", risk) or "").upper()
+        if risk_name in ("HIGH", "CRITICAL"):
+            return f"guardrail_preset={preset}"
+
     for violation in policy_violations or []:
         rule = getattr(violation, "rule", None)
         if (

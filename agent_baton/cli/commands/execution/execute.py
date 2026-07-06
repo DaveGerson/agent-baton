@@ -30,6 +30,7 @@ from agent_baton.cli.colors import success, error as color_error, warning, info 
 from agent_baton.cli.errors import user_error, validation_error
 from agent_baton.core.engine.errors import ExecutionVetoed
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.team_backends import UnknownTeamBackendError
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.storage import get_project_storage
@@ -804,6 +805,18 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
 
 
 def handler(args: argparse.Namespace) -> None:
+    # UnknownTeamBackendError can surface from any engine call that walks a
+    # team step (start / next / resume / run) when BATON_TEAMS_BACKEND is
+    # unknown under BATON_TEAMS_BACKEND_STRICT=1. Catch it at the command
+    # entry so the CLI prints a clean message (matching the API's str(exc)
+    # mapping) and exits non-zero instead of surfacing a traceback.
+    try:
+        _dispatch(args)
+    except UnknownTeamBackendError as exc:
+        user_error(str(exc))
+
+
+def _dispatch(args: argparse.Namespace) -> None:
     if args.subcommand is None:
         # bd-8944: consolidated single validation_error with the full list of
         # registered subcommands (removed stale duplicate that was unreachable).

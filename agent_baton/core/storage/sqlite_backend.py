@@ -2209,9 +2209,14 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
             ``with conn:`` transaction block managed by the caller.
         plan: The plan to persist.
     """
+    # INSERT ... ON CONFLICT DO UPDATE (not INSERT OR REPLACE) so that an
+    # existing row's ``release_id`` survives a re-save. INSERT OR REPLACE
+    # is DELETE+INSERT under the hood (task_id is PRIMARY KEY), which wipes
+    # any column not in this statement's list -- including release_id,
+    # which is owned exclusively by release_store.tag_plan/untag_plan.
     conn.execute(
         """
-        INSERT OR REPLACE INTO plans
+        INSERT INTO plans
             (task_id, task_summary, risk_level, budget_tier,
              execution_mode, git_strategy, shared_context,
              pattern_source, plan_markdown, created_at,
@@ -2220,6 +2225,24 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
              classification_signals, classification_confidence,
              manager_mode, plan_diagnostics)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+            task_summary = excluded.task_summary,
+            risk_level = excluded.risk_level,
+            budget_tier = excluded.budget_tier,
+            execution_mode = excluded.execution_mode,
+            git_strategy = excluded.git_strategy,
+            shared_context = excluded.shared_context,
+            pattern_source = excluded.pattern_source,
+            plan_markdown = excluded.plan_markdown,
+            created_at = excluded.created_at,
+            explicit_knowledge_packs = excluded.explicit_knowledge_packs,
+            explicit_knowledge_docs = excluded.explicit_knowledge_docs,
+            intervention_level = excluded.intervention_level,
+            task_type = excluded.task_type,
+            classification_signals = excluded.classification_signals,
+            classification_confidence = excluded.classification_confidence,
+            manager_mode = excluded.manager_mode,
+            plan_diagnostics = excluded.plan_diagnostics
         """,
         (
             plan.task_id,

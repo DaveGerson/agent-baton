@@ -9,14 +9,25 @@ import pytest
 from agent_baton.core.engine.planner import IntelligentPlanner
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.services import PlannerServices
+from agent_baton.core.engine.planning.stages.risk import RiskStage
 from agent_baton.core.engine.planning.stages.validation import (
     PlanDefect,
     PlanQualityError,
     ValidationStage,
+    validate_assembled_plan,
+)
+from agent_baton.core.engine.planning.utils.risk_and_policy import (
+    audit_coverage_requirement,
+    requires_audit_coverage,
 )
 from agent_baton.core.govern.classifier import ClassificationResult, DataClassifier
 from agent_baton.models.enums import RiskLevel
-from agent_baton.models.execution import PlanPhase, PlanStep
+from agent_baton.models.execution import (
+    MachinePlan,
+    PlanPhase,
+    PlanStep,
+    TeamMember,
+)
 
 
 def _stub_services() -> PlannerServices:
@@ -326,3 +337,188 @@ class TestReviewAuditCoverage:
         assert "code-reviewer" in message
         assert "Review" in message
         assert "Remediation:" in message
+
+
+def _pack_classification(risk: object) -> SimpleNamespace:
+    """A pack-classified result (guardrail_preset='pack:<name>')."""
+    return SimpleNamespace(
+        guardrail_preset="pack:phi-hipaa",
+        risk_level=risk,
+        signals_found=["path:phi/"],
+        explanation="",
+        confidence="high",
+    )
+
+
+class TestA1PackClassifiedAuditCoverage:
+    """A1: pack-classified regulated tasks must pull in audit coverage.
+
+    Pack classification sets ``guardrail_preset='pack:<name>'`` (not the
+    ``Regulated Data`` literal), so the exact-match branch missed them and
+    both RiskStage auditor injection and the ValidationStage audit gate were
+    bypassed for pack-classified HIGH/CRITICAL tasks.
+    """
+
+    def test_pack_high_risk_enum_requires_audit(self) -> None:
+        reason = audit_coverage_requirement("benign task", _pack_classification(RiskLevel.HIGH))
+        assert reason == "guardrail_preset=pack:phi-hipaa"
+        assert requires_audit_coverage("benign task", _pack_classification(RiskLevel.CRITICAL))
+
+    def test_pack_risk_as_string_is_coerced(self) -> None:
+        # _classification_from_plan can hand back a string risk_level.
+        assert requires_audit_coverage("benign task", _pack_classification("HIGH"))
+        assert requires_audit_coverage("benign task", _pack_classification("CRITICAL"))
+
+    def test_pack_low_or_medium_does_not_require_audit(self) -> None:
+        # Risk-gated: only HIGH/CRITICAL pack tasks pull in the auditor.
+        assert audit_coverage_requirement("benign task", _pack_classification(RiskLevel.MEDIUM)) is None
+        assert audit_coverage_requirement("benign task", _pack_classification(RiskLevel.LOW)) is None
+
+    def test_riskstage_injects_auditor_for_pack_high(self) -> None:
+        # Benign summary (no audit keyword) so injection can only come from
+        # the pack-preset branch, proving RiskStage now covers pack tasks.
+        draft = _draft_with_phase(task_summary="Adjust widget layout", risk=RiskLevel.HIGH)
+        draft.resolved_agents = ["backend-engineer"]
+        draft.classification = _pack_classification(RiskLevel.HIGH)
+
+        RiskStage()._ensure_safety_roster(draft)
+
+        assert "auditor" in draft.resolved_agents
+
+    def test_validation_gate_blocks_pack_plan_without_audit(self) -> None:
+        draft = _draft_with_phase(task_summary="Adjust widget layout", risk=RiskLevel.HIGH)
+        draft.resolved_agents = ["backend-engineer"]
+        draft.classification = _pack_classification(RiskLevel.HIGH)
+
+        defects = ValidationStage()._detect_defects(draft)
+
+        assert any(d.code == "audit_missing" for d in defects)
+
+
+class TestA2NestedTeamCoverage:
+    """A2: sub_team is unbounded — coverage/mismatch checks must recurse."""
+
+    @staticmethod
+    def _depth2_step(deep_agent: str) -> PlanStep:
+        deep = TeamMember(member_id="m3", agent_name=deep_agent, role="implementer")
+        mid = TeamMember(member_id="m2", agent_name="backend-engineer", role="lead", sub_team=[deep])
+        lead = TeamMember(member_id="m1", agent_name="backend-engineer", role="lead", sub_team=[mid])
+        return PlanStep(
+            step_id="1.1",
+            agent_name="team",
+            task_description="Team step with a depth-2 sub-team member.",
+            team=[lead],
+        )
+
+    def test_step_agent_bases_finds_depth2_member(self) -> None:
+        step = self._depth2_step("auditor")
+        assert "auditor" in ValidationStage()._step_agent_bases(step)
+
+    def test_depth2_auditor_satisfies_audit_coverage(self) -> None:
+        # Regulated task requires audit; auditor buried at depth-2 in the
+        # Audit phase must be found (else a false audit_missing hard-block).
+        draft = _draft_with_phase(task_summary="Update GDPR compliance export")
+        draft.resolved_agents = ["backend-engineer", "auditor"]
+        draft.plan_phases.append(
+            PlanPhase(phase_id=2, name="Audit", steps=[self._depth2_step("auditor")])
+        )
+
+        defects = ValidationStage()._detect_defects(draft)
+
+        assert not any(d.code == "audit_missing" for d in defects)
+
+    def test_depth2_reviewer_in_implement_is_flagged(self) -> None:
+        # A reviewer buried at depth-2 in an Implement phase must not evade
+        # the reviewer-in-implement mismatch check.
+        draft = _draft_with_phase(phase_name="Implement")
+        draft.plan_phases = [
+            PlanPhase(phase_id=1, name="Implement", steps=[self._depth2_step("code-reviewer")])
+        ]
+
+        defects = ValidationStage()._detect_defects(draft)
+
+        assert any(d.code == "agent_phase_mismatch" for d in defects)
+
+
+class TestA3HeadlessAuditParity:
+    """A3: validate_assembled_plan (forge/headless) hard-fails with an
+    actionable defect instead of auto-remediating — outcome parity with the
+    interactive RiskStage path is achieved by regenerating, not injecting."""
+
+    def test_assembled_plan_missing_auditor_raises_actionable_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.setenv("BATON_PLANNER_HARD_GATE", "1")
+
+        plan = MachinePlan(
+            task_id="task-a3-headless",
+            task_summary="Update GDPR compliance data export workflow",
+            risk_level="HIGH",
+            phases=[
+                PlanPhase(
+                    phase_id=1,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="backend-engineer",
+                            task_description="Implement the export change.",
+                        )
+                    ],
+                )
+            ],
+            task_type="feature",
+            complexity="medium",
+        )
+
+        with pytest.raises(PlanQualityError) as ei:
+            validate_assembled_plan(plan, services=_stub_services())
+
+        audit_defects = [d for d in ei.value.defects if d.code == "audit_missing"]
+        assert audit_defects, "headless path must surface an audit_missing defect"
+        message = audit_defects[0].message
+        # Actionable: names the auditor agent + Audit phase remediation and
+        # documents that parity is outcome parity (auditor on both paths).
+        assert "auditor" in message
+        assert "Audit" in message
+        assert "parity" in message
+        assert "Remediation:" in message
+
+
+class TestA4PolicyFailureVisible:
+    """A4: a policy-engine failure must be visible (logged + surfaced on
+    score_warnings), not silently swallowed — the silent branch voided the
+    policy-driven audit-requirement path."""
+
+    def test_policy_engine_error_is_recorded_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        class _BoomEngine:
+            def load_preset(self, name: str) -> object:
+                raise RuntimeError("boom")
+
+        services = dataclasses.replace(_stub_services(), policy_engine=_BoomEngine())
+        draft = _draft_with_phase()
+
+        # Must not raise — planning stays alive.
+        ValidationStage()._check_scores(draft=draft, services=services)
+
+        assert any("policy_validation_failed" in w for w in draft.score_warnings)
+        assert any("boom" in w for w in draft.score_warnings)
+
+
+class TestA5DraftPhaseReviewerCheck:
+    """A5: the documentation archetype's Draft phase is an implement phase —
+    reviewer-class agents in it must be flagged."""
+
+    def test_reviewer_in_draft_phase_is_mismatch(self) -> None:
+        draft = _draft_with_phase(phase_name="Draft", agent_name="code-reviewer")
+        draft.resolved_agents = ["code-reviewer"]
+
+        defects = ValidationStage()._detect_defects(draft)
+
+        assert any(d.code == "agent_phase_mismatch" for d in defects)
