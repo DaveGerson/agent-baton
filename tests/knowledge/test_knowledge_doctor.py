@@ -340,6 +340,119 @@ def test_declared_doc_with_dotted_stem_resolves_md_fallback(
     )
 
 
+def test_declared_json_doc_not_satisfied_by_md_shadow(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    pack = tmp_path / ".claude" / "knowledge" / "shadowed"
+    pack.mkdir(parents=True)
+    (pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "shadowed",
+                "description": "Shadowed declaration fixtures",
+                "documents": ["config.json"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    # A shadow "config.json.md" must NOT satisfy the "config.json" declaration
+    # — only genuinely extensionless stems get the +.md fallback.
+    (pack / "config.json.md").write_text("shadow", encoding="utf-8")
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    missing = [
+        issue
+        for issue in data["issues"]
+        if issue["code"] == "missing-declared-file"
+    ]
+
+    assert rc == 0
+    assert len(missing) == 1
+    assert "config.json" in missing[0]["message"]
+
+
+def test_doctor_isolates_unreadable_pack_and_continues(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    knowledge = tmp_path / ".claude" / "knowledge"
+
+    good_pack = knowledge / "good-pack"
+    good_pack.mkdir(parents=True)
+    (good_pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "good-pack",
+                "description": "Good pack",
+                "default_delivery": "reference",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_doc(good_pack / "guide.md", name="guide", description="Valid guide")
+
+    locked_pack = knowledge / "locked-pack"
+    locked_pack.mkdir(parents=True)
+    (locked_pack / "knowledge.yaml").write_text(
+        yaml.safe_dump(
+            {"name": "locked-pack", "description": "Locked pack"},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    original_glob = Path.glob
+
+    def flaky_glob(self: Path, pattern: str):
+        if self == locked_pack and pattern == "*.md":
+            raise PermissionError("simulated ACL denial")
+        return original_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", flaky_glob)
+
+    rc = _run_cli(["knowledge", "doctor", "--json"])
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    unreadable = [
+        issue for issue in data["issues"] if issue["code"] == "unreadable-pack"
+    ]
+    assert len(unreadable) == 1
+    assert unreadable[0]["pack"] == "locked-pack"
+    # The good pack was still validated despite the locked pack's failure.
+    assert data["summary"]["packs"] == 2
+    assert data["summary"]["documents"] == 1
+
+
+def test_strict_duplicate_explicit_root_emits_single_issue(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _isolate_defaults(monkeypatch, tmp_path)
+    missing_root = tmp_path / "does-not-exist"
+
+    rc = _run_cli([
+        "knowledge",
+        "doctor",
+        "--json",
+        "--knowledge-root",
+        str(missing_root),
+        "--knowledge-root",
+        str(missing_root),
+        "--strict",
+    ])
+    data = json.loads(capsys.readouterr().out)
+    missing = [
+        issue for issue in data["issues"] if issue["code"] == "missing-root"
+    ]
+
+    assert rc == 1
+    assert len(missing) == 1
+
+
 def test_strict_missing_explicit_root_emits_issue_and_fails(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
