@@ -1901,8 +1901,23 @@ class ExecutionEngine:
                     state.task_id,
                     exc_info=True,
                 )
+        team_readiness_before = dict(
+            state.plan.plan_diagnostics.get("team_readiness", {})
+        )
         action = self._drive_resolver_loop(state)
-        self._save_execution(state)
+        # Conditional save (mirrors next_actions() at ~2034-2038): the
+        # pre-loop save above already persisted the run-start CAS bump, and
+        # _dispatch_action self-persists its own status mutation inline. A
+        # non-team plan therefore has nothing new to save post-loop. Team
+        # plans mutate plan_diagnostics["team_readiness"] inside
+        # _team_dispatch_action; only in that case do we need a second save
+        # so team_readiness lands on disk. An unconditional save here would
+        # double-bump the OCC version (bd-2hs).
+        if (
+            state.plan.plan_diagnostics.get("team_readiness", {})
+            != team_readiness_before
+        ):
+            self._save_execution(state)
         return action
 
     def next_action(self) -> ExecutionAction:
