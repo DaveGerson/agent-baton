@@ -1588,6 +1588,7 @@ returned for review but NOT saved to disk.
 |---|---|
 | `400` | Invalid request |
 | `404` | Project not found |
+| `422` | Generated plan failed the quality gate (structured `plan_quality_error` detail — see [§8 Plan Quality Errors](#plan-quality-errors-422)) |
 | `500` | Plan creation failed |
 
 **Example:**
@@ -1699,6 +1700,7 @@ Each `InterviewAnswerPayload`:
 | Status | Condition |
 |---|---|
 | `404` | Project not found |
+| `422` | Regenerated plan failed the quality gate (structured `plan_quality_error` detail — see [§8 Plan Quality Errors](#plan-quality-errors-422)) |
 | `500` | Regeneration failed |
 
 ---
@@ -1853,6 +1855,7 @@ plan to the project's team-context, and updates the signal status to `triaged`.
 | Status | Condition |
 |---|---|
 | `404` | Project or signal not found |
+| `422` | Generated plan failed the quality gate (structured `plan_quality_error` detail — see [§8 Plan Quality Errors](#plan-quality-errors-422)) |
 | `500` | Forge triaging failed |
 
 ---
@@ -2711,6 +2714,42 @@ For validation errors (422), the response includes field-level details:
 }
 ```
 
+### Plan Quality Errors (422)
+
+`POST /pmo/forge/plan`, `POST /pmo/forge/regenerate`, and
+`POST /pmo/signals/{signal_id}/forge` run the generated plan through the
+planner's quality gate (`ValidationStage`) before returning it. If the
+gate rejects the plan, these three routes return `422` with a structured
+`detail` body (built by `plan_quality_error_detail()`) instead of an
+opaque `500`:
+
+```json
+{
+  "detail": {
+    "error": "plan_quality_error",
+    "message": "Plan task-abc123 blocked by ValidationStage: [critical] review_missing: task_id=task-abc123 risk=high agents=['backend-engineer--python']. High-risk or reviewer-routed plans require Review coverage. Remediation: add a terminal Review phase with code-reviewer or security-reviewer steps.",
+    "defects": [
+      {
+        "code": "review_missing",
+        "severity": "critical",
+        "message": "task_id=task-abc123 risk=high agents=['backend-engineer--python']. High-risk or reviewer-routed plans require Review coverage.",
+        "remediation": "add a terminal Review phase with code-reviewer or security-reviewer steps."
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `error` | string | Always `"plan_quality_error"` |
+| `message` | string | `str(PlanQualityError)` — human-readable summary |
+| `defects` | list | One entry per failing/warning check |
+| `defects[].code` | string | Machine-readable defect code (e.g. `review_missing`, `audit_missing`, `empty_plan`) |
+| `defects[].severity` | string | `critical`, `warning`, or `info` |
+| `defects[].message` | string | Full defect message, including the `Remediation:` sentence |
+| `defects[].remediation` | string | The remediation text extracted from `message` (empty string if the message had no `Remediation:` marker) |
+
 ### Common HTTP Status Codes
 
 | Status | Meaning | When returned |
@@ -2723,7 +2762,7 @@ For validation errors (422), the response includes field-level details:
 | `403` | Forbidden | Policy violation (e.g. self-approval rejected in team approval mode) |
 | `404` | Not Found | Resource does not exist |
 | `409` | Conflict | Resource state mismatch (e.g. task not awaiting approval, phase_id mismatch) |
-| `422` | Unprocessable Entity | Pydantic validation failure (automatic from FastAPI) |
+| `422` | Unprocessable Entity | Pydantic validation failure (automatic from FastAPI), or a Forge-generated plan failing the quality gate (see [Plan Quality Errors](#plan-quality-errors-422)) |
 | `500` | Internal Server Error | Unexpected server-side failure or data integrity error |
 | `503` | Service Unavailable | Dependent subsystem unavailable (e.g. compliance audit write failure) |
 

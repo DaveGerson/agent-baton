@@ -28,6 +28,7 @@ Commands are organized into functional groups:
 | **Query** | Project-local structured queries | `query` |
 | **Cross-Project Query** | Cross-project SQL against central.db | `cquery` |
 | **Source** | External work-item connections | `source add`, `source list`, `source sync`, `source remove`, `source map` |
+| **Diagnostics** | Installation and workspace health checks | `doctor` |
 | **API** | HTTP API server | `serve` |
 
 ---
@@ -1690,8 +1691,22 @@ baton knowledge SUBCOMMAND [options]
 Validate knowledge packs and print actionable warnings (missing or
 invalid `knowledge.yaml`, declared documents that don't exist, empty
 descriptions, duplicate document names, documents too large for inline
-delivery). Runtime loading tolerates these issues; doctor reports them
-as actionable edits without changing loading semantics.
+delivery, or a pack/root directory that can't be listed or read). Runtime
+loading tolerates these issues; doctor reports them as actionable edits
+without changing loading semantics.
+
+A declared document with a known non-Markdown extension (`.json`,
+`.yaml`, `.yml`, `.txt`, `.py`, `.toml`, `.csv`) must exist under that
+exact name — it is not satisfied by a same-named `.md` shadow file (e.g.
+a manifest declaring `config.json` is not satisfied by `config.json.md`).
+Only genuinely extensionless declared names fall back to a `.md` suffix.
+
+A pack directory (or the root itself) that raises an OS-level error when
+listed or read is reported as an `unreadable-pack` issue and skipped, so
+one bad directory (permissions, a cloud-sync placeholder, etc.) doesn't
+abort the rest of the run. Repeated `--knowledge-root` arguments that
+resolve to the same (non-existent) directory now report a single
+`missing-root` issue instead of one per repetition.
 
 ```
 baton knowledge doctor [--knowledge-root DIR ...] [--format text|json] [--json] [--strict]
@@ -1699,7 +1714,7 @@ baton knowledge doctor [--knowledge-root DIR ...] [--format text|json] [--json] 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--knowledge-root DIR` | global + project | Knowledge root to validate; repeatable (default: `~/.claude/knowledge` and `./.claude/knowledge`) |
+| `--knowledge-root DIR` | global + project | Knowledge root to validate; repeatable and de-duplicated after resolving to an absolute path (default: `~/.claude/knowledge` and `./.claude/knowledge`) |
 | `--format FORMAT` | `text` | Output format: `text` or `json` |
 | `--json` | -- | Alias for `--format json` |
 | `--strict` | false | Exit non-zero when any warning is found |
@@ -2555,6 +2570,51 @@ baton source map SOURCE_ID EXTERNAL_ID PROJECT_ID TASK_ID [--type TYPE]
 ```bash
 baton source map ado-contoso-platform 12345 nds task-abc123 --type implements
 ```
+
+---
+
+## Diagnostics Commands
+
+### `baton doctor`
+
+Read-only installation and workspace health report: Python and package
+versions, bundled and project agents, knowledge packs, assurance packs,
+PMO UI assets, package resources, optional CLIs (`bd`, `claude`), the
+`.beads` workspace, git and git-worktree status, `.claude/team-context`
+writability, saved-plan (planner) validation, and terminology. Makes no
+changes to the project.
+
+```
+baton doctor [--json]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Emit the report as JSON (schema-versioned) instead of the human-readable summary |
+
+Exits non-zero (`1`) if any check reports `error` status.
+
+#### Planner validation check
+
+The `planner_validation` check validates the most relevant saved
+`plan.json` with the same rules as `baton plan-validate`. Doctor picks which
+plan to validate by resolving an active task the same way the rest of
+the CLI does — `BATON_TASK_ID` env var, then the active-task marker in
+the project's SQLite store (honoring `BATON_DB_PATH` if set), then the
+`.claude/team-context/active-task-id.txt` file marker — and reports
+which path it took in the check's `details.plan_selection` field:
+
+| `plan_selection` | Meaning |
+|------------------|---------|
+| `active-task` | An active task resolved; its `plan.json` was validated |
+| `fallback-first-found` | No active task resolved; doctor validated the first saved plan found, in fixed order: `.claude/team-context/plan.json`, project-root `plan.json`, then each `executions/*/plan.json` (sorted) |
+
+When `plan_selection` is `fallback-first-found` and a plan was actually
+found, the human-readable message adds a caveat: `(caveat: no active
+task resolved; validating the first saved plan found, not necessarily
+the current one)`. No caveat is added when no plan was found at all —
+that case is reported separately as `No saved plan is available to
+validate`, not a guess.
 
 ---
 
