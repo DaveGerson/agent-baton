@@ -17,7 +17,13 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_baton.api.server import create_app  # noqa: E402
-from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep  # noqa: E402
+from agent_baton.models.execution import (  # noqa: E402
+    MachinePlan,
+    PlanGate,
+    PlanPhase,
+    PlanStep,
+    TeamMember,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +62,104 @@ def make_test_plan(task_id: str = "test-task") -> MachinePlan:
     )
 
 
+def make_plan_unlocking_team(task_id: str = "team-unlock-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Unlock a team step after a solo setup step",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-agent",
+                        task_description="Prepare inputs",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="team",
+                        task_description="Run team implementation",
+                        depends_on=["1.1"],
+                        team=[
+                            TeamMember(
+                                member_id="1.2.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def make_plan_with_immediate_team_wave(task_id: str = "team-immediate-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Dispatch a solo step and a team step in the first wave",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="test-agent",
+                        task_description="Prepare inputs",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="team",
+                        task_description="Run team implementation",
+                        team=[
+                            TeamMember(
+                                member_id="1.2.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def make_plan_starting_with_team_step(task_id: str = "team-first-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Dispatch a team step as the first action",
+        phases=[
+            PlanPhase(
+                phase_id=0,
+                name="Phase 1",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="team",
+                        task_description="Run team implementation first",
+                        team=[
+                            TeamMember(
+                                member_id="1.1.a",
+                                agent_name="backend-engineer",
+                                role="implementer",
+                                task_description="Implement the service",
+                                model="sonnet",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
     """Helper: start an execution with an inline plan and return the response body."""
     plan = make_test_plan(task_id=task_id)
@@ -70,6 +174,43 @@ def start_execution(client: TestClient, task_id: str = "test-task") -> dict:
 
 
 class TestStartExecution:
+    def test_strict_unknown_team_backend_returns_500_when_first_step_is_team(
+        self,
+        app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_starting_with_team_step(task_id="strict-team-first")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+        status = client.get("/api/v1/executions/strict-team-first")
+        assert status.status_code == 200
+        assert status.json()["status"] == "failed"
+
+    def test_strict_unknown_team_backend_returns_500_on_initial_batch(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_with_immediate_team_wave(task_id="strict-team-start")
+
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+        status = client.get("/api/v1/executions/strict-team-start")
+        assert status.status_code == 200
+        assert status.json()["status"] == "failed"
+
     def test_inline_plan_returns_201(self, client: TestClient) -> None:
         plan = make_test_plan()
         r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
@@ -173,6 +314,55 @@ class TestRecordStep:
             json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
         )
         assert "next_actions" in r.json()
+
+    def test_record_surfaces_strict_unknown_team_backend(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        plan = make_plan_unlocking_team(task_id="strict-team")
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+        assert r.status_code == 201, r.text
+
+        r = client.post(
+            "/api/v1/executions/strict-team/record",
+            json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
+        )
+
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+    def test_unknown_backend_mid_run_keeps_execution_running(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mid-run strict backend errors are recoverable: status stays running.
+
+        Start stamps failed (nothing has run, re-POST the plan); mid-run the
+        misconfiguration is fixable via env, so completed work must remain
+        resumable. See _collect_next_actions in api/routes/executions.py.
+        """
+        monkeypatch.delenv("BATON_TEAMS_BACKEND", raising=False)
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
+        plan = make_plan_unlocking_team(task_id="strict-team-midrun")
+        r = client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+        assert r.status_code == 201, r.text
+
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "not-real")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        r = client.post(
+            "/api/v1/executions/strict-team-midrun/record",
+            json={"step_id": "1.1", "agent": "test-agent", "status": "complete"},
+        )
+        assert r.status_code == 500
+        assert "Unknown BATON_TEAMS_BACKEND" in r.json()["detail"]
+
+        status = client.get("/api/v1/executions/strict-team-midrun")
+        assert status.status_code == 200
+        assert status.json()["status"] == "running"
 
     def test_record_on_nonexistent_task_returns_404(self, client: TestClient) -> None:
         r = client.post(

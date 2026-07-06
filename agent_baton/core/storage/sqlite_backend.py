@@ -2218,8 +2218,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
              explicit_knowledge_packs, explicit_knowledge_docs,
              intervention_level, task_type,
              classification_signals, classification_confidence,
-             manager_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             manager_mode, plan_diagnostics)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             plan.task_id,
@@ -2239,6 +2239,7 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
             plan.classification_signals,
             plan.classification_confidence,
             int(plan.manager_mode),
+            json.dumps(plan.plan_diagnostics),
         ),
     )
 
@@ -2483,6 +2484,12 @@ def _load_plan_struct(
     # pre-v46 databases (defaults to False, matching MachinePlan's own
     # field default).
     mm = plan_row["manager_mode"] if "manager_mode" in plan_keys else 0
+    # v47: plan diagnostics blob, graceful fallback for pre-v47 databases.
+    pd = (
+        plan_row["plan_diagnostics"]
+        if "plan_diagnostics" in plan_keys
+        else "{}"
+    )
 
     return MachinePlan(
         task_id=plan_row["task_id"],
@@ -2502,4 +2509,5 @@ def _load_plan_struct(
         classification_signals=cs,
         classification_confidence=float(cc) if cc is not None else None,
         manager_mode=bool(mm),
+        plan_diagnostics=json.loads(pd or "{}"),
     )

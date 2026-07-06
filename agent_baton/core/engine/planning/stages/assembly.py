@@ -106,6 +106,7 @@ class AssemblyStage:
             max_retry_phases=(
                 3 if draft.planning_archetype == "investigative" else 0
             ),
+            plan_diagnostics=self._build_plan_diagnostics(draft, services),
         )
 
         # Step 16 — team cost estimation.
@@ -133,6 +134,57 @@ class AssemblyStage:
         )
         tmp_plan.shared_context = shared_context
         return tmp_plan
+
+    def _build_plan_diagnostics(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+    ) -> dict[str, object]:
+        """Build a concise, forward-compatible planning diagnostics payload."""
+        registry = services.knowledge_registry
+        knowledge_packs_loaded = len(registry.all_packs) if registry is not None else 0
+        degraded_packs = (
+            sorted(registry.degraded_pack_names) if registry is not None else []
+        )
+        docs_indexed = (
+            sum(len(pack.documents) for pack in registry.all_packs.values())
+            if registry is not None
+            else 0
+        )
+
+        knowledge_attachment_count = sum(
+            len(step.knowledge)
+            for phase in draft.plan_phases
+            for step in phase.steps
+        )
+        gate_count = sum(1 for phase in draft.plan_phases if phase.gate is not None)
+        approval_count = sum(
+            1 for phase in draft.plan_phases if phase.approval_required
+        )
+
+        classification_source = (
+            draft.task_classification.source
+            if draft.task_classification is not None
+            else "cli-override"
+        )
+
+        return {
+            "task_type": draft.inferred_type,
+            "complexity": draft.inferred_complexity,
+            "archetype": draft.planning_archetype,
+            "risk": draft.risk_level,
+            "classification_source": classification_source,
+            "selected_agents": list(draft.resolved_agents),
+            "phase_count": len(draft.plan_phases),
+            "gate_count": gate_count,
+            "approval_count": approval_count,
+            "validation_warning_count": len(draft.score_warnings),
+            "knowledge_attachment_count": knowledge_attachment_count,
+            "knowledge_packs_loaded": knowledge_packs_loaded,
+            "degraded_packs": degraded_packs,
+            "docs_indexed": docs_indexed,
+            "attachments_selected": knowledge_attachment_count,
+        }
 
     # ------------------------------------------------------------------
     # Private: telemetry

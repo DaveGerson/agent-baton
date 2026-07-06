@@ -1,0 +1,71 @@
+{
+  "budget_tier": "standard",
+  "complexity": "medium",
+  "phases": [
+    {
+      "approval_required": true,
+      "name": "Design",
+      "phase_id": 1,
+      "steps": [
+        {
+          "agent": "architect",
+          "depends_on": [],
+          "step_id": "1.1",
+          "step_type": "consulting",
+          "team": []
+        },
+        {
+          "agent": "architect",
+          "depends_on": [],
+          "step_id": "1.2",
+          "step_type": "planning",
+          "team": []
+        }
+      ]
+    },
+    {
+      "approval_required": false,
+      "name": "Implement",
+      "phase_id": 2,
+      "steps": [
+        {
+          "agent": "backend-engineer",
+          "depends_on": [],
+          "step_id": "2.1",
+          "step_type": "developing",
+          "team": []
+        }
+      ]
+    },
+    {
+      "approval_required": false,
+      "name": "Test",
+      "phase_id": 3,
+      "steps": [
+        {
+          "agent": "test-engineer",
+          "depends_on": [],
+          "step_id": "3.1",
+          "step_type": "testing",
+          "team": []
+        }
+      ]
+    },
+    {
+      "approval_required": false,
+      "name": "Review",
+      "phase_id": 4,
+      "steps": [
+        {
+          "agent": "code-reviewer",
+          "depends_on": [],
+          "step_id": "4.1",
+          "step_type": "reviewing",
+          "team": []
+        }
+      ]
+    }
+  ],
+  "risk_level": "HIGH",
+  "task_type": "refactor"
+}

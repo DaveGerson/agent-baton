@@ -592,6 +592,9 @@ class HeadlessClaude:
             "- Every code-producing phase MUST have a test gate (pytest).",
             "- Research/investigate/review phases do NOT need gates.",
             "- Use 'opus' model only for complex architectural decisions. Default to 'sonnet'.",
+            "- HIGH or CRITICAL risk plans MUST include a Review phase staffed by code-reviewer or security-reviewer.",
+            "- Regulated-data, compliance, or audit-sensitive plans MUST include an Audit phase whose final word is 'Audit' and whose step is staffed by the agent literally named auditor.",
+            "- Reviewer-class agents (code-reviewer, security-reviewer, auditor) are banned from implementation/fix/build/develop phases.",
             "- task_id should be a URL-safe slug: lowercase, hyphens, max 60 chars.",
             "- step_id format: '<phase_id>.<step_number>' (e.g. '1.1', '2.1', '2.2').",
         ])

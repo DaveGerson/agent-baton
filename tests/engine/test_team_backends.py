@@ -8,19 +8,24 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent_baton.core.engine.team_backends import (
     ClaudeTeamsBackend,
     TeamBackend,
     WorktreeTeamBackend,
     audit_agents_for_teammate_safety,
+    build_team_readiness_diagnostics,
     check_resumability_constraints,
+    format_team_readiness_summary,
     select_team_backend,
+    write_team_readiness_report,
 )
 from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
     PlanStep,
+    SynthesisSpec,
     TeamMember,
 )
 
@@ -67,9 +72,18 @@ class TestSelector:
     def test_unknown_value_falls_back(
         self, monkeypatch: pytest.MonkeyPatch, caplog,
     ) -> None:
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
         monkeypatch.setenv("BATON_TEAMS_BACKEND", "totally-made-up")
         be = select_team_backend()
         assert isinstance(be, WorktreeTeamBackend)
+
+    def test_unknown_value_raises_in_strict_mode(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TEAMS_BACKEND", "totally-made-up")
+        monkeypatch.setenv("BATON_TEAMS_BACKEND_STRICT", "1")
+        with pytest.raises(ValueError, match="Unknown BATON_TEAMS_BACKEND"):
+            select_team_backend()
 
     def test_explicit_arg_overrides_env(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -113,6 +127,7 @@ class TestClaudeTeamsBackend:
         # Known-limitation guidance is included so the lead reads it.
         assert "skills" in text and "mcpServers" in text
         assert "No in-process resumption" in text
+        assert "fixed permissions" in text.lower()
 
     def test_hook_command_includes_member_id(self) -> None:
         be = ClaudeTeamsBackend()
@@ -150,6 +165,20 @@ class TestAgentAudit:
         assert "mcp-agent" in flagged
         assert "mcpServers" in flagged["mcp-agent"]
 
+    def test_audit_flags_inline_list_values(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "inline-list-agent.md").write_text(
+            "---\n"
+            "name: inline-list-agent\n"
+            "model: sonnet\n"
+            "skills: [github]\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {"inline-list-agent": ["skills"]}
+
     def test_empty_lists_are_not_flagged(self, tmp_path: Path) -> None:
         agents = tmp_path / "agents"
         agents.mkdir()
@@ -159,6 +188,64 @@ class TestAgentAudit:
         )
         flagged = audit_agents_for_teammate_safety(agents)
         assert flagged == {}
+
+    def test_comment_only_keys_are_not_flagged(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "comment-only.md").write_text(
+            "---\n"
+            "name: comment-only\n"
+            "model: sonnet\n"
+            "skills:  # none\n"
+            "mcpServers:  # none\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {}
+
+    def test_audit_flags_yaml_block_forms(self, tmp_path: Path) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "block-agent.md").write_text(
+            "---\n"
+            "name: block-agent\n"
+            "model: sonnet\n"
+            "skills:\n"
+            "  - github\n"
+            "mcpServers:\n"
+            "  filesystem:\n"
+            "    command: npx\n"
+            "---\n"
+            "body\n",
+            encoding="utf-8",
+        )
+        flagged = audit_agents_for_teammate_safety(agents)
+        assert flagged == {"block-agent": ["skills", "mcpServers"]}
+
+    def test_audit_flags_pyyaml_safe_dump_zero_indent_block_sequence(
+        self, tmp_path: Path
+    ) -> None:
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        frontmatter = yaml.safe_dump(
+            {
+                "name": "safe-dump-agent",
+                "model": "sonnet",
+                "skills": ["github"],
+                "mcpServers": {"filesystem": {"command": "npx"}},
+            },
+            sort_keys=False,
+        )
+        assert "\n- github\n" in frontmatter
+        (agents / "safe-dump-agent.md").write_text(
+            f"---\n{frontmatter}---\nbody\n",
+            encoding="utf-8",
+        )
+
+        flagged = audit_agents_for_teammate_safety(agents)
+
+        assert flagged == {"safe-dump-agent": ["skills", "mcpServers"]}
 
     def test_audit_skips_non_frontmatter_files(self, tmp_path: Path) -> None:
         agents = tmp_path / "agents"
@@ -170,6 +257,94 @@ class TestAgentAudit:
     def test_audit_missing_dir_returns_empty(self, tmp_path: Path) -> None:
         flagged = audit_agents_for_teammate_safety(tmp_path / "nope")
         assert flagged == {}
+
+
+class TestTeamReadinessDiagnostics:
+    def test_worktree_diagnostics_summarize_team_shape(self, tmp_path: Path) -> None:
+        plan = _plan_with_team()
+        step = plan.phases[0].steps[0]
+        step.context_files = ["README.md", "docs/engine-and-runtime.md"]
+        step.synthesis = SynthesisSpec(
+            strategy="merge_files",
+            conflict_handling="escalate",
+        )
+
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=step,
+            backend_name="worktree",
+            team_context_root=tmp_path,
+        ).to_dict()
+
+        assert diagnostics["backend"] == "worktree"
+        assert diagnostics["member_count"] == 2
+        assert diagnostics["nested_team_count"] == 0
+        assert diagnostics["shared_files"] == [
+            "README.md",
+            "docs/engine-and-runtime.md",
+        ]
+        assert diagnostics["shared_contracts"][0]["member_id"] == "1.1.a"
+        assert diagnostics["synthesis_strategy"] == "merge_files"
+        assert diagnostics["conflict_strategy"] == "escalate"
+        assert diagnostics["warning_count"] == 0
+
+    def test_claude_teams_diagnostics_surface_caveats(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = TestSpawnPromptFidelity()._nested_plan()
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=plan.phases[0].steps[0],
+            backend_name="claude-teams",
+            team_context_root=tmp_path,
+        ).to_dict()
+
+        assert diagnostics["backend"] == "claude-teams"
+        assert diagnostics["member_count"] == 2
+        assert diagnostics["nested_team_count"] == 1
+        warnings = "\n".join(diagnostics["warnings"]).lower()
+        assert "no resume" in warnings or "cannot resume" in warnings
+        assert "no nesting" in warnings or "cannot nest" in warnings
+        assert "one team at a time" in warnings
+        assert "fixed permissions" in warnings
+        assert "skills/mcp" in warnings or "mcpservers" in warnings
+        assert diagnostics["warning_count"] >= 5
+
+    def test_step_specific_warnings_precede_static_caveats(
+        self, tmp_path: Path,
+    ) -> None:
+        plan = TestSpawnPromptFidelity()._nested_plan()
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=plan.phases[0].steps[0],
+            backend_name="claude-teams",
+            team_context_root=tmp_path,
+        )
+
+        # The dispatch summary caps warning_notes; actionable step-specific
+        # warnings must come before the static claude-teams caveats.
+        assert "nested team" in diagnostics.warnings[0]
+        assert "nested team" in format_team_readiness_summary(diagnostics)
+
+    def test_report_path_is_posix_relative(self, tmp_path: Path) -> None:
+        plan = _plan_with_team()
+        step = plan.phases[0].steps[0]
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan,
+            step=step,
+            backend_name="worktree",
+            team_context_root=tmp_path,
+        )
+
+        written = write_team_readiness_report(
+            diagnostics=diagnostics,
+            team_context_root=tmp_path,
+        )
+
+        assert written.report_path == (
+            f"teams/team-{step.step_id}/team-report.json"
+        )
+        assert "\\" not in written.report_path
 
 
 class TestSpawnPromptFidelity:

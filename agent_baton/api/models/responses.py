@@ -155,6 +155,10 @@ class PlanResponse(BaseModel):
     total_steps: int = Field(..., description="Total number of steps across all phases.")
     agents: list[str] = Field(default_factory=list, description="All agent names used in the plan.")
     pattern_source: Optional[str] = Field(default=None, description="Learned pattern that influenced this plan.")
+    plan_diagnostics: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Concise planner diagnostics and knowledge-pack counters.",
+    )
     created_at: str = Field(default="", description="ISO 8601 creation timestamp.")
 
     @classmethod
@@ -172,6 +176,7 @@ class PlanResponse(BaseModel):
             total_steps=obj.total_steps,  # type: ignore[attr-defined]
             agents=obj.all_agents,  # type: ignore[attr-defined]
             pattern_source=obj.pattern_source,  # type: ignore[attr-defined]
+            plan_diagnostics=dict(getattr(obj, "plan_diagnostics", {})),
             created_at=obj.created_at,  # type: ignore[attr-defined]
         )
 

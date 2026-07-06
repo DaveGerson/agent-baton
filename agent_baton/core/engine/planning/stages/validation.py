@@ -6,11 +6,11 @@ step 12c (team consolidation + plan reviewer pass).
 **Quality fix #2 — hard gate**: the legacy ``PlanReviewer`` skipped
 light-complexity plans entirely (``plan_reviewer.py:222``) and treated
 its findings as advisory.  This stage computes a list of *defects* on
-top of the reviewer result and exposes them on the draft.  Under
-``BATON_PLANNER_HARD_GATE`` the stage raises ``PlanQualityError``
-when any defect is critical; without the env var it just records and
-warns, preserving legacy behavior so the new gate can bake in
-production before flipping the default.
+top of the reviewer result and exposes them on the draft.  Critical
+defects raise ``PlanQualityError`` by default.  ``BATON_DEV_MODE=1``
+and ``BATON_PLANNER_WARN_ONLY=1`` make the gate warn-only for local
+experimentation; truthy ``BATON_PLANNER_HARD_GATE`` is the legacy
+explicit override and blocks even when dev/warn-only mode is set.
 
 Defects detected here (independent of what the reviewer surfaces):
 
@@ -21,7 +21,12 @@ Defects detected here (independent of what the reviewer surfaces):
 3. **empty_phase** — at least one phase has zero steps.  Critical.
 4. **agent_phase_mismatch** — a step's agent role is in
    ``PHASE_BLOCKED_ROLES`` for the phase it landed in.  Critical.
-5. **reviewer_warning** — the reviewer surfaced any string starting
+5. **review_missing** - high-risk or reviewer-routed plans are missing
+   a Review phase with reviewer coverage.  Critical.
+6. **audit_missing** - regulated, compliance, policy-auditor, or
+   auditor-routed plans are missing an Audit phase with auditor coverage.
+   Critical.
+7. **reviewer_warning** — the reviewer surfaced any string starting
    with ``[critical]``.  Critical.
 
 Order is preserved: score check + budget tier before consolidation,
@@ -29,9 +34,13 @@ because consolidation reads ``budget_tier`` to size team estimates.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.draft import PlanDraft
@@ -41,13 +50,18 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     consolidate_team_step,
     is_team_phase,
 )
+from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
+    audit_coverage_requirement,
+    assess_risk,
     classify_to_preset_key,
     select_budget_tier,
     validate_agents_against_policy,
 )
 from agent_baton.core.engine.planning.utils.roster_logic import check_agent_scores
 from agent_baton.core.engine.planning.utils.text_parsers import extract_file_paths
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS, is_reviewer_agent
+from agent_baton.models.enums import RiskLevel
 
 if TYPE_CHECKING:
     from agent_baton.core.govern.classifier import ClassificationResult
@@ -57,7 +71,16 @@ logger = logging.getLogger(__name__)
 
 
 class PlanQualityError(RuntimeError):
-    """Raised by ValidationStage in hard-gate mode when a critical defect is found."""
+    """Raised by ValidationStage when the effective quality gate blocks."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        defects: list["PlanDefect"] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.defects = list(defects or [])
 
 
 @dataclass
@@ -76,15 +99,27 @@ class ValidationStage:
     """Stage 6: score check, budget tier, plan review with defect detection.
 
     Defects are recorded on ``draft.score_warnings`` (any severity) and
-    on the new ``draft.plan_defects`` attribute (full list).  Critical
-    defects raise ``PlanQualityError`` when ``BATON_PLANNER_HARD_GATE``
-    is truthy.
+    on the new ``draft.plan_defects`` attribute (full list).
+    Critical defects raise ``PlanQualityError`` by default.  Set
+    ``BATON_DEV_MODE=1`` or ``BATON_PLANNER_WARN_ONLY=1`` to keep local
+    experimentation warn-only.  A truthy ``BATON_PLANNER_HARD_GATE`` remains
+    a supported legacy explicit opt-in flag and overrides warn-only/dev mode.
     """
 
     name = "validation"
     _HARD_GATE_ENV = "BATON_PLANNER_HARD_GATE"
+    _DEV_MODE_ENV = "BATON_DEV_MODE"
+    _WARN_ONLY_ENV = "BATON_PLANNER_WARN_ONLY"
     _TRUTHY = frozenset({"1", "true", "yes", "on"})
-
+    _IMPLEMENT_PHASE_KEYS = frozenset({
+        "implement",
+        "implementation",
+        "fix",
+        "build",
+        "develop",
+        "development",
+    })
+    _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 10+11+11b — score check, budget tier, policy validation.
         # _check_scores writes score_warnings and policy_violations onto draft
@@ -103,27 +138,42 @@ class ValidationStage:
         # Compute defects from the assembled plan + reviewer result.
         defects = self._detect_defects(draft)
         draft.plan_defects = defects  # type: ignore[attr-defined]
-        for d in defects:
-            if d.severity in ("critical", "warning"):
-                draft.score_warnings.append(str(d))
-
-        critical = [d for d in defects if d.severity == "critical"]
-        if critical:
-            logger.warning(
-                "planner.validation: %d critical defect(s) on task %s: %s",
-                len(critical), draft.task_id,
-                "; ".join(d.code for d in critical),
-            )
-            if self._hard_gate_enabled():
-                raise PlanQualityError(
-                    f"Plan {draft.task_id} blocked by ValidationStage: "
-                    + "; ".join(str(d) for d in critical[:5])
-                )
+        self._apply_quality_gate(
+            task_id=draft.task_id,
+            defects=defects,
+            score_warnings=draft.score_warnings,
+        )
         return draft
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _apply_quality_gate(
+        self,
+        *,
+        task_id: str,
+        defects: list[PlanDefect],
+        score_warnings: list[str] | None = None,
+    ) -> None:
+        if score_warnings is not None:
+            for defect in defects:
+                if defect.severity in ("critical", "warning"):
+                    score_warnings.append(str(defect))
+
+        critical = [d for d in defects if d.severity == "critical"]
+        if critical:
+            logger.warning(
+                "planner.validation: %d critical defect(s) on task %s: %s",
+                len(critical), task_id,
+                "; ".join(d.code for d in critical),
+            )
+            if self._quality_gate_blocks():
+                raise PlanQualityError(
+                    f"Plan {task_id} blocked by ValidationStage: "
+                    + "; ".join(str(d) for d in critical[:5]),
+                    defects=critical[:5],
+                )
 
     def _check_scores(
         self,
@@ -233,11 +283,35 @@ class ValidationStage:
     # ------------------------------------------------------------------
 
     def _hard_gate_enabled(self) -> bool:
-        return os.environ.get(self._HARD_GATE_ENV, "").lower() in self._TRUTHY
+        """Return the legacy explicit hard-gate flag state.
+
+        Plan-quality blocking now defaults on; callers should use
+        ``_quality_gate_blocks`` for the effective policy.
+        """
+        return self._env_truthy(self._HARD_GATE_ENV)
+
+    def _quality_gate_blocks(self) -> bool:
+        return self._hard_gate_enabled() or not self._warn_only_enabled()
+
+    def _warn_only_enabled(self) -> bool:
+        return (
+            self._env_truthy(self._DEV_MODE_ENV)
+            or self._env_truthy(self._WARN_ONLY_ENV)
+        )
+
+    def _env_truthy(self, name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in self._TRUTHY
+
+    def _with_remediation(self, message: str, remediation: str) -> str:
+        if re.search(r"\bremediation\s*:", message, flags=re.IGNORECASE):
+            return message
+        separator = " " if message.rstrip().endswith((".", "!", "?")) else ". "
+        return f"{message.rstrip()}{separator}{remediation}"
 
     def _detect_defects(self, draft: PlanDraft) -> list[PlanDefect]:
         """Inspect the assembled draft and return the list of defects."""
         defects: list[PlanDefect] = []
+        agent_bases = self._agent_bases(draft)
 
         # 1. review_skipped
         review = draft.review_result
@@ -248,9 +322,12 @@ class ValidationStage:
                     code="review_skipped",
                     severity="critical",
                     message=(
-                        f"PlanReviewer skipped a {draft.inferred_complexity!r} "
-                        f"plan via the light-complexity early return — "
-                        f"quality gate effectively bypassed."
+                        f"task_id={draft.task_id} source=skipped-light "
+                        f"complexity={draft.inferred_complexity}. "
+                        "PlanReviewer took the light-complexity early return on "
+                        "a non-light plan, bypassing structural review. "
+                        "Remediation: rerun review with the correct complexity "
+                        "or add an explicit Review phase before validation."
                     ),
                 ))
             # 5. reviewer_warning
@@ -259,7 +336,12 @@ class ValidationStage:
                     defects.append(PlanDefect(
                         code="reviewer_warning",
                         severity="critical",
-                        message=w,
+                        message=self._with_remediation(
+                            w,
+                            "Remediation: update the plan to address the "
+                            "reviewer warning, or add explicit Review/Audit "
+                            "coverage that resolves it before validation.",
+                        ),
                     ))
 
         # 2. empty_plan
@@ -267,9 +349,43 @@ class ValidationStage:
             defects.append(PlanDefect(
                 code="empty_plan",
                 severity="critical",
-                message="Plan has zero phases.",
+                message=(
+                    f"task_id={draft.task_id} phase_count=0. "
+                    "Plan has no executable phases or steps. "
+                    "Remediation: add at least one phase with at least one "
+                    "concrete step before validation."
+                ),
             ))
             return defects
+
+        if (
+            self._review_required(draft, agent_bases)
+            and not self._has_review_coverage(draft)
+        ):
+            defects.append(PlanDefect(
+                code="review_missing",
+                severity="critical",
+                message=(
+                    f"task_id={draft.task_id} risk={self._risk_value(draft)} "
+                    f"agents={sorted(agent_bases)}. "
+                    "High-risk or reviewer-routed plans require Review coverage. "
+                    "Remediation: add a terminal Review phase with code-reviewer "
+                    "or security-reviewer steps."
+                ),
+            ))
+
+        audit_requirement = self._audit_requirement(draft, agent_bases)
+        if audit_requirement and not self._has_audit_coverage(draft):
+            defects.append(PlanDefect(
+                code="audit_missing",
+                severity="critical",
+                message=(
+                    f"task_id={draft.task_id} agents={sorted(agent_bases)} "
+                    f"{audit_requirement}. "
+                    "Compliance or auditor-routed plans require Audit coverage. "
+                    "Remediation: add a terminal Audit phase with an auditor step."
+                ),
+            ))
 
         for phase in draft.plan_phases:
             # 3. empty_phase
@@ -277,13 +393,18 @@ class ValidationStage:
                 defects.append(PlanDefect(
                     code="empty_phase",
                     severity="critical",
-                    message=f"Phase {phase.name!r} has zero steps.",
+                    message=(
+                        f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                        f"phase={phase.name!r} step_count=0. "
+                        "Phase has no executable steps. "
+                        "Remediation: add at least one step to this phase or "
+                        "remove the empty phase."
+                    ),
                 ))
                 continue
 
             # 4. agent_phase_mismatch
-            phase_key = (phase.name or "").lower().split(":")[0].strip()
-            phase_key = phase_key.split()[-1] if phase_key else ""
+            phase_key = self._phase_key(phase.name)
             blocked = PHASE_BLOCKED_ROLES.get(phase_key, set())
             if blocked:
                 for step in phase.steps:
@@ -293,10 +414,262 @@ class ValidationStage:
                             code="agent_phase_mismatch",
                             severity="critical",
                             message=(
-                                f"Step {step.step_id} routes "
-                                f"{base!r} into the blocked-list phase "
-                                f"{phase.name!r}."
+                                f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                                f"phase={phase.name!r} step_id={step.step_id} "
+                                f"agent={base!r}. Agent is blocked from this "
+                                "phase type. Remediation: route the step to an "
+                                "allowed implementer for this phase or move the "
+                                "agent to a dedicated Review/Audit phase."
                             ),
                         ))
+            if phase_key in self._IMPLEMENT_PHASE_KEYS:
+                for step in phase.steps:
+                    for base in self._step_agent_bases(step):
+                        if is_reviewer_agent(base):
+                            target_phase = (
+                                "Audit" if base == "auditor" else "Review"
+                            )
+                            defects.append(PlanDefect(
+                                code="agent_phase_mismatch",
+                                severity="critical",
+                                message=(
+                                    f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                                    f"phase={phase.name!r} step_id={step.step_id} "
+                                    f"agent={base!r}. Reviewer-class agents are "
+                                    "blocked from implementation phases. "
+                                    f"Remediation: move {base!r} to a dedicated "
+                                    f"{target_phase} phase and assign implementation "
+                                    "work to an engineering agent."
+                                ),
+                            ))
 
         return defects
+
+    def _review_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
+        return (
+            self._risk_value(draft) in {"HIGH", "CRITICAL"}
+            or bool(agent_bases & self._REVIEWER_BASES)
+        )
+
+    def _audit_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
+        return self._audit_requirement(draft, agent_bases) is not None
+
+    def _audit_requirement(self, draft: PlanDraft, agent_bases: set[str]) -> str | None:
+        if "auditor" in agent_bases:
+            return "requirement=auditor_routed"
+        return audit_coverage_requirement(
+            draft.task_summary,
+            getattr(draft, "classification", None),
+            getattr(draft, "policy_violations", None),
+        )
+
+    def _has_review_coverage(self, draft: PlanDraft) -> bool:
+        for phase in draft.plan_phases:
+            if self._phase_key(phase.name) != "review":
+                continue
+            for step in phase.steps:
+                if self._step_agent_bases(step) & self._REVIEWER_BASES:
+                    return True
+        return False
+
+    def _has_audit_coverage(self, draft: PlanDraft) -> bool:
+        for phase in draft.plan_phases:
+            if self._phase_key(phase.name) != "audit":
+                continue
+            for step in phase.steps:
+                if "auditor" in self._step_agent_bases(step):
+                    return True
+        return False
+
+    def _risk_value(self, draft: PlanDraft) -> str:
+        risk = getattr(draft, "risk_level_enum", None)
+        if isinstance(risk, RiskLevel):
+            return risk.value
+        if risk:
+            return str(risk).upper()
+        return str(getattr(draft, "risk_level", "") or "").upper()
+
+    def _phase_key(self, name: str) -> str:
+        raw = (name or "").lower().split(":")[0].strip()
+        key = raw.split()[-1] if raw else ""
+        if key == "implementation":
+            return "implement"
+        if key == "development":
+            return "develop"
+        return key
+
+    def _agent_bases(self, draft: PlanDraft) -> set[str]:
+        bases = {
+            (agent or "").split("--")[0]
+            for agent in getattr(draft, "resolved_agents", []) or []
+            if agent
+        }
+        for phase in draft.plan_phases:
+            for step in phase.steps:
+                bases.update(self._step_agent_bases(step))
+        bases.discard("")
+        return bases
+
+    def _step_agent_bases(self, step: object) -> set[str]:
+        bases: set[str] = set()
+        agent_name = getattr(step, "agent_name", "")
+        if agent_name:
+            bases.add(agent_name.split("--")[0])
+        for member in getattr(step, "team", []) or []:
+            member_name = getattr(member, "agent_name", "")
+            if member_name:
+                bases.add(member_name.split("--")[0])
+            for nested in getattr(member, "sub_team", []) or []:
+                nested_name = getattr(nested, "agent_name", "")
+                if nested_name:
+                    bases.add(nested_name.split("--")[0])
+        return bases
+
+
+def _resolved_agents_from_plan(plan: "MachinePlan") -> list[str]:
+    agents: list[str] = []
+
+    def _append(agent_name: str) -> None:
+        if agent_name and agent_name != "team":
+            agents.append(agent_name)
+
+    def _collect_member_agents(member: object) -> None:
+        _append(str(getattr(member, "agent_name", "") or ""))
+        for nested in getattr(member, "sub_team", []) or []:
+            _collect_member_agents(nested)
+
+    for step in plan.all_steps:
+        _append(step.agent_name)
+        for member in getattr(step, "team", []) or []:
+            _collect_member_agents(member)
+
+    return list(dict.fromkeys(agents))
+
+
+def _classification_from_plan(plan: "MachinePlan") -> object | None:
+    if not plan.classification_signals:
+        return None
+    try:
+        payload = json.loads(plan.classification_signals)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    risk_level = str(payload.get("risk_level") or plan.risk_level or "LOW").upper()
+    try:
+        risk_enum = RiskLevel(risk_level)
+    except ValueError:
+        risk_enum = RiskLevel.LOW
+
+    confidence = "high" if (plan.classification_confidence or 0.0) >= 1.0 else "medium"
+    return SimpleNamespace(
+        signals_found=list(payload.get("signals") or []),
+        risk_level=risk_enum,
+        guardrail_preset=str(payload.get("guardrail_preset") or "Standard Development"),
+        explanation=str(payload.get("explanation") or ""),
+        confidence=confidence,
+    )
+
+
+def _classification_payload(classification: object) -> dict[str, object]:
+    risk = getattr(classification, "risk_level", RiskLevel.LOW)
+    if isinstance(risk, RiskLevel):
+        risk_value = risk.value
+    else:
+        risk_value = str(risk or RiskLevel.LOW.value).upper()
+    return {
+        "signals": list(getattr(classification, "signals_found", []) or []),
+        "risk_level": risk_value,
+        "guardrail_preset": str(
+            getattr(classification, "guardrail_preset", "Standard Development")
+            or "Standard Development"
+        ),
+        "explanation": str(getattr(classification, "explanation", "") or ""),
+    }
+
+
+def _classification_confidence_value(classification: object) -> float:
+    return 1.0 if getattr(classification, "confidence", "") == "high" else 0.5
+
+
+def _coerce_risk_level(value: object, default: RiskLevel = RiskLevel.LOW) -> RiskLevel:
+    if isinstance(value, RiskLevel):
+        return value
+    try:
+        return RiskLevel(str(value or "").upper())
+    except ValueError:
+        return default
+
+
+def _sync_plan_validation(plan: "MachinePlan", draft: PlanDraft) -> None:
+    plan.risk_level = draft.risk_level
+    plan.phases = list(draft.plan_phases)
+    plan.budget_tier = draft.budget_tier
+    existing = dict(getattr(plan, "plan_diagnostics", {}) or {})
+    existing["validation_warning_count"] = max(
+        int(existing.get("validation_warning_count", 0)),
+        len(draft.score_warnings),
+    )
+    plan.plan_diagnostics = existing
+
+
+def validate_assembled_plan(
+    plan: "MachinePlan",
+    *,
+    services: PlannerServices,
+    project_root: Path | None = None,
+) -> "MachinePlan":
+    """Apply ValidationStage semantics to an already-assembled MachinePlan."""
+    draft = PlanDraft.from_inputs(
+        plan.task_summary,
+        task_type=plan.task_type,
+        complexity=plan.complexity,
+        project_root=project_root,
+        explicit_knowledge_packs=list(plan.explicit_knowledge_packs or []),
+        explicit_knowledge_docs=list(plan.explicit_knowledge_docs or []),
+        intervention_level=plan.intervention_level,
+    )
+    draft.task_id = plan.task_id
+    draft.plan_phases = list(plan.phases)
+    draft.resolved_agents = _resolved_agents_from_plan(plan)
+    draft.inferred_type = plan.task_type or ""
+    draft.inferred_complexity = plan.complexity or "medium"
+    draft.risk_level = str(plan.risk_level or "")
+    draft.git_strategy = plan.git_strategy
+    draft.classification = _classification_from_plan(plan)
+    if draft.classification is None and services.data_classifier is not None:
+        try:
+            draft.classification = services.data_classifier.classify(plan.task_summary)
+        except Exception:
+            draft.classification = None
+        else:
+            plan.classification_signals = json.dumps(
+                _classification_payload(draft.classification)
+            )
+            plan.classification_confidence = _classification_confidence_value(
+                draft.classification
+            )
+
+    risk_candidates = [
+        _coerce_risk_level(plan.risk_level),
+        _coerce_risk_level(assess_risk(plan.task_summary, draft.resolved_agents)),
+    ]
+    if draft.classification is not None:
+        risk_candidates.append(
+            _coerce_risk_level(getattr(draft.classification, "risk_level", None))
+        )
+    draft.risk_level_enum = max(
+        risk_candidates,
+        key=lambda risk: RISK_ORDINAL[risk],
+    )
+    draft.risk_level = draft.risk_level_enum.value
+
+    stage = ValidationStage()
+    try:
+        stage.run(draft, services)
+    except PlanQualityError:
+        _sync_plan_validation(plan, draft)
+        raise
+    _sync_plan_validation(plan, draft)
+    return plan

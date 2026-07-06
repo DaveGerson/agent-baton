@@ -279,6 +279,14 @@ class TestBuildPlanPrompt:
         assert "phases" in prompt
         assert "risk_level" in prompt
 
+    def test_prompt_contains_validation_gate_contract(self) -> None:
+        prompt = HeadlessClaude._build_plan_prompt("task")
+        assert "HIGH or CRITICAL" in prompt
+        assert "Review phase" in prompt
+        assert "Audit phase" in prompt
+        assert "auditor" in prompt
+        assert "Reviewer-class agents" in prompt
+
     def test_all_fields_filled(self) -> None:
         prompt = HeadlessClaude._build_plan_prompt(
             description="migrate auth to OAuth",

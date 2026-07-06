@@ -9,6 +9,7 @@ DELETE /executions/{task_id}            — cancel a running execution
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,10 +23,12 @@ from agent_baton.api.models.requests import (
 )
 from agent_baton.api.models.responses import ActionResponse, ExecutionResponse, RecordFeedbackResponse
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.core.engine.team_backends import UnknownTeamBackendError
 from agent_baton.core.runtime.decisions import DecisionManager
 from agent_baton.models.execution import MachinePlan
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -87,14 +90,19 @@ async def start_execution(
     # Start the engine; returns the first action.
     try:
         first_action = engine.start(plan)
+    except UnknownTeamBackendError as exc:
+        _mark_execution_failed(engine, reason=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except RuntimeError as exc:
+        _mark_execution_failed(engine, reason=str(exc))
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # Gather all immediately dispatchable parallel actions.
     try:
-        parallel_actions = engine.next_actions()
-    except Exception:
-        parallel_actions = [first_action]
+        next_actions = _collect_next_actions(engine)
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            _mark_execution_failed(engine, reason=str(exc.detail))
+        raise
 
     # Load state to build the response — start() saves it to disk.
     state = engine._load_state()  # noqa: SLF001
@@ -104,11 +112,7 @@ async def start_execution(
     pending_count = _count_pending(decision_manager)
     execution = ExecutionResponse.from_dataclass(state, pending_decisions=pending_count)
 
-    next_actions = (
-        [ActionResponse.from_dataclass(a) for a in parallel_actions]
-        if parallel_actions
-        else [ActionResponse.from_dataclass(first_action)]
-    )
+    next_actions = next_actions or [ActionResponse.from_dataclass(first_action)]
 
     return {
         "execution": execution.model_dump(),
@@ -439,12 +443,39 @@ def _assert_active_task(engine: ExecutionEngine, task_id: str) -> None:
         )
 
 
+def _mark_execution_failed(engine: ExecutionEngine, *, reason: str) -> None:
+    """Best-effort failure stamp for executions that persisted before startup failed."""
+    try:
+        state = engine._load_state()  # noqa: SLF001
+    except Exception:
+        _log.warning("Could not load execution state after startup failure", exc_info=True)
+        return
+    if state is None:
+        return
+    try:
+        state.transition_to_failed(reason=reason)
+        engine._save_execution(state)  # noqa: SLF001
+    except Exception:
+        _log.warning(
+            "Could not persist failed execution state after startup failure",
+            exc_info=True,
+        )
+
+
 def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
     """Return the next batch of dispatchable actions (parallel where possible).
 
     Attempts ``engine.next_actions()`` first for parallel dispatch.
     Falls back to ``engine.next_action()`` (single) if the parallel
-    method fails.  Returns an empty list if both fail.
+    method fails. Returns an empty list if both fail, except for strict
+    team-backend configuration errors, which are surfaced to callers.
+
+    Deliberate semantic split for ``UnknownTeamBackendError``: at start
+    time the caller marks the execution failed (nothing has run, the plan
+    can be re-POSTed), but mid-run the 500 leaves status ``running`` — the
+    error is a recoverable env misconfiguration and completed work must
+    stay resumable. Pinned by
+    ``test_unknown_backend_mid_run_keeps_execution_running``.
 
     Args:
         engine: The ``ExecutionEngine`` to query.
@@ -459,11 +490,15 @@ def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
         parallel = engine.next_actions()
         if parallel:
             return [ActionResponse.from_dataclass(a) for a in parallel]
+    except UnknownTeamBackendError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception:
         _log.warning("next_actions() failed, falling back to next_action()", exc_info=True)
     try:
         single = engine.next_action()
         return [ActionResponse.from_dataclass(single)]
+    except UnknownTeamBackendError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception:
         _log.warning("next_action() failed, returning empty actions", exc_info=True)
         return []

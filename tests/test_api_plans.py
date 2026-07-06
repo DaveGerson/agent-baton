@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -45,7 +46,45 @@ def make_test_plan(task_id: str = "test-task") -> MachinePlan:
                 gate=PlanGate(gate_type="test", command="pytest"),
             ),
         ],
+        plan_diagnostics={
+            "task_type": "feature",
+            "knowledge_packs_loaded": 0,
+            "attachments_selected": 0,
+        },
     )
+
+
+def _write_project_knowledge_pack(project_root: Path) -> None:
+    pack_dir = project_root / ".claude" / "knowledge" / "project-rules"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "knowledge.yaml").write_text(
+        yaml.dump(
+            {
+                "name": "project-rules",
+                "description": "Project-specific rules",
+                "tags": ["architecture"],
+                "target_agents": ["architect", "backend-engineer"],
+                "default_delivery": "reference",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "architecture.md").write_text(
+        "---\n"
+        "name: architecture\n"
+        "description: Architecture guide\n"
+        "tags: [architecture]\n"
+        "---\n"
+        + ("x" * 400),
+        encoding="utf-8",
+    )
+
+
+def _sandbox_empty_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return home
 
 
 # ===========================================================================
@@ -97,6 +136,38 @@ class TestCreatePlan:
         computed = sum(len(p["steps"]) for p in body["phases"])
         assert body["total_steps"] == computed
 
+    def test_create_plan_response_includes_plan_diagnostics(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/v1/plans",
+            json={"description": "Design the architecture for a new feature"},
+        )
+        body = r.json()
+
+        assert isinstance(body["plan_diagnostics"], dict)
+        assert "knowledge_packs_loaded" in body["plan_diagnostics"]
+        assert "phase_count" in body["plan_diagnostics"]
+        assert "selected_agents" in body["plan_diagnostics"]
+
+    def test_create_plan_uses_request_project_path_for_knowledge_loading(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sandbox_empty_home(tmp_path, monkeypatch)
+        project_root = tmp_path / "project-root"
+        _write_project_knowledge_pack(project_root)
+
+        r = client.post(
+            "/api/v1/plans",
+            json={
+                "description": "Design the architecture for a new feature",
+                "project_path": str(project_root),
+            },
+        )
+        body = r.json()
+
+        assert r.status_code == 201
+        assert body["plan_diagnostics"]["knowledge_packs_loaded"] == 1
+        assert body["plan_diagnostics"]["attachments_selected"] > 0
+
 
 # ===========================================================================
 # GET /api/v1/plans/{plan_id}
@@ -124,3 +195,12 @@ class TestGetPlan:
         r = client.get("/api/v1/plans/my-plan-123")
         body = r.json()
         assert body["plan_id"] == "my-plan-123"
+
+    def test_active_plan_returns_plan_diagnostics(self, client: TestClient) -> None:
+        plan = make_test_plan(task_id="diagnostics-plan")
+        client.post("/api/v1/executions", json={"plan": plan.to_dict()})
+
+        r = client.get("/api/v1/plans/diagnostics-plan")
+        body = r.json()
+
+        assert body["plan_diagnostics"] == plan.plan_diagnostics

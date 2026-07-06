@@ -1,5 +1,5 @@
 site_name: Agent Baton
-site_description: Multi-agent orchestration system for Claude Code — intelligent planning, delegation, and governance for complex software engineering tasks.
+site_description: Agent Baton is a project manager for Claude Code — plan with foresight, compose the right specialist team, dispatch the right agent at the right time, and keep work on track with checks and balances.
 site_url: https://davegerson.github.io/agent-baton/
 site_author: Dave Gerson
 repo_url: https://github.com/DaveGerson/agent-baton
@@ -79,7 +79,11 @@ markdown_extensions:
       anchor_linenums: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.tasklist:
@@ -105,6 +109,12 @@ extra:
 
 nav:
   - Home: index.md
+  - The Four Pillars:
+      - pillars.md
+      - Plan with Foresight: pillars/plan-with-foresight.md
+      - Compose the Right Team: pillars/compose-the-right-team.md
+      - Right Agent, Right Time: pillars/right-agent-right-time.md
+      - Checks & Balances: pillars/checks-and-balances.md
   - Getting Started:
       - Orchestrator Usage: orchestrator-usage.md
       - Agent Roster: agent-roster.md

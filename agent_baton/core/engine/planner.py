@@ -13,7 +13,11 @@ All symbols are re-exported from the new locations in utils/ and rules/.
 from __future__ import annotations
 
 # --- Public class: pipeline-based planner ---
-from agent_baton.core.engine.planning.planner import IntelligentPlanner
+from agent_baton.core.engine.planning.planner import (
+    IntelligentPlanner,
+    build_default_knowledge_registry,
+    ensure_plan_diagnostics,
+)
 
 # --- GateScope and gate helpers ---
 from agent_baton.core.engine.planning.utils.gates import (
@@ -44,6 +48,8 @@ from agent_baton.core.engine.planning.rules.templates import (
 
 __all__ = [
     "IntelligentPlanner",
+    "build_default_knowledge_registry",
+    "ensure_plan_diagnostics",
     "GateScope",
     "_AGENT_ALIASES",
     "_AGENT_DELIVERABLES",

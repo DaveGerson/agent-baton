@@ -5,6 +5,9 @@ SQLite databases, the central read-replica, federated sync, external source
 adapters, cross-project queries, the PMO portfolio overlay, and the PMO UI
 frontend.
 
+!!! abstract "Pillar context"
+    This page covers **Pillar 3 — Right agent, right problem, right time**: the PMO plan-to-merge flow, the persistence layer that stores and replays every execution, and the cross-project analytics that keep the right work moving through the right hands at the right moment. For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
+
 ---
 
 ## 1. Overview

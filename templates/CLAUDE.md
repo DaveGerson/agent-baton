@@ -257,7 +257,9 @@ specialist agents.
 For simple, single-domain tasks (bug fixes, small features, utility
 functions), work directly without the orchestrator.
 
-## Assurance Surface
+## Regulated Domain Guardrails
+
+For regulated-domain work only — these guardrails (the README's Pillar 4) keep high-risk, audit-controlled changes from diverging.
 
 Org-level assurance packs are stored in `.claude/packs/`. Validate the active
 pack configuration with:

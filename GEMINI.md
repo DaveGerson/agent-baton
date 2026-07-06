@@ -22,7 +22,7 @@ agent_baton/       Python package (the orchestration engine)
                      bundles). Config: core/config/manager.py. Models:
                      models/manager.py. See docs/internal/manager-mode-pmo-design.md.
 agents/            Distributable agent definitions (30 .md)
-references/        Distributable reference procedures (19 .md)
+references/        Distributable reference procedures (20 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
 scripts/           install.sh, install.ps1, record_spec_audit_beads.py
 tests/             pytest suite
@@ -90,13 +90,16 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_BD_ENABLED` | Kept for backward compatibility. Has no effect after WP-G — `bd` is always required. | `1` |
 | `BATON_BD_BIN` | Path/name of the `bd` binary used by `BdClient`. | `bd` |
 | `BATON_BD_PREFIX` | Issue prefix passed to `bd init` so generated IDs match baton's `bd-<hash>` scheme. | `bd` |
-| `BATON_PLANNER_HARD_GATE` | Enable hard validation gate that blocks structurally defective plans (deterministic checks — empty plans/phases, agent mismatches) | unset |
+| `BATON_DEV_MODE` | Downgrade planner validation defects to warnings for local experimentation unless `BATON_PLANNER_HARD_GATE` is truthy. | unset |
+| `BATON_PLANNER_WARN_ONLY` | Downgrade planner validation defects to warnings without enabling broader dev-mode behavior unless `BATON_PLANNER_HARD_GATE` is truthy. | unset |
+| `BATON_PLANNER_HARD_GATE` | Force planner validation to block even when dev/warn-only mode is set. Blocking is already the default when neither warn-only flag is enabled. | unset |
 | `BATON_ARTIFACT_VALIDATION` | Derive extra gate commands from agent-created runnable artifacts (CI workflows, npm scripts, Playwright config, Makefile targets, pre-commit). Set to `0` to suppress derivation and run only the planned `gate.command`. | `1` |
 | `BATON_OTEL_ENABLED` | Enable OpenTelemetry JSONL export | unset |
 | `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution + raise on compliance audit write failure (regulated-domain). When unset/`0`, failures are logged + a bead warning is emitted, execution continues. Can be overridden per-plan via `MachinePlan.compliance_fail_closed` (plan value takes precedence). Also governs `baton comply-record` hook: `1` → exit 1 on write errors. | `0` |
 | `BATON_POLICY_FAIL_CLOSED` | Controls `baton policy-check` hook error handling: `0` → fail-open (bad stdin or unreadable policy → stderr warning, exit 0); `1` → exit 2 (blocks the tool call, shows stderr to the model). | `0` |
 | `BATON_GOAL_EVALUATOR` | Selects the goal evaluator strategy for `/goal` (G1): `stub` (deterministic, no LLM), `haiku` (Claude Haiku 4.5), or `opus` (Claude Opus 4.8). `haiku`/`opus` require `ANTHROPIC_API_KEY`; otherwise falls back to `stub`. | `haiku` |
-| `BATON_TEAMS_BACKEND` | Selects the execution backend for team steps (A1). Two supported backends: `worktree` (default — parallel worktree-isolated dispatch, resumable via `baton execute resume`, nesting + full agent frontmatter honored) or `claude-teams` (native Agent Teams UX — inter-teammate messaging, shared task list, lead plan-approval; requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; constraints: no resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates). Unknown values warn and fall back to `worktree`. | `worktree` |
+| `BATON_TEAMS_BACKEND` | Selects the execution backend for team steps (A1). Two supported backends: `worktree` (default — parallel worktree-isolated dispatch, resumable via `baton execute resume`, nesting + full agent frontmatter honored) or `claude-teams` (native Agent Teams UX — inter-teammate messaging, shared task list, lead plan-approval; requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; constraints: no resume, one team at a time, no nested teams, `skills`/`mcpServers` frontmatter not honored on teammates). Unknown values warn and fall back to `worktree` unless `BATON_TEAMS_BACKEND_STRICT=1`. | `worktree` |
+| `BATON_TEAMS_BACKEND_STRICT` | When `1`, unknown `BATON_TEAMS_BACKEND` values raise `UnknownTeamBackendError` instead of silently falling back to `worktree`. | `0` |
 | `BATON_TEAMS_STRICT_RESUMABILITY` | When `1` AND `BATON_TEAMS_BACKEND=claude-teams` AND the plan has team phases the claude-teams backend cannot resume mid-flight under `long-running` budget, `baton plan`/`baton goal` refuses to save and exits 2. Default (`0`) downgrades the refusal to a warning. | `0` |
 | `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |
 | `BATON_MANAGER_ENRICH` | Optional LLM polish of the manager-mode project charter's `objective`/`background`/`assumptions` wording (never new scope/paths/facts): `off` (default) \| `haiku` \| `sonnet` \| `opus`. Runs post-deterministic-build — `ProjectCharterBuilder` itself stays fully deterministic; only `--manager-mode` plans call this. Requires `ANTHROPIC_API_KEY`; any failure (missing SDK/key, network, malformed response) silently falls back to the deterministic charter. | `off` |

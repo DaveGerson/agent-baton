@@ -4,10 +4,14 @@ audience: agents, maintainers
 see-also:
   - [orchestrator-usage.md](orchestrator-usage.md)
   - [../references/agent-routing.md](../references/agent-routing.md)
+  - [../references/agent-authoring.md](../references/agent-authoring.md)
   - [cli-reference.md](cli-reference.md#baton-agents)
 ---
 
 # Agent roster
+
+!!! abstract "Pillar context"
+    This page details **Pillar 2 — Compose the right team**. For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
 
 This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **30** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
 
@@ -22,7 +26,11 @@ Agents do not run on their own. They run when:
 1. The **orchestrator agent** dispatches them as part of a baton-driven plan, OR
 2. A user (or another agent) names them via Claude Code's `Agent` tool with a `subagent_type` parameter.
 
-Each agent file in `agents/` contains a YAML frontmatter block (`name`, `description`, `model`, `tools`) and a body prompt. The frontmatter is what the runtime registers; the body is what the agent reads when dispatched.
+Agent files in `agents/` use a YAML frontmatter block and a body prompt. The
+frontmatter is what the runtime registers; the body is what the agent reads
+when dispatched. New or updated/generated agents should include `name`,
+`description`, `model`, `permissionMode`, and `tools`, and should follow the
+generated-agent contract in [`references/agent-authoring.md`](../references/agent-authoring.md).
 
 ## Orchestration & routing
 
@@ -96,4 +104,4 @@ Each agent file in `agents/` contains a YAML frontmatter block (`name`, `descrip
 
 ---
 
-For the routing logic that picks among these agents, see [`references/agent-routing.md`](../references/agent-routing.md). For risk-tier guardrails, see [`references/guardrail-presets.md`](../references/guardrail-presets.md). For each agent's full prompt, read the matching file in `agents/<name>.md`.
+For the routing logic that picks among these agents, see [`references/agent-routing.md`](../references/agent-routing.md). For the generated-agent authoring contract, see [`references/agent-authoring.md`](../references/agent-authoring.md). For risk-tier guardrails, see [`references/guardrail-presets.md`](../references/guardrail-presets.md). For each agent's full prompt, read the matching file in `agents/<name>.md`.

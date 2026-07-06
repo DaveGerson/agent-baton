@@ -9,10 +9,13 @@
 
 ---
 
+!!! abstract "Pillar context"
+    The components described here implement the four pillars. For the high-level map, see [The Four Pillars](../pillars.md).
+
 ## 1. System overview
 
-Agent Baton is a Python orchestration engine that drives Claude Code
-subagents through structured execution plans. A single `agent_baton/`
+Agent Baton is a project manager for Claude Code that drives subagents
+through structured execution plans. A single `agent_baton/`
 package provides three coequal interfaces — CLI, HTTP API, and a React
 PMO frontend — over a shared engine and storage layer.
 
@@ -64,7 +67,7 @@ distributable assets:
 | Artifact | Location | Purpose |
 |----------|----------|---------|
 | `agent_baton/` Python package | `pyproject.toml` editable install | The engine, CLI, API, and bundled agents |
-| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 30 agent definitions |
+| `agents/` markdown | Installed to `~/.claude/agents/` by `scripts/install.sh` | 30 agent definitions (Pillar 2) |
 | `references/` markdown | Installed to `~/.claude/references/` | 19 procedure references |
 | `templates/` | Installed to project's `.claude/` | `CLAUDE.md` + `settings.json` + skills |
 | `pmo-ui/dist/` | Built and served at `/pmo/` by FastAPI | React PMO frontend |
@@ -77,8 +80,8 @@ The `baton` console-script is registered by `pyproject.toml`.
 |-----------|------|-------|
 | `baton` CLI | Console script | [`agent_baton/cli/main.py`](../../agent_baton/cli/main.py) |
 | HTTP API | FastAPI app | [`agent_baton/api/server.py`](../../agent_baton/api/server.py) |
-| PMO frontend | React/Vite SPA | [`pmo-ui/`](../../pmo-ui/) |
-| Execution engine | State machine | [`agent_baton/core/engine/executor.py`](../../agent_baton/core/engine/executor.py) |
+| PMO frontend | React/Vite SPA | [`pmo-ui/`](../../pmo-ui/) (Pillar 3) |
+| Execution engine | State machine | [`agent_baton/core/engine/executor.py`](../../agent_baton/core/engine/executor.py) (Pillar 3) |
 | Async runtime | `asyncio` driver | [`agent_baton/core/runtime/worker.py`](../../agent_baton/core/runtime/worker.py) |
 | Per-project store | SQLite + JSON | `.claude/team-context/baton.db` (+ legacy JSON) |
 | Federated store | SQLite (read replica) | `~/.baton/central.db` |

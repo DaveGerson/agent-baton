@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1400,6 +1400,18 @@ CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted
 -- ConnectionManager._run_migrations() (see v45's note above).
 ALTER TABLE plans ADD COLUMN manager_mode INTEGER NOT NULL DEFAULT 0;
 """,
+    47: """
+-- v47: persist plan diagnostics as a JSON blob on plans.
+--
+-- Applied to BOTH project and central databases. Project DBs have a single
+-- task_id primary key; central DBs have (project_id, task_id). The additive
+-- column shape works for both and keeps MachinePlan.to_dict()/from_dict()
+-- diagnostics round-trips intact after SQLite normalization.
+--
+-- Renumbered from 46 on merge: master's v46 (manager_mode) was already
+-- published, so databases migrated by master must still receive this column.
+ALTER TABLE plans ADD COLUMN plan_diagnostics TEXT NOT NULL DEFAULT '{}';
+""",
 }
 
 # =====================================================================
@@ -1554,6 +1566,7 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    plan_diagnostics           TEXT NOT NULL DEFAULT '{}',
     -- release_id: soft FK to releases.release_id (R3.1).  Not declared as a
     -- hard REFERENCES because the v16 migration (ALTER TABLE ADD COLUMN)
     -- cannot add an FK in SQLite, and migrated vs. fresh DBs must behave
@@ -2669,6 +2682,7 @@ CREATE TABLE IF NOT EXISTS plans (
     task_type                  TEXT,
     classification_signals     TEXT,
     classification_confidence  REAL,
+    plan_diagnostics           TEXT NOT NULL DEFAULT '{}',
     release_id                 TEXT,
     -- v46 (M9): manager-mode PMO layer flag -- see MIGRATIONS[46] above.
     manager_mode                INTEGER NOT NULL DEFAULT 0,

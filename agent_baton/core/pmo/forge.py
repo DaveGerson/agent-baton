@@ -26,6 +26,11 @@ from typing import TYPE_CHECKING
 
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude
+from agent_baton.core.engine.planner import (
+    build_default_knowledge_registry,
+    ensure_plan_diagnostics,
+)
+from agent_baton.core.engine.planning.stages.validation import validate_assembled_plan
 from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
 
@@ -69,6 +74,30 @@ class ForgeSession:
         self._headless = headless or HeadlessClaude()
         self._session_started: str | None = None
         self._plans_created: int = 0
+
+    def _finalize_headless_plan(
+        self,
+        plan: MachinePlan,
+        *,
+        project_root: Path | None,
+    ) -> MachinePlan:
+        resolver = getattr(self._planner, "_resolve_knowledge_registry", None)
+        if callable(resolver):
+            knowledge_registry = resolver(project_root)
+        else:
+            knowledge_registry = build_default_knowledge_registry(project_root=project_root)
+        services = self._planner._build_services(knowledge_registry=knowledge_registry)
+        validate_assembled_plan(
+            plan,
+            services=services,
+            project_root=project_root,
+        )
+        ensure_plan_diagnostics(
+            plan,
+            knowledge_registry=knowledge_registry,
+            classification_source=plan.classification_source,
+        )
+        return plan
 
     def create_plan(
         self,
@@ -130,6 +159,7 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                self._finalize_headless_plan(plan, project_root=project_root)
                 self._plans_created += 1
                 logger.info("Forge: plan generated via headless Claude")
                 return plan
@@ -336,6 +366,7 @@ class ForgeSession:
                 )
             if plan is not None:
                 plan.classification_source = "headless-claude"
+                self._finalize_headless_plan(plan, project_root=project_root)
                 logger.info("Forge: regenerated plan via headless Claude")
                 return plan
             logger.warning("Forge: headless regen failed, falling back to IntelligentPlanner")

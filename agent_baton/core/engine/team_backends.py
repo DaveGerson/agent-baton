@@ -41,12 +41,15 @@ rationale.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agent_baton.models.execution import MachinePlan, PlanStep
+from agent_baton.utils.frontmatter import parse_frontmatter
 
 _log = logging.getLogger(__name__)
 
@@ -141,6 +144,68 @@ class WorktreeTeamBackend:
 # Official Agent Teams guidance: keep teams small (≤5 members) so the lead
 # can coordinate effectively. Larger teams should be split.
 _MAX_TEAM_MEMBERS = 5
+
+CLAUDE_TEAMS_CAVEATS: tuple[str, ...] = (
+    "no resume: baton execute resume cannot revive in-flight Claude Teams teammates",
+    "no nesting: nested teams are flattened for Claude Teams dispatch",
+    "one team at a time: a lead session can coordinate only one Agent Team at a time",
+    "fixed permissions: teammate permissions are fixed at spawn time",
+    "missing skills/MCP frontmatter: subagent skills and mcpServers frontmatter are not honored for teammates",
+)
+
+
+class UnknownTeamBackendError(ValueError):
+    """Raised when strict backend selection rejects an unknown backend."""
+
+
+@dataclass(frozen=True)
+class TeamReadinessDiagnostics:
+    """Structured readiness summary emitted before a team step is dispatched."""
+
+    backend: str
+    step_id: str
+    member_count: int
+    top_level_member_count: int
+    nested_team_count: int
+    shared_files: list[str]
+    shared_contracts: list[dict[str, object]]
+    synthesis_strategy: str
+    conflict_strategy: str
+    warnings: list[str]
+    report_path: str = ""
+
+    @property
+    def warning_count(self) -> int:
+        return len(self.warnings)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "backend": self.backend,
+            "step_id": self.step_id,
+            "member_count": self.member_count,
+            "top_level_member_count": self.top_level_member_count,
+            "nested_team_count": self.nested_team_count,
+            "shared_files": list(self.shared_files),
+            "shared_contracts": [dict(c) for c in self.shared_contracts],
+            "synthesis_strategy": self.synthesis_strategy,
+            "conflict_strategy": self.conflict_strategy,
+            "warning_count": self.warning_count,
+            "warnings": list(self.warnings),
+            "report_path": self.report_path,
+        }
+
+    def with_report_path(self, report_path: str) -> "TeamReadinessDiagnostics":
+        return replace(self, report_path=report_path)
+
+
+def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
 
 
 def _flatten_members(team: list["TeamMember"]) -> list["TeamMember"]:
@@ -418,9 +483,127 @@ class ClaudeTeamsBackend:
             "(`baton execute resume` cannot revive an in-flight team).\n"
             "- One team at a time; clean up before another team step.\n"
             "- No nested teams (sub-teams are flattened above).\n"
+            "- Fixed permissions at spawn time; adjust permissions before launch.\n"
             "- Subagent `skills` / `mcpServers` frontmatter is NOT honored on "
             "teammates.\n"
         )
+
+
+# ---------------------------------------------------------------------------
+# Readiness diagnostics + report artifact
+# ---------------------------------------------------------------------------
+
+def build_team_readiness_diagnostics(
+    *,
+    plan: MachinePlan,
+    step: PlanStep,
+    backend_name: str,
+    team_context_root: Path | None = None,
+) -> TeamReadinessDiagnostics:
+    """Build the runtime readiness payload for a team step.
+
+    The payload is deliberately small and serializable so it can be written to
+    ``team-report.json``, copied into ``MachinePlan.plan_diagnostics``, and
+    summarized in dispatch messages without changing plan schema.
+    """
+    flat_members = _flatten_members(step.team)
+    nested_team_count = sum(1 for member in flat_members if member.sub_team)
+    synthesis = step.synthesis
+    warnings: list[str] = []
+
+    if backend_name == ClaudeTeamsBackend.name:
+        # Step-specific warnings come first: the dispatch summary caps
+        # warning_notes, and the static caveats would otherwise consume it.
+        if nested_team_count:
+            warnings.append(
+                f"team has {nested_team_count} nested team(s); claude-teams "
+                "will flatten the structure"
+            )
+        if len(step.team) > _MAX_TEAM_MEMBERS:
+            warnings.append(
+                f"team has {len(step.team)} top-level members; recommended "
+                f"maximum is {_MAX_TEAM_MEMBERS}"
+            )
+        if team_context_root is not None:
+            safety_flags = ClaudeTeamsBackend._audit_step_agents(
+                step, team_context_root,
+            )
+            for agent_name, fields in sorted(safety_flags.items()):
+                warnings.append(
+                    f"agent {agent_name} declares {'/'.join(fields)} "
+                    "frontmatter; claude-teams teammates will miss it"
+                )
+        warnings.extend(CLAUDE_TEAMS_CAVEATS)
+
+    shared_contracts = [
+        {
+            "member_id": member.member_id,
+            "agent_name": member.agent_name,
+            "role": member.role,
+            "task_description": member.task_description,
+            "deliverables": list(member.deliverables),
+        }
+        for member in flat_members
+    ]
+
+    return TeamReadinessDiagnostics(
+        backend=backend_name,
+        step_id=step.step_id,
+        member_count=len(flat_members),
+        top_level_member_count=len(step.team),
+        nested_team_count=nested_team_count,
+        shared_files=_dedupe(list(step.context_files or [])),
+        shared_contracts=shared_contracts,
+        synthesis_strategy=(
+            synthesis.strategy if synthesis is not None else "concatenate"
+        ),
+        conflict_strategy=(
+            synthesis.conflict_handling if synthesis is not None else "auto_merge"
+        ),
+        warnings=warnings,
+    )
+
+
+def write_team_readiness_report(
+    *,
+    diagnostics: TeamReadinessDiagnostics,
+    team_context_root: Path,
+) -> TeamReadinessDiagnostics:
+    """Write ``team-report.json`` under the existing team artifact directory."""
+    team_dir = team_context_root / "teams" / f"team-{diagnostics.step_id}"
+    team_dir.mkdir(parents=True, exist_ok=True)
+    report = team_dir / "team-report.json"
+    try:
+        report_path = report.relative_to(team_context_root).as_posix()
+    except ValueError:
+        report_path = report.as_posix()
+    diagnostics = diagnostics.with_report_path(report_path)
+    report.write_text(
+        json.dumps(diagnostics.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return diagnostics
+
+
+def format_team_readiness_summary(
+    diagnostics: TeamReadinessDiagnostics,
+) -> str:
+    """Return a one-line summary safe for existing CLI/API message fields."""
+    parts = [
+        f"Team readiness: backend={diagnostics.backend}",
+        f"members={diagnostics.member_count}",
+        f"nested={diagnostics.nested_team_count}",
+        f"shared_files={len(diagnostics.shared_files)}",
+        f"contracts={len(diagnostics.shared_contracts)}",
+        f"synthesis={diagnostics.synthesis_strategy}",
+        f"conflict={diagnostics.conflict_strategy}",
+        f"warnings={diagnostics.warning_count}",
+    ]
+    if diagnostics.report_path:
+        parts.append(f"report={diagnostics.report_path}")
+    if diagnostics.warnings:
+        parts.append("warning_notes=[" + "; ".join(diagnostics.warnings[:5]) + "]")
+    return "; ".join(parts) + "."
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +616,15 @@ _BACKENDS: dict[str, type[TeamBackend]] = {
 }
 
 
+def _strict_backend_selection_enabled() -> bool:
+    return os.environ.get("BATON_TEAMS_BACKEND_STRICT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def select_team_backend(name: str | None = None) -> TeamBackend:
     """Return the configured TeamBackend instance.
 
@@ -441,16 +633,21 @@ def select_team_backend(name: str | None = None) -> TeamBackend:
     2. ``BATON_TEAMS_BACKEND`` env var.
     3. Default: ``"worktree"``.
 
-    Unknown values log a warning and fall back to ``"worktree"`` so a
-    typo in settings never breaks execution.
+    Unknown values log a warning and fall back to ``"worktree"`` by default
+    so a typo in settings never breaks execution. Set
+    ``BATON_TEAMS_BACKEND_STRICT=1`` to fail instead.
     """
     chosen = (name or os.environ.get("BATON_TEAMS_BACKEND") or "worktree").strip().lower()
     cls = _BACKENDS.get(chosen)
     if cls is None:
+        msg = (
+            f"Unknown BATON_TEAMS_BACKEND={chosen!r}. "
+            f"Valid choices: {sorted(_BACKENDS)}"
+        )
+        if _strict_backend_selection_enabled():
+            raise UnknownTeamBackendError(msg)
         _log.warning(
-            "Unknown BATON_TEAMS_BACKEND=%r; falling back to 'worktree'. "
-            "Valid choices: %s",
-            chosen, sorted(_BACKENDS),
+            "%s; falling back to 'worktree'.", msg,
         )
         cls = WorktreeTeamBackend
     return cls()
@@ -467,10 +664,9 @@ def audit_agents_for_teammate_safety(
     YAML frontmatter declares load-bearing fields that Claude Code Agent
     Teams does NOT honor when the agent is used as a teammate.
 
-    Read the .md files in *agents_dir*, parse the YAML header (a thin
-    inline parser — no PyYAML dep so the helper stays cheap to import),
-    and flag any agent with non-empty ``skills:`` or ``mcpServers:``
-    fields.
+    Read the .md files in *agents_dir*, parse the YAML header through the
+    shared frontmatter utility, and flag any agent with non-empty
+    ``skills:`` or ``mcpServers:`` values.
     """
     flagged: dict[str, list[str]] = {}
     if not agents_dir.exists():
@@ -480,28 +676,28 @@ def audit_agents_for_teammate_safety(
             text = md.read_text(encoding="utf-8")
         except OSError:
             continue
-        # Frontmatter starts and ends with --- on its own line.
-        if not text.startswith("---"):
-            continue
-        try:
-            _, fm, _ = text.split("---", 2)
-        except ValueError:
+        metadata, _body = parse_frontmatter(text)
+        if not isinstance(metadata, dict):
             continue
         agent_name = md.stem
         problems: list[str] = []
         for field in ("skills", "mcpServers"):
-            # Look for "field:" at start of a line, followed by a
-            # non-empty value or a yaml list.
-            for line in fm.splitlines():
-                stripped = line.strip()
-                if stripped.startswith(f"{field}:"):
-                    rhs = stripped.split(":", 1)[1].strip()
-                    if rhs and rhs not in ("[]", "{}", "null", "~"):
-                        problems.append(field)
-                    break
+            if field in metadata and _frontmatter_value_is_non_empty(metadata[field]):
+                problems.append(field)
         if problems:
             flagged[agent_name] = problems
     return flagged
+
+
+def _frontmatter_value_is_non_empty(value: object) -> bool:
+    """Return True when a parsed frontmatter value declares real content."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return bool(value)
 
 
 def check_resumability_constraints(plan: MachinePlan) -> list[str]:
@@ -557,6 +753,11 @@ __all__ = [
     "TeamBackend",
     "WorktreeTeamBackend",
     "ClaudeTeamsBackend",
+    "TeamReadinessDiagnostics",
+    "UnknownTeamBackendError",
+    "build_team_readiness_diagnostics",
+    "format_team_readiness_summary",
+    "write_team_readiness_report",
     "select_team_backend",
     "audit_agents_for_teammate_safety",
     "check_resumability_constraints",

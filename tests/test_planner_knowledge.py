@@ -79,6 +79,13 @@ def _make_registry(knowledge_root: Path) -> KnowledgeRegistry:
     return reg
 
 
+def _sandbox_empty_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return home
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -135,6 +142,7 @@ def planner_no_registry(tmp_path: Path) -> IntelligentPlanner:
     """IntelligentPlanner with no knowledge_registry — knowledge resolution is skipped."""
     return IntelligentPlanner(
         team_context_root=tmp_path / "team-context",
+        knowledge_registry=None,
     )
 
 
@@ -150,9 +158,136 @@ class TestPlannerKnowledgeInit:
         )
         assert planner.knowledge_registry is registry
 
-    def test_default_registry_is_none(self, tmp_path: Path) -> None:
+    def test_default_registry_loads_project_knowledge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge_root = tmp_path / ".claude" / "knowledge"
+        pack_dir = knowledge_root / "project-rules"
+        pack_dir.mkdir(parents=True)
+        _make_manifest(
+            pack_dir,
+            name="project-rules",
+            description="Project-specific rules",
+            tags=["architecture"],
+            target_agents=["architect", "backend-engineer"],
+        )
+        _make_doc(
+            pack_dir,
+            "architecture.md",
+            name="architecture",
+            tags=["architecture"],
+        )
+        monkeypatch.chdir(tmp_path)
+
         planner = IntelligentPlanner(team_context_root=tmp_path / "tc")
+        assert planner.knowledge_registry is not None
+        assert planner.knowledge_registry.get_pack("project-rules") is not None
+
+    def test_explicit_none_preserves_registry_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge_root = tmp_path / ".claude" / "knowledge"
+        pack_dir = knowledge_root / "project-rules"
+        pack_dir.mkdir(parents=True)
+        _make_manifest(
+            pack_dir,
+            name="project-rules",
+            description="Project-specific rules",
+            tags=["architecture"],
+            target_agents=["architect", "backend-engineer"],
+        )
+        _make_doc(
+            pack_dir,
+            "architecture.md",
+            name="architecture",
+            tags=["architecture"],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        planner = IntelligentPlanner(
+            team_context_root=tmp_path / "tc",
+            knowledge_registry=None,
+        )
+
         assert planner.knowledge_registry is None
+        plan = planner.create_plan("Design the architecture for a new endpoint")
+        for step in plan.all_steps:
+            assert step.knowledge == []
+
+    def test_create_plan_uses_project_root_for_auto_managed_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sandbox_empty_home(tmp_path, monkeypatch)
+        project_root = tmp_path / "project-root"
+        knowledge_root = project_root / ".claude" / "knowledge"
+        pack_dir = knowledge_root / "project-rules"
+        pack_dir.mkdir(parents=True)
+        _make_manifest(
+            pack_dir,
+            name="project-rules",
+            description="Project-specific rules",
+            tags=["architecture"],
+            target_agents=["architect", "backend-engineer"],
+        )
+        _make_doc(
+            pack_dir,
+            "architecture.md",
+            name="architecture",
+            description="Architecture guide",
+            tags=["architecture"],
+        )
+        outside_cwd = tmp_path / "outside-cwd"
+        outside_cwd.mkdir()
+        monkeypatch.chdir(outside_cwd)
+
+        planner = IntelligentPlanner(team_context_root=tmp_path / "tc")
+        plan = planner.create_plan(
+            "Design the architecture for a new endpoint",
+            project_root=project_root,
+        )
+
+        diagnostics = plan.plan_diagnostics
+        assert diagnostics["knowledge_packs_loaded"] == 1
+        assert diagnostics["docs_indexed"] == 1
+        assert diagnostics["attachments_selected"] > 0
+
+    def test_explicit_none_ignores_project_root_knowledge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project_root = tmp_path / "project-root"
+        knowledge_root = project_root / ".claude" / "knowledge"
+        pack_dir = knowledge_root / "project-rules"
+        pack_dir.mkdir(parents=True)
+        _make_manifest(
+            pack_dir,
+            name="project-rules",
+            description="Project-specific rules",
+            tags=["architecture"],
+            target_agents=["architect", "backend-engineer"],
+        )
+        _make_doc(
+            pack_dir,
+            "architecture.md",
+            name="architecture",
+            tags=["architecture"],
+        )
+        outside_cwd = tmp_path / "outside-cwd"
+        outside_cwd.mkdir()
+        monkeypatch.chdir(outside_cwd)
+
+        planner = IntelligentPlanner(
+            team_context_root=tmp_path / "tc",
+            knowledge_registry=None,
+        )
+        plan = planner.create_plan(
+            "Design the architecture for a new endpoint",
+            project_root=project_root,
+        )
+
+        assert plan.plan_diagnostics["knowledge_packs_loaded"] == 0
+        assert plan.plan_diagnostics["attachments_selected"] == 0
+        for step in plan.all_steps:
+            assert step.knowledge == []
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +392,75 @@ class TestKnowledgeResolutionDuringPlanning:
         assert len(plan.phases) > 0
         assert plan.task_id != ""
         assert plan.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+# ---------------------------------------------------------------------------
+# Tests: plan diagnostics
+# ---------------------------------------------------------------------------
+
+class TestPlanKnowledgeDiagnostics:
+    def test_no_knowledge_packs_reports_zero_loaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sandbox_empty_home(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        planner = IntelligentPlanner(team_context_root=tmp_path / "team-context")
+
+        plan = planner.create_plan("Build a small validation helper")
+
+        diagnostics = plan.plan_diagnostics
+        assert diagnostics["knowledge_packs_loaded"] == 0
+        assert diagnostics["docs_indexed"] == 0
+        assert diagnostics["attachments_selected"] == 0
+        assert diagnostics["degraded_packs"] == []
+        assert diagnostics["phase_count"] == len(plan.phases)
+        assert diagnostics["gate_count"] == sum(1 for p in plan.phases if p.gate)
+        assert diagnostics["validation_warning_count"] >= 0
+
+    def test_loaded_knowledge_packs_and_attachments_are_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _sandbox_empty_home(tmp_path, monkeypatch)
+        knowledge_root = tmp_path / ".claude" / "knowledge"
+        pack_dir = knowledge_root / "architecture-rules"
+        pack_dir.mkdir(parents=True)
+        _make_manifest(
+            pack_dir,
+            name="architecture-rules",
+            description="Architecture rules",
+            tags=["architecture"],
+            target_agents=["architect", "backend-engineer"],
+        )
+        _make_doc(
+            pack_dir,
+            "architecture.md",
+            name="architecture",
+            description="Architecture decisions",
+            tags=["architecture"],
+        )
+        monkeypatch.chdir(tmp_path)
+        planner = IntelligentPlanner(team_context_root=tmp_path / "team-context")
+
+        plan = planner.create_plan("Design the architecture for a new endpoint")
+
+        diagnostics = plan.plan_diagnostics
+        assert diagnostics["knowledge_packs_loaded"] == 1
+        assert diagnostics["docs_indexed"] == 1
+        assert diagnostics["attachments_selected"] > 0
+        assert diagnostics["knowledge_attachment_count"] == diagnostics["attachments_selected"]
+        assert diagnostics["degraded_packs"] == []
+        assert diagnostics["selected_agents"]
+
+    def test_explain_plan_includes_concise_diagnostics_block(
+        self, planner_with_registry: IntelligentPlanner
+    ) -> None:
+        plan = planner_with_registry.create_plan("Design the architecture for an API")
+
+        explanation = planner_with_registry.explain_plan(plan)
+
+        assert "## Plan Diagnostics" in explanation
+        assert "knowledge_packs_loaded" in explanation
+        assert "attachments_selected" in explanation
 
     def test_knowledge_dedup_within_step(
         self, planner_with_registry: IntelligentPlanner

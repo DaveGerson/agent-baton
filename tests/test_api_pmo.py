@@ -31,6 +31,7 @@ replaced with a lightweight stub that returns a deterministic MachinePlan.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -44,7 +45,12 @@ from agent_baton.api.deps import (  # noqa: E402
     get_pmo_scanner,
     get_pmo_store,
 )
+from agent_baton.api.routes import pmo as pmo_routes  # noqa: E402
 from agent_baton.api.server import create_app  # noqa: E402
+from agent_baton.core.engine.planning.stages.validation import (  # noqa: E402
+    PlanDefect,
+    PlanQualityError,
+)
 from agent_baton.core.events.bus import EventBus  # noqa: E402
 from agent_baton.core.events.events import step_completed, task_completed  # noqa: E402
 from agent_baton.core.pmo.scanner import PmoScanner  # noqa: E402
@@ -113,6 +119,21 @@ def _make_forge_stub(store: PmoStore) -> MagicMock:
 
     stub.signal_to_plan.side_effect = _signal_to_plan
     return stub
+
+
+def _plan_quality_error() -> PlanQualityError:
+    defect = PlanDefect(
+        code="audit_missing",
+        severity="critical",
+        message=(
+            "Compliance plans require Audit coverage. "
+            "Remediation: add a terminal Audit phase with an auditor step."
+        ),
+    )
+    return PlanQualityError(
+        "Plan blocked by ValidationStage: [critical] audit_missing",
+        defects=[defect],
+    )
 
 
 @pytest.fixture()
@@ -504,6 +525,63 @@ class TestForgePlan:
         )
         assert r.status_code == 201
 
+    def test_plan_quality_error_returns_structured_422(
+        self, client: TestClient, app
+    ) -> None:
+        _register_project(client, project_id="gate-proj", program="GATE")
+        app.dependency_overrides[get_forge_session]().create_plan.side_effect = (
+            _plan_quality_error()
+        )
+
+        r = client.post(
+            "/api/v1/pmo/forge/plan",
+            json={
+                "description": "Build a regulated data export",
+                "program": "GATE",
+                "project_id": "gate-proj",
+            },
+        )
+
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert detail["error"] == "plan_quality_error"
+        assert detail["defects"][0]["code"] == "audit_missing"
+        assert "Audit phase" in detail["defects"][0]["remediation"]
+
+    def test_plan_quality_error_publishes_failed_progress_before_sentinel(
+        self,
+        client: TestClient,
+        app,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = "gatefail000000000000000000000000"
+        monkeypatch.setattr(
+            pmo_routes.uuid,
+            "uuid4",
+            lambda: SimpleNamespace(hex=session_id),
+        )
+        _register_project(client, project_id="gate-prog", program="GATE")
+        app.dependency_overrides[get_forge_session]().create_plan.side_effect = (
+            _plan_quality_error()
+        )
+
+        r = client.post(
+            "/api/v1/pmo/forge/plan",
+            json={
+                "description": "Build a regulated data export",
+                "program": "GATE",
+                "project_id": "gate-prog",
+            },
+        )
+
+        assert r.status_code == 422
+        queue = pmo_routes._forge_progress_queues.pop(session_id)
+        items = []
+        while not queue.empty():
+            items.append(queue.get_nowait())
+        assert items[-2]["stage"] == "failed"
+        assert items[-1] is None
+
 
 # ===========================================================================
 # POST /api/v1/pmo/forge/approve
@@ -653,6 +731,29 @@ class TestForgeRegenerate:
             },
         )
         assert r.status_code == 422
+
+    def test_plan_quality_error_returns_structured_422(
+        self, client: TestClient, app
+    ) -> None:
+        _register_project(client, project_id="rggate-proj", program="RGG")
+        app.dependency_overrides[get_forge_session]().regenerate_plan.side_effect = (
+            _plan_quality_error()
+        )
+
+        r = client.post(
+            "/api/v1/pmo/forge/regenerate",
+            json={
+                "project_id": "rggate-proj",
+                "description": "Refine a regulated data export",
+                "original_plan": _minimal_plan().to_dict(),
+                "answers": [],
+            },
+        )
+
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert detail["error"] == "plan_quality_error"
+        assert detail["defects"][0]["code"] == "audit_missing"
 
 
 # ===========================================================================

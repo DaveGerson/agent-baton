@@ -7,6 +7,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 AGENTS_DIR="$ROOT_DIR/agents"
 REFS_DIR="$ROOT_DIR/references"
 SKILLS_SRC="$ROOT_DIR/templates/skills"
+AGENT_TEMPLATES_SRC="$ROOT_DIR/templates/agents"
 CLAUDE_MD="$ROOT_DIR/templates/CLAUDE.md"
 SETTINGS_JSON="$ROOT_DIR/templates/settings.json"
 
@@ -88,6 +89,7 @@ REF_TARGET="$BASE/references"
 TEAM_CTX="$BASE/team-context"
 KNOWLEDGE_DIR="$BASE/knowledge"
 SKILLS_DIR="$BASE/skills"
+TEMPLATE_AGENT_TARGET="$BASE/templates/agents"
 
 # Pre-flight: verify write permissions
 if ! mkdir -p "$BASE" 2>/dev/null; then
@@ -109,7 +111,7 @@ echo ""
 echo "  STEP 2: Installing Core Files"
 echo "  ─────────────────────────────"
 
-mkdir -p "$AGENT_TARGET" "$REF_TARGET" "$TEAM_CTX" "$KNOWLEDGE_DIR" "$SKILLS_DIR"
+mkdir -p "$AGENT_TARGET" "$REF_TARGET" "$TEAM_CTX" "$KNOWLEDGE_DIR" "$SKILLS_DIR" "$TEMPLATE_AGENT_TARGET"
 
 agent_count=0
 for f in "$AGENTS_DIR"/*.md; do
@@ -125,6 +127,16 @@ for f in "$REFS_DIR"/*.md; do
     ref_count=$((ref_count + 1))
 done
 
+template_agent_count=0
+if [ -d "$AGENT_TEMPLATES_SRC" ]; then
+    for f in "$AGENT_TEMPLATES_SRC"/*.md; do
+        [ -f "$f" ] || continue
+        cp "$f" "$TEMPLATE_AGENT_TARGET/"
+        echo "  + Agent template: $(basename "$f")"
+        template_agent_count=$((template_agent_count + 1))
+    done
+fi
+
 # Install skills from templates/skills/
 skill_count=0
 if [ -d "$SKILLS_SRC" ]; then
@@ -139,7 +151,7 @@ if [ -d "$SKILLS_SRC" ]; then
     done
 fi
 
-echo "  + Dirs:      team-context/, knowledge/, skills/"
+echo "  + Dirs:      team-context/, knowledge/, skills/, templates/agents/"
 
 # CLAUDE.md — skip on upgrade, but merge identity block if missing
 if [ "$UPGRADE" = true ]; then
@@ -248,7 +260,7 @@ print('  merge: settings.json hooks (' + str(len(src_hooks)) + ' events)')
 fi
 
 echo ""
-echo "  Installed: $agent_count agents + $ref_count references + $skill_count skills"
+echo "  Installed: $agent_count agents + $ref_count references + $skill_count skills + $template_agent_count agent templates"
 
 # ── Step 3: Knowledge Infrastructure ──────────────────────
 echo ""

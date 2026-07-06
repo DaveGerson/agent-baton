@@ -1,0 +1,38 @@
+{
+  "budget_tier": "standard",
+  "complexity": "light",
+  "phases": [
+    {
+      "approval_required": false,
+      "name": "Implement",
+      "phase_id": 1,
+      "steps": [
+        {
+          "agent": "team-lead",
+          "depends_on": [],
+          "step_id": "1.1",
+          "step_type": "developing",
+          "team": []
+        }
+      ]
+    },
+    {
+      "approval_required": false,
+      "name": "Review",
+      "phase_id": 2,
+      "steps": [
+        {
+          "agent": "code-reviewer",
+          "depends_on": [
+            "1.1"
+          ],
+          "step_id": "2.1",
+          "step_type": "reviewing",
+          "team": []
+        }
+      ]
+    }
+  ],
+  "risk_level": "HIGH",
+  "task_type": "test"
+}

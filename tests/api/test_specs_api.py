@@ -30,6 +30,10 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from agent_baton.api.server import create_app  # noqa: E402
+from agent_baton.core.engine.planning.stages.validation import (  # noqa: E402
+    PlanDefect,
+    PlanQualityError,
+)
 from agent_baton.core.federate.spec_draft_store import SpecDraftStore  # noqa: E402
 
 
@@ -57,6 +61,18 @@ def client(tmp_path: Path, spec_db: Path, monkeypatch):
     monkeypatch.setattr(_enrich_mod, "_run_enrichment", lambda spec_id, store: None)
     app = create_app(team_context_root=tmp_path)
     return TestClient(app)
+
+
+def _plan_quality_error() -> PlanQualityError:
+    defect = PlanDefect(
+        code="audit_missing",
+        severity="critical",
+        message=(
+            "Compliance plans require Audit coverage. "
+            "Remediation: add a terminal Audit phase with an auditor step."
+        ),
+    )
+    return PlanQualityError("Plan blocked by ValidationStage", defects=[defect])
 
 
 @pytest.fixture()
@@ -286,6 +302,36 @@ class TestFireSpec:
         assert refreshed is not None
         assert refreshed.status == "fired"
         assert refreshed.task_id == "fire-task-001"
+
+    def test_fire_plan_quality_error_returns_422(self, client, store):
+        from agent_baton.models.spec_draft import ReviewData
+
+        draft = store.create(title="Fire gated spec", body="body")
+        store.update_enrichment(draft.id, _mock_enrichment())
+        store.update_status(
+            draft.id,
+            "approved",
+            review=ReviewData(action="approved", actor="bob"),
+        )
+
+        mock_forge = MagicMock()
+        mock_forge.create_plan.side_effect = _plan_quality_error()
+
+        mock_pmo_store = MagicMock()
+        mock_project = MagicMock()
+        mock_pmo_store.get_project.return_value = mock_project
+
+        with patch("agent_baton.api.deps.get_forge_session", return_value=mock_forge), \
+             patch("agent_baton.api.deps.get_pmo_store", return_value=mock_pmo_store):
+            r = client.post(
+                f"/api/v1/pmo/specs/{draft.id}/fire",
+                json={"project_id": "proj-1"},
+            )
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "plan_quality_error"
+        assert detail["defects"][0]["code"] == "audit_missing"
 
 
 # ---------------------------------------------------------------------------

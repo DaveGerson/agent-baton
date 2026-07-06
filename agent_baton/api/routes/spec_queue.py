@@ -30,6 +30,8 @@ from agent_baton.api.models.responses import (
     FireSpecDraftResponse,
     SpecDraftResponse,
 )
+from agent_baton.api.planner_errors import plan_quality_error_detail
+from agent_baton.core.engine.planning.stages.validation import PlanQualityError
 from agent_baton.core.federate.spec_draft_store import SpecDraftStore
 from agent_baton.models.spec_draft import ReviewData
 
@@ -352,6 +354,11 @@ async def fire_spec_draft(
         )
     except HTTPException:
         raise
+    except PlanQualityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=plan_quality_error_detail(exc),
+        ) from exc
     except Exception as exc:
         logger.error("fire_spec_draft: plan generation failed for %s: %s", spec_id, exc)
         raise HTTPException(

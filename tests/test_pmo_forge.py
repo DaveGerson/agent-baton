@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_baton.core.engine.planner import IntelligentPlanner
+from agent_baton.core.govern.classifier import DataClassifier
+from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.store import PmoStore
 from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
+from agent_baton.core.engine.planning.stages.validation import PlanQualityError
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
-from agent_baton.models.pmo import PmoProject, PmoSignal
+from agent_baton.models.pmo import InterviewAnswer, PmoProject, PmoSignal
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +88,229 @@ def _forge(planner: object, store: PmoStore) -> ForgeSession:
     return ForgeSession(planner=planner, store=store, headless=disabled_headless)
 
 
+class _AvailableHeadless:
+    def __init__(self, plan: MachinePlan) -> None:
+        self.is_available = True
+        self._plan = plan
+
+    async def generate_plan(self, **kwargs) -> MachinePlan:  # noqa: ARG002
+        return self._plan
+
+
+def _planner_with_reviewer_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    warning: str = "[critical] reviewer requires additional validation coverage",
+) -> IntelligentPlanner:
+    planner = IntelligentPlanner()
+
+    def _review(**kwargs):  # noqa: ARG001
+        return SimpleNamespace(
+            warnings=[warning],
+            splits_applied=0,
+            source="test-reviewer",
+        )
+
+    monkeypatch.setattr(planner._plan_reviewer, "review", _review)
+    return planner
+
+
 # ---------------------------------------------------------------------------
 # create_plan
 # ---------------------------------------------------------------------------
 
 class TestCreatePlan:
+    def test_headless_reviewer_warning_raises_plan_quality_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _planner_with_reviewer_warning(monkeypatch)
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(_plan(task_id="headless-review-warning")),
+        )
+
+        with pytest.raises(PlanQualityError, match="reviewer_warning"):
+            forge.create_plan(
+                description="Implement the login fix",
+                program="NDS",
+                project_id="nds",
+            )
+
+    def test_headless_invalid_plan_raises_plan_quality_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner()
+        invalid_plan = _plan(
+            task_id="headless-invalid-task",
+            task_summary="Invalid headless plan",
+            phases=[
+                PlanPhase(
+                    phase_id=0,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="code-reviewer",
+                            task_description="Review code during implementation",
+                        )
+                    ],
+                )
+            ],
+        )
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(invalid_plan),
+        )
+
+        with pytest.raises(PlanQualityError):
+            forge.create_plan(
+                description="Implement a change with an invalid reviewer assignment",
+                program="NDS",
+                project_id="nds",
+            )
+
+    def test_headless_plan_uses_planner_effective_knowledge_registry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        registry = KnowledgeRegistry()
+        planner = IntelligentPlanner(knowledge_registry=registry)
+        seen_registries: list[object] = []
+        original_build_services = planner._build_services
+
+        def _build_services(*, knowledge_registry):
+            seen_registries.append(knowledge_registry)
+            return original_build_services(knowledge_registry=knowledge_registry)
+
+        monkeypatch.setattr(planner, "_build_services", _build_services)
+        headless_plan = _plan(task_id="headless-custom-registry")
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Implement the login fix",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert seen_registries == [registry]
+
+    def test_headless_validation_syncs_canonical_budget_tier(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner()
+        headless_plan = _plan(task_id="headless-budget-tier")
+        headless_plan.task_type = "new-feature"
+        headless_plan.budget_tier = "full"
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Implement the login fix",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.budget_tier == "lean"
+
+    def test_headless_validation_derives_server_side_classification(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner(classifier=DataClassifier())
+        headless_plan = _plan(
+            task_id="headless-pii-parity",
+            task_summary=(
+                "Build a customer export containing email address and SSN fields."
+            ),
+            phases=[
+                PlanPhase(phase_id=1, name="Implement", steps=[_step()]),
+                PlanPhase(
+                    phase_id=2,
+                    name="Review",
+                    steps=[
+                        PlanStep(
+                            step_id="2.1",
+                            agent_name="code-reviewer",
+                            task_description="Review high-risk data handling.",
+                            depends_on=["1.1"],
+                        )
+                    ],
+                ),
+                PlanPhase(
+                    phase_id=3,
+                    name="Audit",
+                    steps=[
+                        PlanStep(
+                            step_id="3.1",
+                            agent_name="auditor",
+                            task_description="Audit regulated data handling.",
+                            depends_on=["2.1"],
+                        )
+                    ],
+                ),
+            ],
+        )
+        headless_plan.risk_level = "LOW"
+        headless_plan.classification_signals = None
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description=headless_plan.task_summary,
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.risk_level == "HIGH"
+        assert result.classification_signals is not None
+        signals = json.loads(result.classification_signals)
+        assert signals["guardrail_preset"] == "Regulated Data"
+        assert "pii:ssn" in signals["signals"]
+
     def test_delegates_to_planner(self, tmp_path: Path):
         store = _store(tmp_path)
         project = _project(tmp_path)
@@ -184,6 +407,181 @@ class TestCreatePlan:
         call_kwargs = planner.create_plan.call_args
         project_root_arg = call_kwargs.kwargs.get("project_root")
         assert project_root_arg is None
+
+    def test_headless_plan_gets_plan_diagnostics(self, tmp_path: Path):
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        headless_plan = _plan(task_id="headless-task", task_summary="Headless plan")
+        headless_plan.plan_diagnostics = {}
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Design the architecture for a new feature",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.classification_source == "headless-claude"
+        assert result.plan_diagnostics["classification_source"] == "headless-claude"
+        assert result.plan_diagnostics["phase_count"] == len(result.phases)
+        assert result.plan_diagnostics["selected_agents"] == ["backend-engineer"]
+        assert "knowledge_packs_loaded" in result.plan_diagnostics
+        assert "attachments_selected" in result.plan_diagnostics
+        planner.create_plan.assert_not_called()
+
+    def test_headless_reviewer_warning_warn_only_returns_plan_and_records_warning_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_PLANNER_WARN_ONLY", "1")
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _planner_with_reviewer_warning(monkeypatch)
+        headless_plan = _plan(task_id="headless-warn-only")
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.create_plan(
+            description="Implement the login fix",
+            program="NDS",
+            project_id="nds",
+        )
+
+        assert result is headless_plan
+        assert result.plan_diagnostics["validation_warning_count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# regenerate_plan
+# ---------------------------------------------------------------------------
+
+class TestRegeneratePlan:
+    def test_headless_reviewer_warning_raises_plan_quality_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _planner_with_reviewer_warning(monkeypatch)
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(_plan(task_id="regen-review-warning")),
+        )
+
+        with pytest.raises(PlanQualityError, match="reviewer_warning"):
+            forge.regenerate_plan(
+                description="Refine the login fix plan",
+                project_id="nds",
+                answers=[InterviewAnswer(question_id="q-testing", answer="Add tests")],
+            )
+
+    def test_headless_invalid_regenerated_plan_raises_plan_quality_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("BATON_DEV_MODE", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_WARN_ONLY", raising=False)
+        monkeypatch.delenv("BATON_PLANNER_HARD_GATE", raising=False)
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = IntelligentPlanner()
+        invalid_plan = _plan(
+            task_id="regen-invalid-task",
+            task_summary="Invalid regenerated plan",
+            phases=[
+                PlanPhase(
+                    phase_id=0,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="code-reviewer",
+                            task_description="Review code during implementation",
+                        )
+                    ],
+                )
+            ],
+        )
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(invalid_plan),
+        )
+
+        with pytest.raises(PlanQualityError):
+            forge.regenerate_plan(
+                description="Refine the invalid reviewer plan",
+                project_id="nds",
+                answers=[
+                    InterviewAnswer(
+                        question_id="q-testing",
+                        answer="Add unit tests",
+                    )
+                ],
+            )
+
+    def test_headless_regenerated_plan_gets_plan_diagnostics(self, tmp_path: Path):
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        store.register_project(project)
+
+        planner = _mock_planner()
+        headless_plan = _plan(task_id="regen-task", task_summary="Regenerated plan")
+        headless_plan.plan_diagnostics = {}
+        forge = ForgeSession(
+            planner=planner,
+            store=store,
+            headless=_AvailableHeadless(headless_plan),
+        )
+
+        result = forge.regenerate_plan(
+            description="Design the architecture for a new feature",
+            project_id="nds",
+            answers=[
+                InterviewAnswer(
+                    question_id="q-testing",
+                    answer="Add unit tests",
+                )
+            ],
+        )
+
+        assert result is headless_plan
+        assert result.classification_source == "headless-claude"
+        assert result.plan_diagnostics["classification_source"] == "headless-claude"
+        assert result.plan_diagnostics["phase_count"] == len(result.phases)
+        assert result.plan_diagnostics["selected_agents"] == ["backend-engineer"]
+        assert "knowledge_packs_loaded" in result.plan_diagnostics
+        assert "attachments_selected" in result.plan_diagnostics
+        planner.create_plan.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

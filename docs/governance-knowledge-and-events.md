@@ -1,7 +1,10 @@
 # Knowledge, Events, and Governance
 
 How knowledge delivery, event-driven traceability, and risk guardrails
-support reliable multi-agent orchestration.
+keep every agent action informed, traceable, and trustworthy.
+
+!!! abstract "Pillar context"
+    This page is primarily **Pillar 4 — Checks & balances** (Governance is the trust mechanism that enforces risk policy and produces audit artifacts); Knowledge serves Pillars 1–2 by informing planning and team assembly, and Events support Pillar 3 by powering orchestration traceability and crash recovery. For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
 
 ---
 

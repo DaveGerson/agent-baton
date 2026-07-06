@@ -150,6 +150,49 @@ knowledge/[domain]/
 
 **File:** `.claude/agents/[name].md` or `~/.claude/agents/[name].md`
 
+**Generated-Agent Contract:**
+
+Every generated agent must follow this contract. Use
+`references/agent-authoring.md` as the durable reference and
+`.claude/templates/agents/*.md` as the starter source.
+
+Starter template files:
+- `.claude/templates/agents/base-agent.md`
+- `.claude/templates/agents/flavored-agent.md`
+- `.claude/templates/agents/reviewer-agent.md`
+
+Required frontmatter fields:
+- `name`
+- `description`
+- `model`
+- `permissionMode`
+- `tools`
+
+Recommended frontmatter fields:
+- `owner`
+- `status`
+- `version`
+- `created_by`
+- `last_reviewed`
+- `knowledge_packs`
+
+Required body sections:
+- Mission
+- Before Starting
+- Knowledge References
+- Principles
+- Anti-Patterns
+- Output Format
+
+Reference and tool rules:
+- Avoid broad tools unless the agent mission requires them. Start read-only
+  (`Read`, `Glob`, `Grep`) for reviewers and researchers; add `Edit`, `Write`,
+  or `Bash` only when the agent must mutate files or run commands.
+- Read back every generated file before reporting it as complete.
+- Validate references exist before saving the agent. Every knowledge pack,
+  reference doc, skill, or template path named in the agent must resolve, or
+  the agent must explicitly state why it is optional.
+
 **Template:**
 
 ```markdown
@@ -163,13 +206,30 @@ permissionMode: [auto-edit for implementers, default for reviewers]
 color: [unused color]
 tools: [minimum needed — Read, Glob, Grep for read-only; add Write, Edit,
        Bash for implementers]
+owner: [team or person responsible for maintenance]
+status: draft
+version: 0.1.0
+created_by: talent-builder
+last_reviewed: [YYYY-MM-DD]
+knowledge_packs:
+  - [knowledge/domain/overview.md or remove if none]
 ---
 
 # [Role Title]
 
+## Mission
+
 You are a [seniority + role]. [One-sentence mission.]
 
 ## Before Starting
+
+1. Read this entire agent definition.
+2. Read back every file listed under "Knowledge References"; do not rely on
+   stale memory.
+3. Validate references exist and are relevant before using them. If a
+   reference is missing, report the gap.
+
+## Knowledge References
 
 Read these knowledge packs before doing any work:
 - [path to knowledge pack files relevant to this agent]
@@ -208,9 +268,19 @@ Return:
 
 **Agent quality checklist:**
 - [ ] Description is specific enough to trigger correctly
-- [ ] Knowledge pack paths are referenced in "Before Starting"
+- [ ] Required frontmatter fields exist: `name`, `description`, `model`,
+      `permissionMode`, `tools`
+- [ ] Recommended frontmatter fields are filled when ownership is known:
+      `owner`, `status`, `version`, `created_by`, `last_reviewed`,
+      `knowledge_packs`
+- [ ] Required body sections exist: Mission, Before Starting, Knowledge
+      References, Principles, Anti-Patterns, Output Format
+- [ ] Knowledge pack paths are referenced in "Knowledge References"
 - [ ] Baked-in knowledge is concise (< 100 lines of domain content)
-- [ ] Tools are minimum needed (principle of least privilege)
+- [ ] Avoid broad tools; tools are minimum needed (principle of least
+      privilege)
+- [ ] Read back the final agent file and validate references before reporting
+      completion
 - [ ] Output format matches the orchestrator's expectations
 - [ ] For flavored variants: references base role, same output format
 

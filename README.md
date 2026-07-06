@@ -115,7 +115,7 @@ between Claude and the engine — specifically `_print_action()` in
 ```
                     ┌────────────────────────────────────┐
                     │           ORCHESTRATOR              │
-                    │  Reads 19 reference procedures      │
+                    │  Reads 20 reference procedures      │
                     └───────────────┬────────────────────┘
                                     │
                     baton plan ─────┴───── baton execute
@@ -158,7 +158,7 @@ scripts/install.sh          # Linux/macOS
 
 The installer prompts for scope: user-level (`~/.claude/`) for all projects, or
 project-level (`.claude/`) for the current project only. It copies 30 agent
-definitions, 19 reference procedures, a template `CLAUDE.md`, `settings.json`
+definitions, 20 reference procedures, a template `CLAUDE.md`, `settings.json`
 hooks, and skills. It also attempts to install `bd` (the bead backend) via npm or
 Homebrew.
 
@@ -291,7 +291,8 @@ not a hope.
    plans so more gaps surface.
 5. **Assembly + validation** — assembles the final `MachinePlan` with gate
    commands, knowledge attachments, budget tier, and execution mode. The hard
-   gate (`BATON_PLANNER_HARD_GATE`) can block structurally defective plans.
+   gate blocks structurally defective plans by default; use
+   `BATON_PLANNER_WARN_ONLY` or `BATON_DEV_MODE` only for local experiments.
 
 ### Key commands
 
@@ -874,7 +875,7 @@ on every invocation. Update scripts to use the new paths.
 
 ```
 agents/            <- 30 agent definitions (Markdown + YAML frontmatter)
-references/        <- 19 reference procedures (shared knowledge)
+references/        <- 20 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md, settings.json, skills, packs, and playbooks
 scripts/           <- Install scripts (Linux/macOS + Windows) and maintenance
 docs/              <- Architecture docs, ADRs, invariants, CLI/API reference,
@@ -923,11 +924,14 @@ The variables a user is most likely to set. For the full internal list see
 | `BATON_GATE_RETRY` | Re-dispatch a failing step once with gate output appended; second failure is terminal | `0` |
 | `BATON_RUN_TOKEN_CEILING` | Per-run cumulative spend cap (USD). Survives `baton execute resume`. | unset |
 | `BATON_WORKTREE_STALE_HOURS` | Max age before the worktree GC reclaims a stale worktree | `4` |
-| `BATON_PLANNER_HARD_GATE` | Block structurally defective plans (deterministic checks) | unset |
+| `BATON_DEV_MODE` | Downgrade planner validation defects to warnings for local experimentation unless `BATON_PLANNER_HARD_GATE` is truthy | unset |
+| `BATON_PLANNER_WARN_ONLY` | Downgrade planner validation defects to warnings without broader dev-mode behavior unless `BATON_PLANNER_HARD_GATE` is truthy | unset |
+| `BATON_PLANNER_HARD_GATE` | Force planner validation to block even when dev/warn-only mode is set. Blocking is the default otherwise | unset |
 | `BATON_PLAN_REVIEW` | Optional LLM plan-quality review: `off` \| `haiku` \| `sonnet` \| `opus` | `off` |
 | `BATON_POLICY_FAIL_CLOSED` | `policy-check` hook: `0` fail-open, `1` blocks the tool call | `0` |
 | `BATON_COMPLIANCE_FAIL_CLOSED` | Halt execution on compliance audit write failure | `0` |
-| `BATON_TEAMS_BACKEND` | Team-step backend: `worktree` (default, resumable) or `claude-teams` | `worktree` |
+| `BATON_TEAMS_BACKEND` | Team-step backend: `worktree` (default, resumable) or `claude-teams`. Unknown values fall back unless strict mode is enabled | `worktree` |
+| `BATON_TEAMS_BACKEND_STRICT` | Unknown `BATON_TEAMS_BACKEND` values raise `UnknownTeamBackendError` instead of falling back | `0` |
 | `BATON_SOULS_ENABLED` / `BATON_EXEC_BEADS_ENABLED` | Experimental feature flags (souls / executable beads) | unset |
 | `ANTHROPIC_API_KEY` | AI risk classification (`agent-baton[classify]`) and the planner classifier | none |
 
@@ -999,7 +1003,7 @@ Requires Python 3.10+. Runtime dependencies: `pyyaml`, `pydantic`, `cryptography
 ## Project Status
 
 Agent Baton is in active development (v0.1.0). The orchestration engine, all 30
-agents, 19 reference procedures, knowledge delivery, bead memory system, PMO
+agents, 20 reference procedures, knowledge delivery, bead memory system, PMO
 subsystem with end-to-end plan-to-merge workflow, REST API with webhooks,
 federated sync, event system, learning automation, and the improvement pipeline
 are implemented and tested.

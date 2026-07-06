@@ -387,6 +387,100 @@ class TestGracefulDegradation:
         pack = reg.get_pack("corrupted")
         assert pack is not None
 
+    def test_sequence_manifest_loads_pack_in_degraded_mode(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        pack_dir = root / "sequence-manifest"
+        pack_dir.mkdir(parents=True)
+        (pack_dir / "knowledge.yaml").write_text(
+            "- not\n- a\n- mapping\n", encoding="utf-8"
+        )
+        _make_doc(pack_dir, "doc.md", name="doc")
+
+        reg = KnowledgeRegistry()
+        count = reg.load_directory(root)
+
+        assert count == 1
+        pack = reg.get_pack("sequence-manifest")
+        assert pack is not None
+        assert reg.degraded_pack_names == {"sequence-manifest"}
+
+    def test_non_utf8_manifest_loads_pack_in_degraded_mode(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "knowledge"
+        pack_dir = root / "legacy-manifest"
+        pack_dir.mkdir(parents=True)
+        (pack_dir / "knowledge.yaml").write_bytes(
+            b"name: legacy-\xe9\ndescription: legacy\n"
+        )
+        _make_doc(pack_dir, "doc.md", name="doc")
+
+        reg = KnowledgeRegistry()
+        count = reg.load_directory(root)
+
+        assert count == 1
+        pack = reg.get_pack("legacy-manifest")
+        assert pack is not None
+        assert reg.degraded_pack_names == {"legacy-manifest"}
+
+    def test_bad_pack_does_not_block_good_packs_or_index_rebuild(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        root = tmp_path / "knowledge"
+
+        first_good = root / "a-good"
+        first_good.mkdir(parents=True)
+        _make_manifest(
+            first_good,
+            name="first-good",
+            description="Reliable recovery references",
+            tags=["resilience"],
+        )
+        _make_doc(
+            first_good,
+            "recovery.md",
+            name="recovery",
+            description="Reliable recovery tokens",
+            tags=["resilience"],
+        )
+
+        bad = root / "b-bad"
+        bad.mkdir()
+        _make_manifest(bad, name="bad")
+        (bad / "bad.md").write_text(
+            "---\n- not\n- metadata\n---\nbody\n", encoding="utf-8"
+        )
+
+        later_good = root / "c-good"
+        later_good.mkdir()
+        _make_manifest(
+            later_good,
+            name="later-good",
+            description="Durable indexing references",
+            tags=["indexing"],
+        )
+        _make_doc(
+            later_good,
+            "index.md",
+            name="indexing",
+            description="Durable indexing signals",
+            tags=["indexing"],
+        )
+
+        reg = KnowledgeRegistry()
+        count = reg.load_directory(root)
+
+        assert count == 2
+        assert set(reg.all_packs) == {"first-good", "later-good"}
+        assert [doc.name for doc, _score in reg.search("reliable recovery")]
+        assert [doc.name for doc, _score in reg.search("durable indexing")]
+        assert any(
+            "Skipping knowledge pack" in record.message and str(bad) in record.message
+            for record in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestGetDocument

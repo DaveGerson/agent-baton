@@ -94,6 +94,24 @@ You are a senior Node.js backend engineer.
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _sandbox_home(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point HOME at a sandbox so tests never read the developer's ~/.claude.
+
+    IntelligentPlanner (and the agent/knowledge registries behind it) eagerly
+    load ``~/.claude/knowledge`` and ``~/.claude/agents`` on construction;
+    without this, plan shapes depend on whatever packs the host machine has
+    installed. Tests that need a specific home layout set HOME/USERPROFILE
+    themselves, which overrides this fixture.
+    """
+    home = tmp_path_factory.mktemp("sandbox-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 @pytest.fixture
 def sample_agent_content() -> str:
     """Raw string content of a valid agent .md file."""
