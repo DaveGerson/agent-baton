@@ -1036,6 +1036,26 @@ class TestForgeSignal:
         ).json()
         assert body["signal_id"] == "fsig8-001"
 
+    def test_plan_quality_error_returns_structured_422(
+        self, client: TestClient, app
+    ) -> None:
+        _register_project(client, project_id="fsig9-proj", program="FS9")
+        _create_signal(client, signal_id="fsig9-001")
+        app.dependency_overrides[get_forge_session]().signal_to_plan.side_effect = (
+            _plan_quality_error()
+        )
+
+        r = client.post(
+            "/api/v1/pmo/signals/fsig9-001/forge",
+            json={"project_id": "fsig9-proj"},
+        )
+
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert detail["error"] == "plan_quality_error"
+        assert detail["defects"][0]["code"] == "audit_missing"
+        assert "Audit phase" in detail["defects"][0]["remediation"]
+
 
 # ===========================================================================
 # POST /api/v1/pmo/signals/{signal_id}/resolve — full signal response

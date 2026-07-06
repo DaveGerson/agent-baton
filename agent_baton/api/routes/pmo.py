@@ -2314,6 +2314,11 @@ async def forge_signal(
 
     try:
         plan = forge.signal_to_plan(signal_id=signal_id, project_id=req.project_id)
+    except PlanQualityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=plan_quality_error_detail(exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
