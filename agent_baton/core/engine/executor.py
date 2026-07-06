@@ -4483,7 +4483,9 @@ class ExecutionEngine:
         except Exception as _be_resume_exc:  # pragma: no cover
             _log.debug("BudgetEnforcer resume restore skipped (non-fatal): %s", _be_resume_exc)
 
-        return self._drive_resolver_loop(state)
+        action = self._drive_resolver_loop(state)
+        self._save_execution(state)
+        return action
 
     def recover_dispatched_steps(self) -> int:
         """Clear stale dispatched-step markers for crash recovery.
