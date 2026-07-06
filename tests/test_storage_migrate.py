@@ -329,6 +329,59 @@ class TestMigrateExecutions:
         # Second run should import 0 new executions (INSERT OR IGNORE)
         assert imported2["executions"] == 0
 
+    def test_migrates_full_plan_column_set(self, tmp_path: Path) -> None:
+        """B2 regression: the legacy JSON->SQLite migrator must not drop
+        plan_diagnostics, explicit_knowledge_packs/docs, intervention_level,
+        task_type, classification_signals/confidence -- these previously
+        silently defaulted because the INSERT bound only 10 columns.
+        """
+        ctx = tmp_path / "team-context"
+        ctx.mkdir()
+        plan = _minimal_plan("task-002")
+        plan.task_type = "bugfix"
+        plan.explicit_knowledge_packs = ["python-web"]
+        plan.explicit_knowledge_docs = ["docs/schema.md"]
+        plan.intervention_level = "high"
+        plan.classification_signals = '{"keywords": ["bug"]}'
+        plan.classification_confidence = 0.87
+        plan.plan_diagnostics = {"classification_source": "haiku"}
+
+        state = ExecutionState(
+            task_id="task-002",
+            plan=plan,
+            status="complete",
+            started_at="2026-03-01T10:00:00Z",
+            completed_at="2026-03-01T10:30:00Z",
+        )
+        _write_execution(ctx, state)
+
+        StorageMigrator(ctx).migrate()
+
+        conn = sqlite3.connect(str(ctx / "baton.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT explicit_knowledge_packs, explicit_knowledge_docs,
+                   intervention_level, task_type,
+                   classification_signals, classification_confidence,
+                   plan_diagnostics
+            FROM plans WHERE task_id = ?
+            """,
+            ("task-002",),
+        ).fetchone()
+        conn.close()
+
+        assert row is not None
+        assert json.loads(row["explicit_knowledge_packs"]) == ["python-web"]
+        assert json.loads(row["explicit_knowledge_docs"]) == ["docs/schema.md"]
+        assert row["intervention_level"] == "high"
+        assert row["task_type"] == "bugfix"
+        assert row["classification_signals"] == '{"keywords": ["bug"]}'
+        assert row["classification_confidence"] == pytest.approx(0.87)
+        assert json.loads(row["plan_diagnostics"]) == {
+            "classification_source": "haiku"
+        }
+
     def test_multiple_executions(self, tmp_path: Path) -> None:
         ctx = tmp_path / "team-context"
         ctx.mkdir()

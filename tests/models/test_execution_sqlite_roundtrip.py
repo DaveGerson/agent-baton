@@ -412,6 +412,47 @@ class TestMachinePlanSqliteRoundtrip:
         assert loaded is not None
         assert loaded.task_id == plan.task_id
 
+    def test_plan_upsert_preserves_release_id_on_resave(
+        self, store: SqliteStorage
+    ) -> None:
+        """B1 regression: re-saving a plan must not wipe release_id.
+
+        ``_upsert_plan`` previously used ``INSERT OR REPLACE`` against a
+        table whose PK is ``task_id`` -- SQLite implements that as
+        DELETE+INSERT, and the child columns not listed in the statement
+        (release_id, which release_store.tag_plan sets separately) were
+        reset to NULL. Every subsequent ``save_execution`` call would then
+        silently un-tag the plan's release.
+        """
+        from agent_baton.core.storage.release_store import ReleaseStore
+        from agent_baton.models.release import Release
+
+        plan = _minimal_plan("task-plan-rt-007")
+        store.save_plan(plan)
+
+        release_store = ReleaseStore(store.db_path)
+        release_store.create(
+            Release(
+                release_id="rel-001",
+                name="Q1 release",
+                target_date="2026-03-01",
+                status="planned",
+            )
+        )
+        assert release_store.tag_plan("task-plan-rt-007", "rel-001") is True
+
+        # Re-save the plan (simulates save_execution calling _upsert_plan
+        # again on a later state transition) -- release_id must survive.
+        store.save_plan(plan)
+
+        conn = store._conn()  # noqa: SLF001 - direct check of raw column
+        row = conn.execute(
+            "SELECT release_id FROM plans WHERE task_id = ?",
+            ("task-plan-rt-007",),
+        ).fetchone()
+        assert row is not None
+        assert row["release_id"] == "rel-001"
+
 
 # ---------------------------------------------------------------------------
 # ExecutionState SQLite roundtrip
