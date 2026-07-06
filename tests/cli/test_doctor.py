@@ -835,6 +835,57 @@ def test_doctor_prefers_baton_task_id_env_over_sqlite_active_task(
     assert check["details"]["plan_path"] == str(env_task_dir / "plan.json")
 
 
+def test_doctor_reads_active_task_from_baton_db_path_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """BATON_DB_PATH must be honoured by the sqlite active-task probe (D1)."""
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    task_dir = team_context / "executions" / "task-override"
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task override plan")),
+        encoding="utf-8",
+    )
+
+    # The overridden DB lives entirely outside team-context/baton.db so the
+    # default path would never find it.
+    override_db_dir = tmp_path / "elsewhere"
+    override_db_dir.mkdir(parents=True)
+    override_db_path = override_db_dir / "custom-baton.db"
+    conn = sqlite3.connect(override_db_path)
+    conn.execute(
+        "CREATE TABLE active_task (id INTEGER PRIMARY KEY, task_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO active_task (id, task_id) VALUES (1, 'task-override')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Confirm there is no baton.db at the default location doctor would
+    # otherwise fall back to.
+    assert not (team_context / "baton.db").exists()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("BATON_DB_PATH", str(override_db_path))
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["status"] == "ok"
+    assert check["details"]["active_task_id"] == "task-override"
+    assert check["details"]["active_task_source"] == "sqlite"
+    assert check["details"]["plan_path"] == str(task_dir / "plan.json")
+
+
 def test_doctor_prefers_active_task_scoped_plan_over_sorted_or_legacy_fallbacks(
     tmp_path: Path,
     monkeypatch,
@@ -881,6 +932,47 @@ def test_doctor_prefers_active_task_scoped_plan_over_sorted_or_legacy_fallbacks(
     ]
 
 
+def test_doctor_flags_fallback_plan_selection_with_no_active_task(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """No active task resolves anywhere -> the fallback guess is surfaced (D2)."""
+    from agent_baton.cli.commands import diagnostics_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    team_context = tmp_path / ".claude" / "team-context"
+    task_a_dir = team_context / "executions" / "task-a"
+    task_b_dir = team_context / "executions" / "task-b"
+    task_a_dir.mkdir(parents=True)
+    task_b_dir.mkdir(parents=True)
+    (task_a_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task A plan")),
+        encoding="utf-8",
+    )
+    (task_b_dir / "plan.json").write_text(
+        json.dumps(_valid_saved_plan("Task B plan")),
+        encoding="utf-8",
+    )
+    # No BATON_TASK_ID, no active_task sqlite row/db, no active-task-id.txt
+    # marker -> nothing identifies a current task.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("BATON_TASK_ID", raising=False)
+    monkeypatch.delenv("BATON_DB_PATH", raising=False)
+
+    payload = diagnostics_cmd.build_report(tmp_path)
+    check = _check(payload, "planner_validation")
+
+    assert check["details"]["active_task_id"] is None
+    assert check["details"]["plan_selection"] == "fallback-first-found"
+    assert check["details"]["plan_path"] == str(task_a_dir / "plan.json")
+    assert "caveat" in check["message"].lower()
+    assert "no active task resolved" in check["message"].lower()
+
+
 def test_doctor_reports_missing_active_task_plan_without_validating_fallback(
     tmp_path: Path,
     monkeypatch,
@@ -911,6 +1003,7 @@ def test_doctor_reports_missing_active_task_plan_without_validating_fallback(
     assert check["status"] == "warning"
     assert check["details"]["active_task_id"] == "task-b"
     assert check["details"]["active_task_source"] == "file"
+    assert check["details"]["plan_selection"] == "active-task"
     assert check["details"]["plan_path"] == str(missing_active_plan)
     assert str(missing_active_plan) in check["message"]
     assert check["details"]["plan_candidates"] == [
