@@ -29,6 +29,7 @@ This keeps memory usage low even with large knowledge bases.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import math
 import re
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 # Characters-per-token heuristic used at index time (no model tokeniser needed).
 _CHARS_PER_TOKEN = 4
+
+# Valid ``knowledge.yaml`` ``status`` values (spec §12.3). Exported for reuse
+# by ``agent_baton.core.manager.knowledge_plan.audit_packs``, which flags any
+# pack whose manifest ``status`` falls outside this set.
+PACK_STATUSES = frozenset({"active", "draft", "stale", "deprecated"})
 
 
 def _estimate_tokens(path: Path) -> int:
@@ -84,6 +90,34 @@ def _normalise_list_of_strings(raw: object) -> list[str]:
     if isinstance(raw, str):
         return [v.strip() for v in raw.split(",") if v.strip()]
     return []
+
+
+def _normalise_date(raw: object) -> str | None:
+    """Coerce a YAML ``last_reviewed`` value to an ISO ``YYYY-MM-DD`` string.
+
+    YAML parses an unquoted date literal (e.g. ``2026-07-02``) as a native
+    ``datetime.date``/``datetime.datetime`` object rather than a string;
+    this normalises both that case and the quoted-string case to a single
+    string representation. Returns ``None`` for missing/empty values.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, _dt.datetime):
+        return raw.date().isoformat()
+    if isinstance(raw, _dt.date):
+        return raw.isoformat()
+    text = str(raw).strip()
+    return text or None
+
+
+def _coerce_optional_int(raw: object) -> int | None:
+    """Coerce a YAML ``stale_after_days`` value to ``int`` or ``None``."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -477,10 +511,16 @@ class KnowledgeRegistry:
           warning logged.
         - Missing ``name`` in manifest → name from directory.
         - Docs without frontmatter → name from filename, empty metadata.
+        - Invalid ``status`` value (not one of :data:`PACK_STATUSES`) →
+          the raw (invalid) value is kept on ``pack.status`` so
+          ``baton knowledge audit``/``KnowledgePlanBuilder`` can name it
+          precisely, but the pack is loaded in degraded mode — the manifest
+          is untrustworthy, not the pack's existence.
 
         Returns:
             ``(pack, degraded)`` tuple where *degraded* is True if the
-            ``knowledge.yaml`` manifest was missing or unreadable. Returns
+            ``knowledge.yaml`` manifest was missing, unreadable, or failed
+            metadata validation (e.g. an invalid ``status``). Returns
             None only if the directory itself cannot be processed.
         """
         manifest_path = pack_dir / "knowledge.yaml"
@@ -518,6 +558,18 @@ class KnowledgeRegistry:
         target_agents = _normalise_list_of_strings(manifest.get("target_agents"))
         default_delivery = str(manifest.get("default_delivery") or "reference").strip()
 
+        status = str(manifest.get("status") or "active").strip() or "active"
+        if status not in PACK_STATUSES:
+            logger.warning(
+                "Pack %s has invalid status %r (expected one of %s) — loading degraded",
+                pack_dir, status, sorted(PACK_STATUSES),
+            )
+            degraded = True
+        confidence = str(manifest.get("confidence") or "medium").strip() or "medium"
+        source_files = _normalise_list_of_strings(manifest.get("source_files"))
+        last_reviewed = _normalise_date(manifest.get("last_reviewed"))
+        stale_after_days = _coerce_optional_int(manifest.get("stale_after_days"))
+
         pack = KnowledgePack(
             name=pack_name,
             description=description,
@@ -525,6 +577,11 @@ class KnowledgeRegistry:
             tags=tags,
             target_agents=target_agents,
             default_delivery=default_delivery,
+            status=status,
+            confidence=confidence,
+            source_files=source_files,
+            last_reviewed=last_reviewed,
+            stale_after_days=stale_after_days,
         )
 
         # Load documents — any .md file in the pack directory

@@ -33,6 +33,7 @@ Apply these to every change before declaring it done:
 | `agent_baton/cli/` | Click/Typer CLI surface — `baton <command>` entry points | [agent_baton/cli/CLAUDE.md](agent_baton/cli/CLAUDE.md) |
 | `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) (deeper: [engine](agent_baton/core/engine/CLAUDE.md), [orchestration](agent_baton/core/orchestration/CLAUDE.md), [govern](agent_baton/core/govern/CLAUDE.md), [storage](agent_baton/core/storage/CLAUDE.md)) |
 | `agent_baton/core/federate/` | Spec Federation subsystem: `SpecDraftStore` (SQLite), `enrich.py` (DataClassifier + cost forecast), `importers.py` (GitHub/ADO importers) | — |
+| `agent_baton/core/manager/` | Manager-mode PMO layer: post-processor around `create_plan()` producing project charter, scope map, team blueprint, role cards, knowledge plan, scope contracts, and context bundles. Config: `agent_baton/core/config/manager.py`. Models: `agent_baton/models/manager.py`. See `docs/internal/manager-mode-pmo-design.md`. | — |
 | `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
 | `agents/` | 30 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
 | `references/` | 20 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
@@ -153,6 +154,7 @@ cymbal impact <symbol>          # blast radius before edits
 | `BATON_TEAMS_BACKEND_STRICT` | When `1`, unknown `BATON_TEAMS_BACKEND` values raise `UnknownTeamBackendError` instead of silently falling back to `worktree`. | `0` |
 | `BATON_TEAMS_STRICT_RESUMABILITY` | When `1` AND `BATON_TEAMS_BACKEND=claude-teams` AND the plan has team phases the claude-teams backend cannot resume mid-flight under `long-running` budget, `baton plan`/`baton goal` refuses to save and exits 2. Default (`0`) downgrades the refusal to a warning. | `0` |
 | `BATON_PLAN_REVIEW` | Optional LLM plan-quality review after the deterministic pipeline: `off` (default) \| `haiku` \| `sonnet` \| `opus`. The deterministic pipeline has known limits in complexity assessment; default compensating controls are the structural hard gate and pre-flight human review in the spec queue — enable this for unattended/managed-mode planning. `sonnet` recommended. | off |
+| `BATON_MANAGER_ENRICH` | Optional LLM polish of the manager-mode project charter's `objective`/`background`/`assumptions` wording (never new scope/paths/facts): `off` (default) \| `haiku` \| `sonnet` \| `opus`. Runs post-deterministic-build — `ProjectCharterBuilder` itself stays fully deterministic; only `--manager-mode` plans call this. Requires `ANTHROPIC_API_KEY`; any failure (missing SDK/key, network, malformed response) silently falls back to the deterministic charter. | `off` |
 
 ## Documentation maintenance (mandatory)
 

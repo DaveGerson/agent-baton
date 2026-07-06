@@ -73,7 +73,7 @@ class KnowledgeDocument:
 class KnowledgePack:
     """A curated collection of related knowledge documents.
 
-    Packs are defined by a ``pack.yaml`` manifest in the
+    Packs are defined by a ``knowledge.yaml`` manifest in the
     ``.claude/knowledge/`` directory.  They group documents that share
     a domain concern (e.g. "data-validation-rules") and can be
     attached to agents via frontmatter or to plans via ``--knowledge-pack``.
@@ -88,6 +88,26 @@ class KnowledgePack:
             ``"inline"`` embeds content in the prompt, ``"reference"``
             provides a file path the agent can read.
         documents: The documents contained in this pack.
+        status: Lifecycle state — ``"active"`` (default, auto-attachable),
+            ``"draft"`` (proposed, not manager-approved), ``"stale"``
+            (attachable with a warning), or ``"deprecated"`` (never
+            auto-attached; only explicit ``--knowledge-pack``/
+            ``--knowledge`` requests may still pull it in). See
+            ``docs/specs/agent-baton-claude-code-middle-manager-prd-tdd.md``
+            §12.3. Manifests written before this field existed default to
+            ``"active"`` so existing packs keep loading unchanged.
+        confidence: Manager-assigned trust level for the pack's guidance —
+            ``"low"``, ``"medium"`` (default), or ``"high"``.
+        source_files: Repo-relative paths the pack's guidance is derived
+            from (e.g. ``pyproject.toml``, ``tests/README.md``). Used by
+            ``baton knowledge audit`` to flag drift when a cited file no
+            longer exists.
+        last_reviewed: ISO ``YYYY-MM-DD`` date the pack was last reviewed
+            by a manager/human, or ``None`` if never recorded.
+        stale_after_days: Pack-specific staleness threshold in days.
+            ``None`` means "use the project's
+            ``knowledge_packs.stale_after_days`` config default" — see
+            ``agent_baton.core.manager.knowledge_plan``.
     """
 
     name: str
@@ -97,6 +117,11 @@ class KnowledgePack:
     target_agents: list[str] = field(default_factory=list)
     default_delivery: str = "reference"   # inline | reference
     documents: list[KnowledgeDocument] = field(default_factory=list)
+    status: str = "active"        # active | draft | stale | deprecated
+    confidence: str = "medium"    # low | medium | high
+    source_files: list[str] = field(default_factory=list)
+    last_reviewed: str | None = None       # ISO YYYY-MM-DD, or None
+    stale_after_days: int | None = None    # None => inherits config default
 
     def to_dict(self) -> dict:
         return {
@@ -107,6 +132,11 @@ class KnowledgePack:
             "target_agents": self.target_agents,
             "default_delivery": self.default_delivery,
             "documents": [d.to_dict() for d in self.documents],
+            "status": self.status,
+            "confidence": self.confidence,
+            "source_files": self.source_files,
+            "last_reviewed": self.last_reviewed,
+            "stale_after_days": self.stale_after_days,
         }
 
     @classmethod
@@ -120,6 +150,11 @@ class KnowledgePack:
             target_agents=data.get("target_agents", []),
             default_delivery=data.get("default_delivery", "reference"),
             documents=[KnowledgeDocument.from_dict(d) for d in data.get("documents", [])],
+            status=data.get("status", "active"),
+            confidence=data.get("confidence", "medium"),
+            source_files=data.get("source_files", []),
+            last_reviewed=data.get("last_reviewed"),
+            stale_after_days=data.get("stale_after_days"),
         )
 
 

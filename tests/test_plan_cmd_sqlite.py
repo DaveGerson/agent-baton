@@ -102,6 +102,7 @@ def _run_handler_save(args: argparse.Namespace, plan: MachinePlan, ctx_dir: Path
     mock_planner.explain_plan.return_value = "explanation"
 
     mock_persist = MagicMock()
+    _real_resolve = Path.resolve
 
     # ContextManager is imported inside the save block; patch at its source.
     with (
@@ -134,10 +135,14 @@ def _run_handler_save(args: argparse.Namespace, plan: MachinePlan, ctx_dir: Path
             "agent_baton.cli.commands.execution.plan_cmd._persist_plan_to_db",
             mock_persist,
         ),
-        # Redirect ".claude/team-context".resolve() to ctx_dir.
+        # Redirect ".claude/team-context".resolve() to ctx_dir. Compare Path
+        # objects (not `str(self)`) -- on Windows str(Path(...)) renders
+        # with backslashes, so a literal "/"-separated string never
+        # matches and the fallback would (a) recurse via the patched
+        # Path.resolve or (b) resolve for real against the actual cwd.
         patch.object(
             Path, "resolve",
-            lambda self: ctx_dir if str(self) == ".claude/team-context" else Path.resolve.__wrapped__(self),  # type: ignore[attr-defined]
+            lambda self: ctx_dir if self == Path(".claude/team-context") else _real_resolve(self),
         ),
     ):
         plan_cmd.handler(args)
@@ -252,6 +257,20 @@ class TestHandlerSavePath:
         mock_planner.create_plan.return_value = plan
         mock_planner.explain_plan.return_value = ""
 
+        # Capture the *real* Path.resolve before patching it below. The
+        # fallback branch must delegate to this real implementation, not to
+        # `object.__getattribute__(self, "resolve")` -- since patch.object
+        # replaces Path.resolve at the class level, that attribute lookup
+        # would find the very same patched lambda and recurse infinitely
+        # for any path other than ".claude/team-context" (e.g. paths
+        # resolved by ManagerConfig.load() while checking for baton.yaml).
+        # Compare Path objects (not `str(self)`) -- on Windows, str(Path(...))
+        # renders with backslashes, so a literal "/"-separated string never
+        # matches and the fallback (real filesystem resolve) would silently
+        # write test artifacts into the real cwd instead of tmp_path.
+        _real_resolve = Path.resolve
+        _team_context_marker = Path(".claude/team-context")
+
         with (
             patch("agent_baton.cli.commands.execution.plan_cmd.IntelligentPlanner", return_value=mock_planner),
             patch("agent_baton.cli.commands.execution.plan_cmd.KnowledgeRegistry", return_value=MagicMock()),
@@ -260,7 +279,7 @@ class TestHandlerSavePath:
             patch("agent_baton.cli.commands.execution.plan_cmd.PolicyEngine", return_value=MagicMock()),
             patch("agent_baton.core.orchestration.context.ContextManager", return_value=MagicMock()),
             patch("agent_baton.cli.commands.execution.plan_cmd._persist_plan_to_db", mock_persist),
-            patch.object(Path, "resolve", lambda self: ctx_dir if str(self) == ".claude/team-context" else object.__getattribute__(self, "resolve")()),
+            patch.object(Path, "resolve", lambda self: ctx_dir if self == _team_context_marker else _real_resolve(self)),
         ):
             plan_cmd.handler(args)
 
@@ -310,9 +329,13 @@ class TestHandlerImportSavePath:
             # ContextManager is a local import inside the save block.
             patch("agent_baton.core.orchestration.context.ContextManager", return_value=MagicMock()),
             patch("agent_baton.cli.commands.execution.plan_cmd._persist_plan_to_db", mock_persist),
+            # Compare Path objects (not `str(self)`) -- on Windows
+            # str(Path(...)) renders with backslashes, so a literal
+            # "/"-separated string never matches and file writes would
+            # silently land in the real cwd instead of tmp_path.
             patch.object(
                 Path, "resolve",
-                lambda self: ctx_dir if str(self) == ".claude/team-context" else Path(str(self)),
+                lambda self: ctx_dir if self == Path(".claude/team-context") else Path(str(self)),
             ),
         ]
         if extra_patches:
@@ -389,9 +412,13 @@ class TestHandlerImportSavePath:
                 patch("agent_baton.core.storage.get_project_storage", return_value=mock_storage)
             )
             stack.enter_context(
+                # Compare Path objects (not `str(self)`) -- on Windows
+                # str(Path(...)) renders with backslashes, so a literal
+                # "/"-separated string never matches and file writes
+                # would silently land in the real cwd instead of tmp_path.
                 patch.object(
                     Path, "resolve",
-                    lambda self: ctx_dir if str(self) == ".claude/team-context" else Path(str(self)),
+                    lambda self: ctx_dir if self == Path(".claude/team-context") else Path(str(self)),
                 )
             )
             # Must not raise

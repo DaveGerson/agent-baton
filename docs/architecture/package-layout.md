@@ -44,7 +44,8 @@ enforced by import-graph tests in `tests/`.
 | [`agent.py`](../../agent_baton/models/agent.py) | `AgentDefinition` | Parsed from `.md` frontmatter. |
 | [`events.py`](../../agent_baton/models/events.py) | `Event` | EventBus payload (`topic`, `task_id`, `sequence`, `payload`). |
 | [`knowledge.py`](../../agent_baton/models/knowledge.py) | `KnowledgeDocument`, `KnowledgePack`, `KnowledgeAttachment`, `KnowledgeGapSignal`, `KnowledgeGapRecord`, `ResolvedDecision` | Knowledge delivery types. |
-| [`pmo.py`](../../agent_baton/models/pmo.py) | `PmoProject`, `PmoCard`, `PmoSignal`, `ProgramHealth`, `PmoConfig`, `InterviewQuestion`, `InterviewAnswer` | PMO board types. |
+| [`manager.py`](../../agent_baton/models/manager.py) | `ProjectCharter`, `ScopeMap`, `Workstream`, `TeamBlueprint`, `RoleCard`, `ScopeContract`, `ContextBundle`, `ContextReference`, `KnowledgePlan`, `MissingKnowledgePack`, `ManagerDecision` | Manager-mode PMO sidecar types (Pydantic v2, JSON round-trippable). Note: unlike this file's other models, these are Pydantic `BaseModel`, not plain dataclasses. |
+| [`pmo.py`](../../agent_baton/models/pmo.py) | `PmoProject`, `PmoCard`, `PmoSignal`, `ProgramHealth`, `PmoConfig`, `InterviewQuestion`, `InterviewAnswer` | PMO board types — the portfolio Kanban overlay (`core/pmo/`), unrelated to manager-mode. |
 | [`bead.py`](../../agent_baton/models/bead.py) | `Bead`, `BeadLink` | Structured agent memory. |
 | [`usage.py`](../../agent_baton/models/usage.py) | `AgentUsageRecord`, `TaskUsageRecord` | Token / cost accounting. |
 | [`retrospective.py`](../../agent_baton/models/retrospective.py) | `Retrospective`, `AgentOutcome`, `KnowledgeGap`, `RosterRecommendation`, `SequencingNote`, `TeamCompositionRecord`, `ConflictRecord` | Retro reports. |
@@ -350,6 +351,31 @@ Wraps the synchronous engine in an async loop. Implements daemon mode.
 | Module | Class | Purpose |
 |--------|-------|---------|
 | [`project_config.py`](../../agent_baton/core/config/project_config.py) | `ProjectConfig` | Optional `baton.yaml` loader (walks up from cwd). |
+| [`manager.py`](../../agent_baton/core/config/manager.py) | `ManagerConfig` | Manager-mode PMO config (`manager_mode`/`team`/`scoping`/`context`/`knowledge_packs`/`policies`/`gates`/`reporting` sections) from the same `baton.yaml`; fails early on invalid values. |
+
+### `core/manager/` — manager-mode PMO layer
+
+Post-processor around `IntelligentPlanner.create_plan()` output — see
+[`docs/internal/manager-mode-pmo-design.md`](../internal/manager-mode-pmo-design.md).
+Config lives in [`core/config/manager.py`](../../agent_baton/core/config/manager.py)
+(above); Pydantic models live in
+[`models/manager.py`](../../agent_baton/models/manager.py) (below).
+
+| Module | Class | Purpose |
+|--------|-------|---------|
+| [`planner.py`](../../agent_baton/core/manager/planner.py) | `ManagerModePlanner` | Orchestrates the builders below; single entry point called from `plan_cmd.py`. |
+| [`charter.py`](../../agent_baton/core/manager/charter.py) | `ProjectCharterBuilder` | Deterministic project charter from task summary, classifier output, and detected stack. |
+| [`scope.py`](../../agent_baton/core/manager/scope.py) | `ScopeMapBuilder` | Workstream decomposition of the plan's phases. |
+| [`team_blueprint.py`](../../agent_baton/core/manager/team_blueprint.py) | `TeamBlueprintBuilder` | Team composition, role cards, and workstream-owner assignment. |
+| [`role_cards.py`](../../agent_baton/core/manager/role_cards.py) | `render_role_card()` | Role-card Markdown renderer. |
+| [`context_bundles.py`](../../agent_baton/core/manager/context_bundles.py) | `ScopeContractBuilder`, `is_nontrivial_step()` | Per-step scope contract + context bundle builders (token-budget-aware). |
+| [`knowledge_plan.py`](../../agent_baton/core/manager/knowledge_plan.py) | `KnowledgePlanBuilder`, `audit_packs()` | Wraps `KnowledgeRegistry`/`KnowledgeResolver`; missing/stale pack detection; backs `baton knowledge list/scan/show/audit/propose`. |
+| [`phase_policy.py`](../../agent_baton/core/manager/phase_policy.py) | `PhasePolicyApplier` | The only PMO component that mutates the `MachinePlan` graph — injects adversarial-review steps and rescopes gates per `ManagerConfig.policies`/`gates`. |
+| [`reports.py`](../../agent_baton/core/manager/reports.py) | `ManagerReportBuilder` | Builds `manager-brief.md` (post-planning) and `manager-report.md` (during/after execution); backs `baton report` and `baton team`. |
+| [`decisions.py`](../../agent_baton/core/manager/decisions.py) | `DecisionPacketBuilder` | Typed `ManagerDecision` wrapper over `core/runtime/decisions.py::DecisionManager`; appends `decision-log.jsonl`. |
+| [`artifacts.py`](../../agent_baton/core/manager/artifacts.py) | `ManagerArtifacts`, `write_all()` | Sidecar artifact container + writer (traversal order also used for `--dry-run`/`--save` previews). |
+| [`paths.py`](../../agent_baton/core/manager/paths.py) | `ManagerArtifactPaths` | Single source of truth for sidecar file paths under `executions/<task_id>/`. |
+| [`enrich.py`](../../agent_baton/core/manager/enrich.py) | `maybe_enrich_charter()` | Optional `BATON_MANAGER_ENRICH` LLM polish of charter wording; stub/off by default. |
 
 ---
 

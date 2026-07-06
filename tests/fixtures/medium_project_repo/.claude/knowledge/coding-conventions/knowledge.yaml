@@ -1,0 +1,8 @@
+name: coding-conventions
+description: Coding conventions for the medium-project fixture repo.
+tags: [conventions, style, python]
+target_agents: [backend-engineer, test-engineer]
+default_delivery: reference
+status: active
+confidence: high
+source_files: [pyproject.toml]

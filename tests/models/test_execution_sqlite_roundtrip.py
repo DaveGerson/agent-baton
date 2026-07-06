@@ -398,6 +398,34 @@ class TestMachinePlanSqliteRoundtrip:
             assert loaded_member.role == orig_member.role
             assert loaded_member.task_description == orig_member.task_description
 
+    def test_plan_sqlite_manager_mode_roundtrip_true(self, store: SqliteStorage) -> None:
+        """M9 (v46): MachinePlan.manager_mode survives save_plan → load_plan.
+
+        Regression test for docs/internal/manager-mode-pmo-plan.md Task 13:
+        SQLite is the default backend for new projects
+        (agent_baton.core.storage.detect_backend), so before MIGRATIONS[46]
+        this flag silently reset to False on every save/load round-trip,
+        making the M9 execution hooks (_dispatch_action /
+        record_step_result / _synthesize_beads_post_phase / complete())
+        inert by default.
+        """
+        plan = _minimal_plan("task-plan-rt-manager-mode-true")
+        plan.manager_mode = True
+        store.save_plan(plan)
+        loaded = store.load_plan("task-plan-rt-manager-mode-true")
+        assert loaded is not None
+        assert loaded.manager_mode is True
+
+    def test_plan_sqlite_manager_mode_roundtrip_false(self, store: SqliteStorage) -> None:
+        """The default (non-manager-mode) case round-trips too -- proves
+        the column isn't just truthy-coerced one way."""
+        plan = _minimal_plan("task-plan-rt-manager-mode-false")
+        assert plan.manager_mode is False
+        store.save_plan(plan)
+        loaded = store.load_plan("task-plan-rt-manager-mode-false")
+        assert loaded is not None
+        assert loaded.manager_mode is False
+
     def test_plan_sqlite_load_returns_none_for_missing(self, store: SqliteStorage) -> None:
         """load_plan returns None for a task_id that was never saved."""
         result = store.load_plan("task-does-not-exist")
@@ -931,3 +959,31 @@ class TestExecutionsTableDdlParity:
                 f"v37 column {col!r} missing from the central mirror "
                 f"executions DDL"
             )
+
+    def test_v46_manager_mode_column_present_in_both_plans_ddls(self) -> None:
+        """v46 (M9): ``manager_mode`` is declared in BOTH ``plans`` DDL
+        blocks (fresh-install PROJECT_SCHEMA_DDL and the central mirror),
+        and MIGRATIONS[46] adds it for existing databases -- see
+        docs/internal/manager-mode-pmo-plan.md Task 13 / the
+        TestMachinePlanSqliteRoundtrip.test_plan_sqlite_manager_mode_*
+        round-trip tests above."""
+        from pathlib import Path
+
+        from agent_baton.core.storage import schema
+        from agent_baton.core.storage.schema import MIGRATIONS, PROJECT_SCHEMA_DDL
+
+        assert "manager_mode" in PROJECT_SCHEMA_DDL, (
+            "v46 column 'manager_mode' missing from PROJECT_SCHEMA_DDL"
+        )
+
+        src = Path(schema.__file__).read_text()
+        first = src.find("CREATE TABLE IF NOT EXISTS plans")
+        second = src.find("CREATE TABLE IF NOT EXISTS plans", first + 1)
+        assert second > first, "Could not locate central-mirror plans DDL"
+        block = src[second:second + 2000]
+        assert "manager_mode" in block, (
+            "v46 column 'manager_mode' missing from the central mirror plans DDL"
+        )
+
+        assert 46 in MIGRATIONS, "MIGRATIONS[46] entry missing"
+        assert "ALTER TABLE plans ADD COLUMN manager_mode" in MIGRATIONS[46]

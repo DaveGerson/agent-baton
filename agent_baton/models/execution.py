@@ -624,6 +624,14 @@ class MachinePlan(PlanModel):
     # or BATON_RUN_TOKEN_CEILING is hit.
     completion_condition: str | None = None
     max_amend_cycles: int = 3
+    # Manager-mode PMO layer (see docs/internal/manager-mode-pmo-design.md).
+    # Set when the plan is created via `baton plan --manager-mode` or
+    # ManagerConfig.manager_mode.enabled_by_default. The engine and CLI use
+    # this flag to gate the ManagerModePlanner post-processor and the three
+    # execution hooks (dispatch, phase-completion, completion). All PMO
+    # artifacts (charter, scope map, team blueprint, ...) are sidecar files
+    # under executions/<task_id>/, not fields on this model.
+    manager_mode: bool = False
 
     @model_validator(mode="after")
     def _validate_plan_graph_integrity(self) -> Self:
@@ -750,6 +758,7 @@ class MachinePlan(PlanModel):
             "compliance_fail_closed": self.compliance_fail_closed,
             "completion_condition": self.completion_condition,
             "max_amend_cycles": self.max_amend_cycles,
+            "manager_mode": self.manager_mode,
         }
         if self.plan_diagnostics:
             d["plan_diagnostics"] = dict(self.plan_diagnostics)
@@ -792,6 +801,8 @@ class MachinePlan(PlanModel):
         if self.completion_condition:
             lines.append(f"**Goal**: {self.completion_condition}")
             lines.append(f"**Max Amend Cycles**: {self.max_amend_cycles}")
+        if self.manager_mode:
+            lines.append("**Manager mode:** yes")
         lines.append("")
 
         for phase in self.phases:

@@ -46,6 +46,20 @@ _SPILLOVER_BREADCRUMB_RE = re.compile(
     r"^\[TRUNCATED — full output: (\S+) \(\d+ bytes total\)\]"
 )
 
+# Manager-mode (M9) scope-expansion signal-format hint, appended to the
+# ``## Scope Contract`` dispatch section (never to the shared, byte-pinned
+# ``_SIGNALS_BLOCK`` in dispatcher.py -- see docs/internal/manager-mode-pmo-plan.md
+# Task 13's binding constraint and tests/engine/golden/manager_context_prompt_baseline.txt).
+# Documents the stricter ``<path> — <reason>`` format parsed by
+# agent_baton.core.engine.manager_scope_signal.parse_scope_expansion_signals
+# and routed by record_step_result per ManagerConfig.scoping.scope_expansion_policy.
+_MANAGER_SCOPE_EXPANSION_SIGNAL_HINT = (
+    "If you need to work outside this contract's Allowed Paths, do not "
+    "silently proceed -- append a line to your outcome in this exact "
+    "format so it can be routed to the manager:\n"
+    "`SCOPE_EXPANSION: <path> — <reason>`"
+)
+
 
 def _build_knowledge_telemetry_store():
     """Construct a default ``KnowledgeTelemetryStore`` (~/.baton/central.db).
@@ -1045,6 +1059,126 @@ class ExecutionEngine:
         except Exception as _ps_exc:
             _log.debug(
                 "Phase-summary bead creation skipped (non-fatal): %s", _ps_exc
+            )
+
+    def _write_manager_phase_artifacts(self) -> None:
+        """Manager-mode (M9) phase-completion hook.
+
+        Writes ``handoffs/phase-<n>-handoff.md`` (PRD §13.4) when
+        ``policies.phase_completion.handoff_required``, then refreshes
+        ``manager-report.md``. Fires only for ``manager_mode`` plans.
+
+        Extracted into its OWN method (I2 fix, release-review binding
+        decision) rather than living as a trailing block inside
+        ``_synthesize_beads_post_phase`` -- that method has three early
+        returns of its own (no bead store, no derived store, zero
+        *complete* step results in the completing phase) that are purely
+        bead-graph-synthesis concerns, but previously ALSO silently
+        skipped this PMO handoff/report block despite its own comment
+        claiming independence. Callers MUST invoke this method
+        unconditionally at every phase boundary alongside (not nested
+        inside) ``_synthesize_beads_post_phase``.
+
+        Reloads state/phase data fresh from storage so a transient issue
+        elsewhere never suppresses the PMO handoff. Bead-store queries are
+        internally None-guarded -- when no bead store is available the
+        handoff still writes, just with empty decision/warning-bead
+        sections (``_render_manager_phase_handoff_markdown`` already
+        renders "_None recorded._" for empty inputs). Best-effort: any
+        failure is logged at debug and never blocks phase advancement.
+        See docs/internal/manager-mode-pmo-plan.md Task 13.
+        """
+        try:
+            state = self._load_execution()
+            if state is None or state.plan is None or not state.plan.manager_mode:
+                return
+            phase_obj = state.current_phase_obj
+            if phase_obj is None or not phase_obj.steps:
+                return
+
+            phase_step_ids = {s.step_id for s in phase_obj.steps}
+            phase_results = [
+                r for r in state.step_results
+                if r.step_id in phase_step_ids and r.status == "complete"
+            ]
+            if self._bead_store is not None:
+                try:
+                    phase_beads = self._bead_store.query(
+                        task_id=state.task_id, limit=500,
+                    )
+                except Exception as _bq_exc:
+                    _log.debug(
+                        "Manager-mode phase-artifact bead query failed "
+                        "(non-fatal, degrading to no beads): %s", _bq_exc,
+                    )
+                    phase_beads = []
+            else:
+                phase_beads = []
+            decision_beads = [
+                b for b in phase_beads
+                if b.bead_type == "decision" and b.step_id in phase_step_ids
+            ]
+            warning_beads = [
+                b for b in phase_beads
+                if b.bead_type == "warning"
+                and b.status == "open"
+                and b.step_id in phase_step_ids
+            ]
+            pending_gaps = [
+                g for g in state.pending_gaps
+                if getattr(g, "step_id", "") in phase_step_ids
+            ]
+            pending_scope_expansions = [
+                e for e in state.pending_scope_expansions
+                if isinstance(e, dict) and e.get("step_id") in phase_step_ids
+            ]
+
+            from agent_baton.core.config.manager import ManagerConfig
+            from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+            config = ManagerConfig.load(self._project_root())
+            paths = ManagerArtifactPaths(self._root, state.task_id)
+
+            if config.policies.phase_completion.handoff_required:
+                try:
+                    from agent_baton.core.manager.artifacts import write_text
+
+                    handoff_md = _render_manager_phase_handoff_markdown(
+                        phase_obj=phase_obj,
+                        phase_results=phase_results,
+                        decision_beads=decision_beads,
+                        warning_beads=warning_beads,
+                        pending_gaps=pending_gaps,
+                        pending_scope_expansions=pending_scope_expansions,
+                    )
+                    write_text(paths.phase_handoff(phase_obj.phase_id), handoff_md)
+                    _log.debug(
+                        "Manager-mode phase handoff written for phase %d",
+                        phase_obj.phase_id,
+                    )
+                except Exception as _hf_exc:
+                    _log.warning(
+                        "Manager-mode phase handoff write failed for phase %d "
+                        "(non-fatal): %s", phase_obj.phase_id, _hf_exc,
+                    )
+
+            try:
+                from agent_baton.core.manager.reports import ManagerReportBuilder
+
+                artifacts = _load_manager_report_artifacts(paths)
+                builder = ManagerReportBuilder(config, paths)
+                builder.save_report(state.plan, artifacts, state.to_dict())
+                _log.debug(
+                    "Manager report refreshed after phase %d", phase_obj.phase_id
+                )
+            except Exception as _rep_exc:
+                _log.debug(
+                    "Manager report refresh failed after phase %d (non-fatal): %s",
+                    phase_obj.phase_id, _rep_exc,
+                )
+        except Exception as _mgr_exc:
+            _log.debug(
+                "Manager-mode phase-completion hook skipped (non-fatal): %s", _mgr_exc
             )
 
     # ── Split-brain reconciliation helpers ──────────────────────────────────
@@ -2475,11 +2609,26 @@ class ExecutionEngine:
 
         # ── Scope expansion signal protocol ──────────────────────────────────
         # Parse SCOPE_EXPANSION signals and queue for processing at the next
-        # phase boundary.  Skipped for automation steps.
+        # phase boundary.  Skipped for automation steps AND for manager_mode
+        # plans (C1 fix, release-review binding decision): the loose
+        # ``SCOPE_EXPANSION: <description>`` pattern parsed here also
+        # matches the stricter manager-mode ``<path> — <reason>`` shape
+        # (both share the ``SCOPE_EXPANSION:`` prefix -- see
+        # agent_baton.core.engine.manager_scope_signal's module docstring),
+        # which previously caused a double-route: the manager-mode block
+        # below creates a decision packet / bead note / step failure per
+        # ``scoping.scope_expansion_policy`` while THIS block ALSO queued
+        # the same signal for the adaptive replanner, which auto-amends the
+        # plan at the next phase boundary -- work got silently auto-planned
+        # while a manager decision was still open (or a blocked step's
+        # expansion queued anyway). Manager-mode plans now route
+        # exclusively through manager_scope_signal below; non-manager plans
+        # keep this pre-existing adaptive-replanner behavior unchanged.
         if (
             status in ("complete", "interrupted")
             and outcome
             and (_plan_step is None or _plan_step.step_type != "automation")
+            and (state.plan is None or not state.plan.manager_mode)
         ):
             try:
                 from agent_baton.core.engine.bead_signal import parse_scope_expansions
@@ -2540,6 +2689,159 @@ class ExecutionEngine:
                     )
             except Exception as _ga_exc:
                 _log.debug("Gate addition parsing failed (non-fatal): %s", _ga_exc)
+
+        # ── Manager-mode scope-expansion signal protocol (M9) ─────────────────
+        # Parses the stricter SCOPE_EXPANSION: <path> — <reason> format (see
+        # agent_baton.core.engine.manager_scope_signal). Only active for
+        # manager_mode plans, which is also why the free-text
+        # SCOPE_EXPANSION: <description> block above (bead_signal.
+        # parse_scope_expansions, feeding the unrelated adaptive-replanning
+        # queue) is now gated OFF for manager_mode plans (C1 fix): both
+        # patterns share the SCOPE_EXPANSION: prefix and can match the same
+        # outcome text, so manager-mode plans must route exclusively
+        # through THIS block to avoid double-routing (auto-replanning work
+        # while a manager decision on the same signal is still open).
+        # Routes per ManagerConfig.scoping.scope_expansion_policy. Parsing +
+        # config loading are best-effort; the "block" policy's step-failure
+        # is deliberately NOT swallowed by the outer try/except -- a
+        # blocked scope expansion must fail the step visibly (Task 13
+        # binding constraint).
+        if (
+            state.plan is not None
+            and state.plan.manager_mode
+            and status in ("complete", "interrupted")
+            and outcome
+            and (_plan_step is None or _plan_step.step_type != "automation")
+        ):
+            _scope_signals = []
+            try:
+                from agent_baton.core.engine.manager_scope_signal import (
+                    parse_scope_expansion_signals,
+                )
+                _scope_signals = parse_scope_expansion_signals(outcome, step_id=step_id)
+            except Exception as _sig_exc:
+                _log.debug(
+                    "Manager scope-expansion signal parse failed (non-fatal): %s",
+                    _sig_exc,
+                )
+
+            if _scope_signals:
+                _mgr_config = None
+                try:
+                    from agent_baton.core.config.manager import ManagerConfig
+                    _mgr_config = ManagerConfig.load(self._project_root())
+                except Exception as _cfg_exc:
+                    _log.debug(
+                        "ManagerConfig load failed for scope-expansion routing "
+                        "(non-fatal, defaulting to queue_for_manager): %s",
+                        _cfg_exc,
+                    )
+                _policy = (
+                    _mgr_config.scoping.scope_expansion_policy
+                    if _mgr_config is not None
+                    else "queue_for_manager"
+                )
+
+                if _policy == "block":
+                    # Visible failure — deliberately NOT wrapped in a broad
+                    # try/except: this branch MUST leave the step failed.
+                    _sig = _scope_signals[0]
+                    _block_msg = (
+                        "Scope expansion blocked by policy "
+                        "(scoping.scope_expansion_policy='block'): "
+                        f"{_sig.path} — {_sig.reason}. Amend the plan to include "
+                        "this work, then re-dispatch."
+                    )
+                    result.status = "failed"
+                    status = "failed"
+                    result.error = _block_msg
+                    result.deviations.append(_block_msg)
+                    _log.warning("Step %s failed: %s", step_id, _block_msg)
+                elif _policy == "allow_with_note":
+                    try:
+                        if self._bead_store is not None:
+                            from agent_baton.models.bead import Bead as _BeadCls
+                            from agent_baton.models.bead import (
+                                _generate_bead_id as _gen_id,
+                            )
+                            from agent_baton.utils.time import utcnow_zulu as _zulu_now
+                            for _sig in _scope_signals:
+                                _ts = _zulu_now()
+                                _bc = len(
+                                    self._bead_store.query(
+                                        task_id=state.task_id, limit=10000
+                                    )
+                                )
+                                self._bead_store.write(_BeadCls(
+                                    bead_id=_gen_id(
+                                        state.task_id, step_id,
+                                        f"{_sig.path}:{_sig.reason}", _ts, _bc,
+                                    ),
+                                    task_id=state.task_id,
+                                    step_id=step_id,
+                                    agent_name=agent_name,
+                                    bead_type="warning",
+                                    content=(
+                                        f"SCOPE_EXPANSION (allow_with_note): "
+                                        f"{_sig.path} — {_sig.reason}"
+                                    ),
+                                    scope="task",
+                                    tags=["scope-expansion", "manager-mode"],
+                                    created_at=_ts,
+                                    source="agent-signal",
+                                ))
+                    except Exception as _note_exc:
+                        _log.debug(
+                            "Scope-expansion allow_with_note bead write failed "
+                            "(non-fatal): %s", _note_exc,
+                        )
+                elif _policy == "queue_for_manager":
+                    try:
+                        from agent_baton.core.config.manager import ManagerConfig
+                        from agent_baton.core.manager.decisions import (
+                            DecisionPacketBuilder,
+                        )
+                        from agent_baton.core.manager.paths import (
+                            ManagerArtifactPaths,
+                        )
+                        from agent_baton.core.runtime.decisions import DecisionManager
+                        from agent_baton.models.manager import ManagerDecision
+                        from agent_baton.utils.time import utcnow_zulu as _zulu_now
+
+                        _mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+                        _decision_mgr = None
+                        try:
+                            _decision_mgr = DecisionManager(
+                                decisions_dir=self._root / "decisions",
+                                bus=self._bus,
+                            )
+                        except Exception:
+                            _decision_mgr = None
+                        _builder = DecisionPacketBuilder(
+                            _mgr_config or ManagerConfig(),
+                            _mgr_paths,
+                            decision_manager=_decision_mgr,
+                        )
+                        for _sig in _scope_signals:
+                            _decision = ManagerDecision(
+                                decision_type="scope_expansion",
+                                task_id=state.task_id,
+                                summary=f"Scope expansion requested: {_sig.path}",
+                                context=(
+                                    f"Step {step_id} ({agent_name}) requested work "
+                                    f"outside its scope contract: {_sig.reason}"
+                                ),
+                                options=[
+                                    "approve", "reject", "amend plan",
+                                ],
+                                created_at=_zulu_now(),
+                            )
+                            _builder.create(_decision)
+                    except Exception as _route_exc:
+                        _log.debug(
+                            "Scope-expansion queue_for_manager routing failed "
+                            "(non-fatal): %s", _route_exc,
+                        )
 
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
@@ -4199,6 +4501,35 @@ class ExecutionEngine:
         )
         retro_path = self._save_retro(retro)
 
+        # ── Manager-mode (M9) completion hook ─────────────────────────────────
+        # Writes the final manager-report.md alongside the retrospective.
+        # Best-effort: any failure is logged at debug and never blocks
+        # completion. See docs/internal/manager-mode-pmo-plan.md Task 13.
+        manager_report_path: Path | None = None
+        if state.plan is not None and state.plan.manager_mode:
+            try:
+                from agent_baton.core.config.manager import ManagerConfig
+                from agent_baton.core.manager.paths import ManagerArtifactPaths
+                from agent_baton.core.manager.reports import ManagerReportBuilder
+
+                config = ManagerConfig.load(self._project_root())
+                paths = ManagerArtifactPaths(self._root, state.task_id)
+                artifacts = _load_manager_report_artifacts(paths)
+                builder = ManagerReportBuilder(config, paths)
+                manager_report_path = builder.save_report(
+                    state.plan, artifacts, state.to_dict()
+                )
+                _log.debug(
+                    "Final manager report written for task %s: %s",
+                    state.task_id, manager_report_path,
+                )
+            except Exception as _final_report_exc:
+                _log.debug(
+                    "Final manager report write failed (non-fatal): %s",
+                    _final_report_exc,
+                )
+                manager_report_path = None
+
         # Generate compliance report for HIGH/CRITICAL risk plans (best-effort).
         # Stored alongside traces and retrospectives in the execution directory.
         compliance_report_path: Path | None = None
@@ -4324,6 +4655,8 @@ class ExecutionEngine:
             summary_lines.append(f"Compliance report: {compliance_report_path}")
         if context_profile_path:
             summary_lines.append(f"Context profile: {context_profile_path}")
+        if manager_report_path:
+            summary_lines.append(f"Manager report: {manager_report_path}")
         return "\n".join(summary_lines)
 
     def status(self) -> dict:
@@ -6314,6 +6647,12 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            # I2 fix: invoked unconditionally alongside (not nested inside)
+            # _synthesize_beads_post_phase, whose early returns (no bead
+            # store / no derived store / zero complete step results) are
+            # purely bead-graph-synthesis concerns and must never suppress
+            # the PMO handoff/report.
+            self._write_manager_phase_artifacts()
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=False)
             self._publish_phase_started(state)
@@ -6485,6 +6824,8 @@ class ExecutionEngine:
                 phase_name=phase_obj.name,
             ))
             self._synthesize_beads_post_phase()
+            # I2 fix: see EMPTY_PHASE_ADVANCE above for rationale.
+            self._write_manager_phase_artifacts()
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=True)
             self._publish_phase_started(state)
@@ -6735,6 +7076,47 @@ class ExecutionEngine:
                 except Exception:  # noqa: BLE001
                     _handoff_conn = None
 
+            # ── Manager-mode PMO sidecars (M9) ────────────────────────────
+            # Loads scope-contract + context-bundle sidecars written at plan
+            # time by ManagerModePlanner (Wave 3) and threads them into the
+            # two dispatcher kwargs added for this purpose in Task 8
+            # (``scope_contract_section`` / ``context_bundle_section``).
+            # Best-effort: any failure (including sidecars simply not
+            # existing, e.g. --dry-run planning) leaves both kwargs None so
+            # the prompt is unaffected. Non-manager-mode plans never enter
+            # this block at all, so they stay byte-identical to the
+            # pre-M9 shape (golden snapshot;
+            # tests/engine/golden/manager_context_prompt_baseline.txt).
+            _scope_contract_section: str | None = None
+            _context_bundle_section: str | None = None
+            if state.plan.manager_mode:
+                try:
+                    from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+                    _mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+                    _contract_path = _mgr_paths.scope_contract(step.step_id, "md")
+                    if _contract_path.is_file():
+                        _contract_text = _contract_path.read_text(encoding="utf-8").strip()
+                        if _contract_text:
+                            _scope_contract_section = (
+                                "## Scope Contract\n"
+                                f"{_contract_text}\n\n"
+                                f"{_MANAGER_SCOPE_EXPANSION_SIGNAL_HINT}"
+                            )
+                    _bundle_path = _mgr_paths.context_bundle(step.step_id)
+                    if _bundle_path.is_file():
+                        _bundle_data = json.loads(_bundle_path.read_text(encoding="utf-8"))
+                        _context_bundle_section = _render_manager_context_bundle_section(
+                            _bundle_data
+                        )
+                except Exception as _mgr_exc:  # noqa: BLE001
+                    _log.debug(
+                        "Manager-mode dispatch sidecar load failed for step %s "
+                        "(non-fatal): %s", step.step_id, _mgr_exc,
+                    )
+                    _scope_contract_section = None
+                    _context_bundle_section = None
+
             prompt = dispatcher.build_delegation_prompt(
                 step,
                 shared_context=state.plan.shared_context,
@@ -6751,6 +7133,8 @@ class ExecutionEngine:
                 handoff_task_id=state.task_id or "",
                 phase_summaries_section=_phase_summaries_section,
                 handoff_bead_store=self._bead_store,
+                scope_contract_section=_scope_contract_section,
+                context_bundle_section=_context_bundle_section,
             )
             # Persist the updated delivered_knowledge map so subsequent
             # dispatches in this run know which docs are already inlined.
@@ -8267,8 +8651,199 @@ class ExecutionEngine:
 
 
 # ---------------------------------------------------------------------------
-# Private utilities (module-level to keep the class lean)
+# Manager-mode (M9) execution-hook helpers (module-level to keep the class
+# lean). See docs/internal/manager-mode-pmo-plan.md Task 13 and
+# docs/internal/manager-mode-pmo-design.md "Execution integration".
 # ---------------------------------------------------------------------------
+
+
+def _render_manager_context_bundle_section(bundle_data: dict) -> str:
+    """Render a ``## Context Bundle`` sidecar JSON dict into a compact
+    prompt section.
+
+    Only paths, reasons, and knowledge-pack names/paths are surfaced --
+    never full document bodies (the sidecar itself only ever stores
+    references, never inlined content, so this is a straight render, not
+    a truncation). Missing/empty groups are simply omitted.
+
+    Args:
+        bundle_data: The parsed ``context-bundles/<step_id>.json`` sidecar
+            (``ContextBundle.to_dict()`` shape -- see
+            ``agent_baton.models.manager.ContextBundle``).
+
+    Returns:
+        Markdown text starting with ``## Context Bundle``, or ``""`` when
+        *bundle_data* has nothing renderable.
+    """
+    lines: list[str] = ["## Context Bundle"]
+    rendered_any = False
+
+    must_read = bundle_data.get("must_read") or []
+    if must_read:
+        rendered_any = True
+        lines.append("Must read:")
+        for ref in must_read:
+            path = ref.get("path", "") if isinstance(ref, dict) else ""
+            reason = ref.get("reason", "") if isinstance(ref, dict) else ""
+            if not path:
+                continue
+            lines.append(f"- {path}" + (f" ({reason})" if reason else ""))
+        lines.append("")
+
+    reference_only = bundle_data.get("reference_only") or []
+    if reference_only:
+        rendered_any = True
+        lines.append("Reference only:")
+        for ref in reference_only:
+            path = ref.get("path", "") if isinstance(ref, dict) else ""
+            reason = ref.get("reason", "") if isinstance(ref, dict) else ""
+            if not path:
+                continue
+            lines.append(f"- {path}" + (f" ({reason})" if reason else ""))
+        lines.append("")
+
+    knowledge_packs = bundle_data.get("knowledge_packs") or []
+    if knowledge_packs:
+        rendered_any = True
+        lines.append("Knowledge packs:")
+        for pack in knowledge_packs:
+            name = pack.get("name", "") if isinstance(pack, dict) else ""
+            path = pack.get("path", "") if isinstance(pack, dict) else ""
+            if not name:
+                continue
+            lines.append(f"- {name}" + (f" ({path})" if path else ""))
+        lines.append("")
+
+    if not rendered_any:
+        return ""
+
+    return "\n".join(lines).rstrip()
+
+
+def _phase_step_ids(phase_obj: "PlanPhase") -> set[str]:
+    """Return the set of ``step_id`` values in *phase_obj*."""
+    return {s.step_id for s in phase_obj.steps}
+
+
+def _render_manager_phase_handoff_markdown(
+    *,
+    phase_obj: "PlanPhase",
+    phase_results: list["StepResult"],
+    decision_beads: list,
+    warning_beads: list,
+    pending_gaps: list,
+    pending_scope_expansions: list[dict],
+) -> str:
+    """Render ``handoffs/phase-<n>-handoff.md`` per PRD §13.4.
+
+    Required sections, in order: Completed work, Files changed, Decisions
+    made, Unresolved questions, Knowledge gaps, Scope changes, Next phase
+    recommendations. Built entirely from already-computed phase data (the
+    same ``phase_results`` / ``decision_beads`` / ``warning_beads`` inputs
+    :func:`agent_baton.core.intel.phase_summary.synthesize_phase_summary`
+    consumes) -- no clock reads, no LLM calls.
+    """
+    lines: list[str] = [
+        f"# Phase {phase_obj.phase_id} Handoff: {phase_obj.name}",
+        "",
+    ]
+
+    lines.append("## Completed Work")
+    if phase_results:
+        for result in phase_results:
+            outcome_short = (getattr(result, "outcome", "") or "").strip().splitlines()
+            first_line = outcome_short[0] if outcome_short else result.status
+            lines.append(f"- {result.step_id} ({result.agent_name}): {first_line}")
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Files Changed")
+    files: list[str] = []
+    seen_files: set[str] = set()
+    for result in phase_results:
+        for f in getattr(result, "files_changed", []) or []:
+            if f and f not in seen_files:
+                seen_files.add(f)
+                files.append(f)
+    if files:
+        lines.extend(f"- {f}" for f in files)
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Decisions Made")
+    if decision_beads:
+        lines.extend(f"- {b.content}" for b in decision_beads)
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Unresolved Questions")
+    if warning_beads:
+        lines.extend(f"- {b.content}" for b in warning_beads)
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Knowledge Gaps")
+    if pending_gaps:
+        for gap in pending_gaps:
+            description = getattr(gap, "description", "") or str(gap)
+            lines.append(f"- {description}")
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Scope Changes")
+    if pending_scope_expansions:
+        for expansion in pending_scope_expansions:
+            description = expansion.get("description", "") if isinstance(expansion, dict) else str(expansion)
+            lines.append(f"- {description}")
+    else:
+        lines.append("_None recorded._")
+    lines.append("")
+
+    lines.append("## Next Phase Recommendations")
+    if pending_gaps or pending_scope_expansions or warning_beads:
+        lines.append(
+            "- Resolve the unresolved questions/knowledge gaps/scope changes "
+            "above before the next phase depends on this work."
+        )
+    else:
+        lines.append("- Proceed to the next phase; no open items from this phase.")
+    lines.append("")
+
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _load_manager_report_artifacts(paths: "ManagerArtifactPaths") -> "ManagerArtifacts":
+    """Best-effort reconstruction of the sidecar artifacts ``ManagerReportBuilder``
+    needs, from disk.
+
+    Mirrors ``agent_baton.cli.commands.report_cmd._load_artifacts`` --
+    duplicated locally rather than imported because the engine layer must
+    not depend on the CLI layer. ``charter`` has no JSON sidecar (only the
+    rendered ``project-charter.md``) so it is left ``None``; report
+    sections that would use it fall back to plan-level data instead.
+    """
+    from agent_baton.core.manager.artifacts import ManagerArtifacts
+    from agent_baton.models.manager import KnowledgePlan, ScopeMap, TeamBlueprint
+
+    def _read_json_model(path: Path, model_cls):
+        if not path.is_file():
+            return None
+        try:
+            return model_cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError, ValueError, KeyError):
+            return None
+
+    artifacts = ManagerArtifacts()
+    artifacts.scope_map = _read_json_model(paths.scope_map, ScopeMap)
+    artifacts.blueprint = _read_json_model(paths.team_blueprint, TeamBlueprint)
+    artifacts.knowledge_plan = _read_json_model(paths.knowledge_plan, KnowledgePlan)
+    return artifacts
+
 
 def _append_resolved_decisions(
     handoff: str,

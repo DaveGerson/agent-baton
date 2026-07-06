@@ -880,18 +880,33 @@ def _handle_promote(args: argparse.Namespace) -> None:
         print(f"error: could not write knowledge document {doc_path}: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # Update pack.yaml index if it exists.
-    pack_yaml = knowledge_dir / "pack.yaml"
-    if pack_yaml.exists():
+    # Update the pack's knowledge.yaml documents index if it already exists.
+    # (Historically this wrote to a "pack.yaml" file the KnowledgeRegistry
+    # never reads -- a dead write. Fixed to target the manifest filename
+    # the registry actually parses, "knowledge.yaml".  Guard the
+    # "documents:" key so the append is never a bare sequence at the YAML
+    # document root -- KnowledgeRegistry._load_pack gracefully degrades on
+    # any resulting parse failure, but there is no need to risk it.)
+    knowledge_yaml = knowledge_dir / "knowledge.yaml"
+    if knowledge_yaml.exists():
         try:
-            text = pack_yaml.read_text(encoding="utf-8")
+            text = knowledge_yaml.read_text(encoding="utf-8")
             if doc_name not in text:
-                # Append a simple documents entry.
-                with pack_yaml.open("a", encoding="utf-8") as f:
+                # Ensure a trailing newline before ANY append below --
+                # regardless of whether "documents:" is already present --
+                # so the appended lines never get glued onto the final
+                # existing line (which would corrupt the YAML).
+                if text and not text.endswith("\n"):
+                    text += "\n"
+                    knowledge_yaml.write_text(text, encoding="utf-8")
+                if "documents:" not in text:
+                    text += "documents:\n"
+                    knowledge_yaml.write_text(text, encoding="utf-8")
+                with knowledge_yaml.open("a", encoding="utf-8") as f:
                     f.write(f"  - path: {doc_name}\n")
                     f.write(f"    description: \"Promoted from bead {bead.bead_id}\"\n")
         except Exception as exc:
-            print(f"Warning: could not update pack.yaml: {exc}", file=sys.stderr)
+            print(f"Warning: could not update knowledge.yaml: {exc}", file=sys.stderr)
 
     # Close the bead now that it has been promoted.
     store.close(bead.bead_id, summary=f"Promoted to knowledge pack '{pack_name}' as {doc_name}")

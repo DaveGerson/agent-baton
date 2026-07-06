@@ -387,6 +387,8 @@ class PromptDispatcher:
         handoff_task_id: str = "",
         phase_summaries_section: str = "",
         handoff_bead_store: "object | None" = None,
+        scope_contract_section: str | None = None,
+        context_bundle_section: str | None = None,
     ) -> str:
         """Build a complete delegation prompt for an agent.
 
@@ -405,6 +407,13 @@ class PromptDispatcher:
                 delivery in the knowledge section.  The dict is mutated in-place:
                 any doc that ends up inlined in THIS dispatch is added to it so
                 the caller can persist the updated state.
+            scope_contract_section: Pre-built manager-mode "## Scope Contract"
+                markdown block (see ``agent_baton.core.manager.context_bundles``).
+                Omitted (``None``) for non-manager-mode plans; inserted verbatim
+                immediately after the knowledge section when non-blank.
+            context_bundle_section: Pre-built manager-mode "## Context Bundle"
+                block, inserted immediately after ``scope_contract_section``
+                under the same non-blank condition.
 
         Returns:
             A formatted markdown delegation prompt ready to pass to the Agent tool.
@@ -543,6 +552,17 @@ class PromptDispatcher:
         # Insert knowledge section between Shared Context and Your Task
         if knowledge_section:
             parts.append(knowledge_section)
+            parts.append("")
+
+        # Manager-mode sections (M4, see agent_baton.core.manager.context_bundles).
+        # Absent (None/blank) for non-manager-mode plans, so this is a no-op
+        # and the prompt is byte-identical to the pre-manager-mode shape.
+        if scope_contract_section and scope_contract_section.strip():
+            parts.append(scope_contract_section.strip())
+            parts.append("")
+
+        if context_bundle_section and context_bundle_section.strip():
+            parts.append(context_bundle_section.strip())
             parts.append("")
 
         # Insert Prior Discoveries section (F3 Forward Relay).

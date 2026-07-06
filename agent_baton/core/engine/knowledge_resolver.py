@@ -205,7 +205,8 @@ class KnowledgeResolver:
             attachment, remaining_budget = self._make_attachment(
                 doc, pack_name, source, remaining_budget
             )
-            attachments.append(attachment)
+            if attachment is not None:
+                attachments.append(attachment)
 
         # --- Layer 2: Agent-declared -----------------------------------------
         layer2_docs = self._resolve_agent_declared_layer(agent_name)
@@ -218,7 +219,8 @@ class KnowledgeResolver:
                 doc, pack_name, source, remaining_budget,
                 prior_step_id=prior.get(key),
             )
-            attachments.append(attachment)
+            if attachment is not None:
+                attachments.append(attachment)
 
         # --- Layer 3: Planner-matched (strict tag) ---------------------------
         keywords = _extract_keywords(task_description, task_type)
@@ -232,7 +234,8 @@ class KnowledgeResolver:
                 doc, pack_name, source, remaining_budget,
                 prior_step_id=prior.get(key),
             )
-            attachments.append(attachment)
+            if attachment is not None:
+                attachments.append(attachment)
 
         # --- Layer 4: Planner-matched (relevance fallback) -------------------
         # Only fires when strict tag matching produced nothing at layer 3.
@@ -249,7 +252,8 @@ class KnowledgeResolver:
                     doc, pack_name, source, remaining_budget,
                     prior_step_id=prior.get(key),
                 )
-                attachments.append(attachment)
+                if attachment is not None:
+                    attachments.append(attachment)
 
         # F0.4 telemetry: record each resolved attachment as a KnowledgeUsed
         # event.  Best-effort — never raise from a telemetry failure.
@@ -463,10 +467,15 @@ class KnowledgeResolver:
         remaining_budget: int,
         *,
         prior_step_id: str | None = None,
-    ) -> tuple[KnowledgeAttachment, int]:
+    ) -> tuple[KnowledgeAttachment | None, int]:
         """Apply delivery decision and return (attachment, updated_remaining_budget).
 
         Delivery rules:
+        - Deprecated pack (``status == "deprecated"``) on a non-explicit
+          layer (source != "explicit"): skipped entirely — returns
+          ``(None, remaining_budget)`` unchanged. Explicit attachments
+          (``--knowledge-pack``/``--knowledge``, layer 1) are exempt: a
+          user who explicitly asks for a deprecated pack still gets it.
         - prior_step_id is set (session dedup, non-explicit layer): reference
           with a note pointing to the prior inline delivery step.
         - token_estimate <= 0:                           reference (unestimated)
@@ -477,6 +486,11 @@ class KnowledgeResolver:
         The retrieval hint is "mcp-rag" for reference deliveries when
         rag_available=True, otherwise "file".
         """
+        if source != "explicit" and pack_name is not None:
+            pack = self._registry.get_pack(pack_name)
+            if pack is not None and getattr(pack, "status", "active") == "deprecated":
+                return None, remaining_budget
+
         estimate = doc.token_estimate
         grounding = _make_grounding(doc, pack_name)
 

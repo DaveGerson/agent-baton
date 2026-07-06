@@ -14,7 +14,8 @@ import sys
 from pathlib import Path
 
 from agent_baton.cli.commands.knowledge import (
-    ensure_parent_parser,
+    dispatch,
+    get_or_create_parser,
     register_handler,
 )
 
@@ -26,7 +27,7 @@ _DEFAULT_DB = Path(".claude/team-context/baton.db")
 # ---------------------------------------------------------------------------
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    sub = ensure_parent_parser(subparsers)
+    p, sub = get_or_create_parser(subparsers)
 
     ab_p = sub.add_parser("ab", help="Knowledge A/B experiment commands.")
     ab_sub = ab_p.add_subparsers(dest="ab_subcommand")
@@ -53,26 +54,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     stop_p = ab_sub.add_parser("stop", help="Stop an active experiment.")
     stop_p.add_argument("experiment_id", help="Experiment ID.")
 
-    register_handler("ab", _run_ab)
-    return subparsers.choices["knowledge"]
+    register_handler("ab", _handle_ab)
+
+    return p
 
 
 def handler(args: argparse.Namespace) -> None:
-    dispatch = getattr(args, "_dispatch", None)
-    if dispatch is None:
-        _run_ab(args)
-        return
+    """Module-level handler delegated to the shared knowledge dispatcher."""
     dispatch(args)
 
 
-def _run_ab(args: argparse.Namespace) -> None:
-    if (
-        getattr(args, "knowledge_cmd", None) not in (None, "ab")
-        and getattr(args, "knowledge_subcommand", None) != "ab"
-    ):
-        print("Usage: baton knowledge ab <list|create|results|stop>")
-        return
-
+def _handle_ab(args: argparse.Namespace) -> None:
     sub = getattr(args, "ab_subcommand", None)
     svc = _get_service()
 

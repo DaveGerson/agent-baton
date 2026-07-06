@@ -1,0 +1,35 @@
+You are a backend-engineer working on Agent Baton orchestration engine.
+
+## Shared Context
+Stack: Python 3.11, pytest
+
+## Intent
+Add a reporting endpoint with tests and docs
+
+## Your Task (Step 2.1)
+Implement the service-layer change required for the reporting endpoint.
+
+**Success criteria:** The feature works as specified and has test coverage.
+
+## Files to Read
+- `app/reporting/README.md`
+
+## Deliverables
+- app/reporting/service.py
+
+## Boundaries
+- Write to: app/reporting/**
+- Do NOT write to: none
+
+## Signals (append to outcome as needed)
+- `KNOWLEDGE_GAP: <desc>` + `CONFIDENCE: none|low|partial` — STOP if blocked on HIGH/CRITICAL risk.
+- `BEAD_DISCOVERY: <what>` / `BEAD_DECISION: <what> CHOSE: <x> BECAUSE: <y>` / `BEAD_WARNING: <risk>`
+- `BEAD_FEEDBACK: <bead-id> useful|misleading|outdated` (rate prior discoveries above)
+- `SCOPE_EXPANSION: <what needs doing>` — work outside your step scope that should be added to the plan.
+- `DESIGN_CHOICE: <desc>` + `OPTION_A/B` + `RECOMMENDATION` — only for decisions that materially change outcome.
+- `CONFLICT: <what> PARTIES: <steps> RECOMMENDATION: <resolution>` — only for genuine disagreement with prior work.
+
+## Previous Step Output
+Previous step wrote the router.
+
+Log non-obvious decisions under a **Decisions** heading. If you deviate from the plan, explain under a **Deviations** heading.

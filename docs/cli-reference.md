@@ -17,6 +17,7 @@ Commands are organized into functional groups:
 | Group | Concern | Commands |
 |-------|---------|----------|
 | **Execution** | Plan, execute, and manage orchestrated tasks | `plan`, `execute`, `status`, `daemon`, `async`, `decide` |
+| **Manager Mode** | PMO planning overlay -- charter, team blueprint, scope contracts, knowledge-pack lifecycle | `plan --manager-mode`, `config`, `report`, `team`, `knowledge list/scan/show/audit/propose` |
 | **Observe** | Traces, usage, dashboards, telemetry | `dashboard`, `trace`, `usage`, `telemetry`, `context-profile`, `retro`, `context`, `cleanup` |
 | **Guardrails** | Risk, policy, compliance, validation | `classify`, `compliance`, `policy`, `escalations`, `validate`, `spec-check`, `detect` |
 | **Improve** | Scoring, learning, patterns, budgets | `scores`, `learn`, `patterns`, `budget`, `changelog`, `anomalies` |
@@ -72,11 +73,26 @@ baton plan SUMMARY [options]
 | `--json` | No | false | Output plan as JSON instead of markdown |
 | `--save` | No | false | Write `plan.json` and `plan.md` to `.claude/team-context/` |
 | `--explain` | No | false | Print explanation of plan choices |
+| `--manager-mode` | No | false | Post-process the plan into manager-mode PMO sidecar artifacts (project charter, scope map, team blueprint, role cards, knowledge plan, scope contracts, context bundles, manager brief) under `.claude/team-context/executions/<task_id>/`. Also enabled by `manager_mode.enabled_by_default` in `.claude/baton.yaml`. See [Manager Mode Commands](#manager-mode-commands) below. |
+| `--dry-run` | No | false | Preview the plan + cost/token forecast without saving. Mutually exclusive with `--save` (exits 2 if both are passed). |
+| `--gate-scope SCOPE` | No | sentinel (unset) | How broadly gate commands run: `focused` (scopes pytest to test files covering changed source paths), `full` (legacy unscoped pytest / pytest --cov), `smoke` (import-only / collect-only). When omitted, the planner's own default applies; in manager mode, an omitted flag lets `gates.gate_scope` from the manager config apply instead (see below). |
 | `--knowledge PATH` | No | -- | Attach a knowledge document file globally to all steps (repeatable) |
 | `--knowledge-pack PACK` | No | -- | Attach a knowledge pack by name globally to all steps (repeatable) |
 | `--intervention LEVEL` | No | `low` | Escalation threshold for knowledge gaps: `low`, `medium`, `high` |
 | `--goal CONDITION` | No | -- | Completion condition (G1). The engine evaluates the goal after each gate passes and uses `amend_plan` to round out gaps until met, exhausted, or the token ceiling is hit. |
 | `--max-amend-cycles N` | No | `3` | Goal round-out budget (meaningful only with `--goal`). |
+
+**Manager mode:**
+
+`--manager-mode` sets `plan.manager_mode = true` regardless of `--save`/`--dry-run`, but the PMO artifacts (charter, scope map, blueprint, role cards, knowledge plan, scope contracts, context bundles, `manager-brief.md`) are only built when combined with one of those two flags:
+
+- **`--manager-mode --save`**: builds and writes the full artifact set to `.claude/team-context/executions/<task_id>/`, prints an `Artifacts:` path list after the normal save output. The PMO layer's `PhasePolicyApplier` (adversarial-review step injection, gate rescoping) runs *before* `plan.json`/`plan.md` are written, so the saved plan already reflects any injected review steps.
+- **`--manager-mode --dry-run`**: builds the same artifact set in memory only and prints it as a preview list (`Manager Mode artifacts (preview only -- nothing written)`) alongside the compact plan forecast; nothing touches disk. `--json --dry-run --manager-mode` includes the preview under a `manager_mode_artifacts` key.
+- **`--manager-mode` alone** (no `--save`, no `--dry-run`): prints markdown/JSON like a normal plan with `manager_mode: true` stamped on it, but builds no PMO artifacts.
+- **`--manager-mode --explain --save`**: appends a `## Manager Mode` section (workstreams + owners, team roles, and the effective adversarial-review/handoff/gate-scope policy) to `explanation.md`.
+- **`--manager-mode` + `--gate-scope`**: an explicit `--gate-scope` always wins over the manager config's `gates.gate_scope`. Left unset, gates are rescoped to `gates.gate_scope` only when `gates.mode` (in `.claude/baton.yaml`) is `project_configured` (the default); other `gates.mode` values are recorded on the blueprint but do not change gate commands this increment.
+
+A malformed `.claude/baton.yaml` manager section is a hard error only when `--manager-mode` was explicitly passed; otherwise it downgrades to a warning and manager mode stays off. See [docs/internal/manager-mode-pmo-design.md](internal/manager-mode-pmo-design.md) for the full artifact schema.
 
 **Examples:**
 
@@ -94,9 +110,15 @@ baton plan "Implement payment processing" --save \
 
 # Output plan as JSON for programmatic consumption
 baton plan "Add caching layer" --json
+
+# Preview manager-mode PMO artifacts without writing anything
+baton plan "Roll out multi-tenant billing" --manager-mode --dry-run
+
+# Save a plan with the full manager-mode PMO layer
+baton plan "Roll out multi-tenant billing" --manager-mode --save --explain
 ```
 
-**Related:** `baton execute start`, `baton classify`, `baton detect`
+**Related:** `baton execute start`, `baton classify`, `baton detect`, `baton config`, `baton report`, `baton team`
 
 ---
 
@@ -148,6 +170,18 @@ See [docs/internal/agent-teams-and-goal-design.md](internal/agent-teams-and-goal
 
 Drive an orchestrated task through the execution engine. This is a
 command group with multiple subcommands.
+
+For a plan saved with `plan.manager_mode = true` (see [`baton plan
+--manager-mode`](#baton-plan)), dispatch prompts additionally carry a
+scope-contract and context-bundle section per step, and phase
+completion/final completion best-effort refresh the phase handoff and
+`manager-report.md` sidecars -- the action loop and `_print_action()`
+output shape are unchanged. When a dispatched agent reports a
+`SCOPE_EXPANSION: <path> — <reason>` signal, `scoping.scope_expansion_policy`
+(`.claude/baton.yaml`) routes it to one of three outcomes: `allow_with_note`
+(proceed, record a bead), `queue_for_manager` (create a manager decision
+packet, proceed), or `block` (the step fails immediately, pending a plan
+amendment to bring the work into scope).
 
 #### `baton execute start`
 
@@ -625,6 +659,159 @@ baton decide --show req-abc123
 
 # Resolve a decision
 baton decide --resolve req-abc123 --option "approve" --rationale "Looks good after review"
+```
+
+---
+
+## Manager Mode Commands
+
+Commands for the manager-mode PMO layer: config profile, status
+reporting, and the knowledge-pack lifecycle. See
+[`baton plan --manager-mode`](#baton-plan) to opt a plan into this
+layer, and
+[docs/internal/manager-mode-pmo-design.md](internal/manager-mode-pmo-design.md)
+for the full artifact schema and locked design decisions.
+
+### `baton config`
+
+Inspect, validate, or scaffold the project's `baton.yaml` config. Every
+subcommand accepts `--profile {project,manager}` (default `project`);
+both profiles read/write the same `baton.yaml` file and each ignores
+the other's top-level keys.
+
+```
+baton config show [--start-dir DIR] [--profile {project,manager}]
+baton config validate [PATH] [--profile {project,manager}]
+baton config init [--path PATH] [--force] [--profile {project,manager}]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Print the discovered `baton.yaml` path and the effective merged config (JSON for `--profile project`, YAML for `--profile manager`). |
+| `validate` | Parse and validate a `baton.yaml` file; exits non-zero on failure. `--profile manager` errors name the offending key/value/valid-options. |
+| `init` | Write a starter `baton.yaml` to the target path. `--profile project` writes `./baton.yaml` (the `default_agents`/`default_gates`/... template); `--profile manager` writes `./.claude/baton.yaml` (the full `manager_mode`/`team`/`scoping`/`context`/`knowledge_packs`/`policies`/`gates`/`reporting` template from the PRD). |
+
+| Argument | Applies to | Description |
+|----------|-----------|-------------|
+| `--start-dir DIR` | `show` | Directory to start the upward config search from (default: cwd) |
+| `PATH` | `validate` | Optional explicit file path (defaults to discovery from cwd) |
+| `--path PATH` | `init` | Output path (default per profile, see above) |
+| `--force` | `init` | Overwrite an existing file at the target path |
+| `--profile {project,manager}` | all | Which config surface to operate on (default `project`) |
+
+**Exit codes:** `0` success (including calling `baton config` with no subcommand, which prints a usage hint); `1` file missing/unreadable, or `--profile project` parse error; `2` `--profile manager` parse error (`ManagerConfigError`).
+
+**Examples:**
+
+```bash
+# Scaffold the manager-mode config template
+baton config init --profile manager
+
+# Validate it after editing
+baton config validate --profile manager
+
+# Show the effective merged manager config (defaults < user < project)
+baton config show --profile manager
+```
+
+---
+
+### `baton report`
+
+Manager-mode status report for a task: brief (post-planning) or
+progress report (during/after execution). Degrades gracefully when
+execution hasn't started -- a plan saved with `--manager-mode --save`
+alone still produces a report from the scope-map/team-blueprint/
+knowledge-plan sidecars and `plan.json`.
+
+```
+baton report [--task-id TASK_ID] [--json]
+```
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--task-id TASK_ID` | No | active task | Target a specific execution by task ID (resolution ladder: `--task-id` -> `BATON_TASK_ID` -> active-task marker) |
+| `--json` | No | false | Emit machine-readable JSON instead of Markdown |
+
+**Output:** prints the rendered report and (best-effort) writes/refreshes `manager-report.md` under `.claude/team-context/executions/<task_id>/`.
+
+**Example:**
+
+```bash
+baton plan "Roll out multi-tenant billing" --manager-mode --save
+baton report
+```
+
+---
+
+### `baton team`
+
+Ad-hoc team status and role cards for a manager-mode task. Requires a
+team blueprint (`team-blueprint.json`) written by
+`baton plan --manager-mode --save`.
+
+```
+baton team status [--task-id TASK_ID]
+baton team show [--task-id TASK_ID]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Team purpose, roles (with owned-workstream counts), workstream ownership, completed handoffs, open knowledge gaps, open scope changes, and manager decisions needed. |
+| `show` | Everything `status` shows, plus each role's full role-card content. |
+
+| Argument | Description |
+|----------|-------------|
+| `--task-id TASK_ID` | Target a specific execution by task ID (defaults to the active task) |
+
+Workstream ownership is always read from `TeamBlueprint.workstream_assignments` -- a role that owns zero workstreams is listed under Roles only, never as a workstream's owner.
+
+**Example:**
+
+```bash
+baton team status
+baton team show --task-id 2026-07-02-billing-rollout-ab12cd34
+```
+
+---
+
+### `baton knowledge list` / `show` / `scan` / `audit` / `propose`
+
+Knowledge-pack lifecycle verbs on the shared `baton knowledge`
+cooperative parser (see `baton knowledge --help` for the full
+subcommand list, including the pre-existing `brief`/`effectiveness`/
+`harvest`/`stale`/`deprecate`/`retire`/`sweep`/`usage`/`ranking`/`ab`
+verbs not covered here). These five read/write the existing
+`knowledge.yaml` manifest -- there is no separate `pack.yaml`.
+
+```
+baton knowledge list [--root ROOT]
+baton knowledge show PACK_NAME [--root ROOT]
+baton knowledge scan [--root ROOT]
+baton knowledge audit [--root ROOT]
+baton knowledge propose [--root ROOT]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List discovered knowledge packs with status, confidence, doc count, and token estimate. |
+| `show PACK_NAME` | Show one pack's status, confidence, description, source path/files, target agents, last-reviewed date, stale-after window, and documents. |
+| `scan` | Discover knowledge packs and candidate docs; writes `knowledge-scan.json` under `.claude/team-context/`. |
+| `audit` | Audit packs for invalid status, staleness, and missing metadata against the loaded `ManagerConfig`. Prints `Knowledge audit: no issues found.` and exits 0 when clean; otherwise lists each issue and **exits 1**. |
+| `propose` | Propose new knowledge packs from repeated knowledge-gap signals recorded under `.claude/team-context/`; writes each proposal to `.claude/team-context/knowledge-proposals/<slug>.md` when any are found. |
+
+| Argument | Description |
+|----------|-------------|
+| `--root ROOT` | Project root to scan/discover packs from (default: cwd) |
+| `PACK_NAME` | (positional, `show` only) Pack name to display |
+
+**Exit codes:** `0` success (including "no issues"/"nothing to propose"); `1` `audit` found issues, or `show` was given an unknown pack name.
+
+**Example:**
+
+```bash
+baton knowledge scan
+baton knowledge audit || echo "fix the packs above before shipping"
 ```
 
 ---

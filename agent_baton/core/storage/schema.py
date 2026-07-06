@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1385,12 +1385,31 @@ CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_by ON spec_drafts(submitted
 CREATE INDEX IF NOT EXISTS idx_spec_drafts_submitted_at ON spec_drafts(submitted_at);
 """,
     46: """
--- v46: persist plan diagnostics as a JSON blob on plans.
+-- v46: manager-mode PMO layer (M9, docs/internal/manager-mode-pmo-plan.md
+-- Task 13) -- persist MachinePlan.manager_mode through the SQLite backend.
+--
+-- Without this column, ``state.plan.manager_mode`` silently reset to
+-- False on every SQLite save/load round-trip (SQLite is the default
+-- backend for new projects -- see agent_baton.core.storage.detect_backend),
+-- which made the M9 execution hooks (_dispatch_action / record_step_result /
+-- _synthesize_beads_post_phase / complete()) inert whenever a manager-mode
+-- plan was executed against SQLite storage. Additive-only, matches the
+-- existing task_type / release_id column-addition precedent in this file.
+--
+-- Applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations() (see v45's note above).
+ALTER TABLE plans ADD COLUMN manager_mode INTEGER NOT NULL DEFAULT 0;
+""",
+    47: """
+-- v47: persist plan diagnostics as a JSON blob on plans.
 --
 -- Applied to BOTH project and central databases. Project DBs have a single
 -- task_id primary key; central DBs have (project_id, task_id). The additive
 -- column shape works for both and keeps MachinePlan.to_dict()/from_dict()
 -- diagnostics round-trips intact after SQLite normalization.
+--
+-- Renumbered from 46 on merge: master's v46 (manager_mode) was already
+-- published, so databases migrated by master must still receive this column.
 ALTER TABLE plans ADD COLUMN plan_diagnostics TEXT NOT NULL DEFAULT '{}';
 """,
 }
@@ -1553,6 +1572,8 @@ CREATE TABLE IF NOT EXISTS plans (
     -- cannot add an FK in SQLite, and migrated vs. fresh DBs must behave
     -- identically.  Tagging is purely metadata; freeze gating is R3.5.
     release_id                 TEXT,
+    -- v46 (M9): manager-mode PMO layer flag -- see MIGRATIONS[46] above.
+    manager_mode                INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_plans_release ON plans(release_id);
@@ -2663,6 +2684,8 @@ CREATE TABLE IF NOT EXISTS plans (
     classification_confidence  REAL,
     plan_diagnostics           TEXT NOT NULL DEFAULT '{}',
     release_id                 TEXT,
+    -- v46 (M9): manager-mode PMO layer flag -- see MIGRATIONS[46] above.
+    manager_mode                INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_plans_risk ON plans(risk_level);
