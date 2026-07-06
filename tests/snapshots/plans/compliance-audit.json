@@ -29,17 +29,11 @@
       "phase_id": 2,
       "steps": [
         {
-          "agent": "team",
+          "agent": "backend-engineer",
           "depends_on": [],
           "step_id": "2.1",
           "step_type": "developing",
-          "team": [
-            {
-              "agent": "backend-engineer",
-              "member_id": "2.1.a",
-              "role": "lead"
-            }
-          ]
+          "team": []
         }
       ]
     },

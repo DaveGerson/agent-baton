@@ -28,6 +28,7 @@ from agent_baton.core.engine.planning.utils.risk_and_policy import (
     requires_audit_coverage,
     select_git_strategy,
 )
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS
 from agent_baton.models.enums import RiskLevel
 
 if TYPE_CHECKING:
@@ -40,6 +41,11 @@ class RiskStage:
     """Stage 3: knowledge setup + risk and sensitivity classification."""
 
     name = "risk"
+
+    # Same derivation ValidationStage._REVIEWER_BASES uses (validation.py:143)
+    # so "is a reviewer-class agent already on the roster" agrees between the
+    # gate that blocks the plan and the stage that guarantees a phase slot.
+    _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -248,14 +254,29 @@ class RiskStage:
             )
             injected_auditor = True
 
-        injected_any = injected_reviewer or injected_auditor
+        # Presence flags computed from the PRE-INJECTION roster (current_bases,
+        # captured above before either append happens) OR'd with this call's
+        # own injection — i.e. true whenever a reviewer/auditor is (or is about
+        # to be) on the roster, regardless of whether THIS call is what put it
+        # there.  This must stay in lockstep with ValidationStage._REVIEWER_BASES
+        # (validation.py:143) / _review_required (validation.py:485-489), which
+        # gate on roster membership alone — not on "did RiskStage just inject
+        # it".  Without this, a code-reviewer that was already on the roster at
+        # medium/low risk (no injection needed) leaves classified_phases without
+        # a Review slot, so the phase builder force-lands the reviewer in the
+        # Implement team-step and consolidate_team_step() (phase_builder.py)
+        # filters it back out — zero review coverage, hard-blocked plan.
+        reviewer_present = injected_reviewer or bool(
+            current_bases & self._REVIEWER_BASES
+        )
+        auditor_present = injected_auditor or ("auditor" in current_bases)
 
-        # When agents were injected, guarantee that review-type phases exist in
-        # classified_phases so each injected safety agent has a home.
+        # When a reviewer/auditor is present, guarantee that review-type
+        # phases exist in classified_phases so it has a home.
         #
         # Background: ClassificationStage may produce a medium-complexity phase
         # list (e.g. ["Design", "Implement", "Test"]) that strips Review before
-        # risk is known.  Without this correction the injected agents are
+        # risk is known.  Without this correction the safety agent is
         # force-assigned to the Implement team step and then silently filtered
         # by the phase-builder's reviewer-exclusion guard.
         #
@@ -263,22 +284,19 @@ class RiskStage:
         # most ONE primary agent per phase in Pass 1.  If both code-reviewer and
         # auditor are on the roster they need SEPARATE review-type phase slots —
         # one takes "Review" and the other takes "Audit".
-        if injected_any and draft.classified_phases is not None:
+        if (reviewer_present or auditor_present) and draft.classified_phases is not None:
             new_phases = list(draft.classified_phases)
             added: list[str] = []
 
-            if injected_reviewer and "Review" not in new_phases:
+            if reviewer_present and "Review" not in new_phases:
                 new_phases.append("Review")
                 added.append("Review")
 
-            if injected_auditor:
+            if auditor_present:
                 # auditor needs its own phase slot distinct from "Review"
                 # (which code-reviewer claims).  Use "Audit" — it maps to the
                 # review ideal-roles table and is not blocked anywhere.
-                reviewer_in_roster = (
-                    "code-reviewer" in current_bases or injected_reviewer
-                )
-                if reviewer_in_roster and "Audit" not in new_phases:
+                if reviewer_present and "Audit" not in new_phases:
                     new_phases.append("Audit")
                     added.append("Audit")
                 elif "Review" not in new_phases:

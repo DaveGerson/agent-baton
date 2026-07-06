@@ -1096,6 +1096,39 @@ class TestSafetyRosterInjection:
 
         assert "code-reviewer" not in draft.resolved_agents
 
+    def test_medium_risk_reviewer_already_present_gets_review_phase_slot(self):
+        """bd-pz4 regression.
+
+        A MEDIUM-risk task whose roster ALREADY carries ``code-reviewer``
+        (so ``_ensure_safety_roster`` injects nothing) must still get a
+        "Review" slot appended to ``classified_phases``.  Before the fix,
+        the classified_phases guarantee only fired when THIS call injected
+        a reviewer/auditor (``injected_any``) -- an already-present reviewer
+        left ``classified_phases`` untouched, so the reviewer was
+        force-assigned into the Implement team-step and then filtered out
+        by ``consolidate_team_step`` (phase_builder.py), leaving zero
+        review coverage and tripping ValidationStage's ``review_missing``
+        gate (which blocks on roster membership alone, at any risk level).
+        """
+        from agent_baton.core.engine.planning.stages.risk import RiskStage
+        from agent_baton.models.enums import RiskLevel
+
+        draft = self._make_draft(
+            "Migrate the user table to PostgreSQL",
+            RiskLevel.MEDIUM,
+            resolved_agents=["architect", "backend-engineer", "code-reviewer"],
+        )
+        draft.classified_phases = ["Design", "Implement", "Test"]
+
+        RiskStage()._ensure_safety_roster(draft)
+
+        # No injection should have occurred -- code-reviewer was already there.
+        assert draft.resolved_agents.count("code-reviewer") == 1
+        assert not any("injected code-reviewer" in note for note in draft.routing_notes)
+        # But a Review phase slot must now exist so the pre-existing reviewer
+        # has somewhere to land.
+        assert "Review" in draft.classified_phases
+
     # --- Full-pipeline integration (uses IntelligentPlanner) ---
 
     def test_high_risk_plan_has_code_reviewer_in_plan(self, plan_for):
