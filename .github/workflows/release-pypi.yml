@@ -42,15 +42,22 @@ jobs:
           mkdir -p /tmp/wheel-smoke-cwd
           cd /tmp/wheel-smoke-cwd
           /tmp/wheel-smoke-venv/bin/baton --help
-          /tmp/wheel-smoke-venv/bin/baton doctor --json | python3 -c "
-          import json, sys
-          payload = json.load(sys.stdin)
+          # doctor exits non-zero here because bd is (intentionally) not
+          # installed in this venv and a missing bd is a failing check.
+          # Capture the report anyway and assert on its contents: the wheel
+          # is broken only if a check OTHER than bd errors.
+          /tmp/wheel-smoke-venv/bin/baton doctor --json > /tmp/doctor.json || true
+          python3 -c "
+          import json
+          payload = json.load(open('/tmp/doctor.json'))
           assert payload['schema_version'] == 1
           assert isinstance(payload['ok'], bool)
-          ids = {c['id'] for c in payload['checks']}
-          assert 'bundled_agents' in ids, ids
-          bundled = next(c for c in payload['checks'] if c['id'] == 'bundled_agents')
+          checks = {c['id']: c for c in payload['checks']}
+          assert 'bundled_agents' in checks, sorted(checks)
+          bundled = checks['bundled_agents']
           assert bundled['details']['count'] > 0, 'no bundled agents resolved from the installed wheel'
+          failing = [cid for cid, c in checks.items() if c['status'] == 'error' and cid != 'bd']
+          assert not failing, f'wheel doctor errors beyond missing bd: {failing}'
           print('wheel smoke OK:', bundled['details']['count'], 'bundled agents')
           "
 
