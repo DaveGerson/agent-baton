@@ -1,10 +1,7 @@
 """Tests for Wave 3.2 HandoffSynthesizer (resolves bd-65d4 / bd-61a5)."""
 from __future__ import annotations
 
-import json
 import sqlite3
-import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +13,7 @@ from agent_baton.core.intel.handoff_synthesizer import (
     HandoffSynthesizer,
 )
 from agent_baton.core.storage.connection import ConnectionManager
+from agent_baton.core.storage.derived_bead_store import DerivedBeadStore
 from agent_baton.core.storage.schema import PROJECT_SCHEMA_DDL, SCHEMA_VERSION
 from agent_baton.models.execution import PlanStep
 
@@ -23,6 +21,16 @@ from agent_baton.models.execution import PlanStep
 # ---------------------------------------------------------------------------
 # Fixtures / fakes
 # ---------------------------------------------------------------------------
+#
+# NOTE (ADR-13b WP-G / WP-2): the SQLite ``beads``/``bead_tags``/
+# ``handoff_beads`` tables were removed from the per-project ``baton.db``
+# schema — ``bd`` is now the sole bead system of record, and
+# ``handoff_beads`` moved to the disposable ``DerivedBeadStore`` cache
+# (``baton-derived.db``; see agent_baton/core/storage/derived_bead_store.py
+# and agent_baton/cli/commands/bead_cmd.py::_handle_handoffs). Fixtures
+# below reflect that: discoveries/blockers are supplied via a fake bead
+# *store* (matching HandoffSynthesizer's ``bead_store.query()`` surface)
+# rather than raw SQL rows in a project db that no longer has those tables.
 
 @dataclass
 class FakeStepResult:
@@ -36,6 +44,51 @@ class FakeStepResult:
     task_id: str = ""
 
 
+@dataclass
+class FakeBead:
+    """Minimal Bead-shaped fake (matches BeadStore/BdBeadStore row attrs)."""
+
+    bead_id: str
+    task_id: str
+    step_id: str = ""
+    bead_type: str = "discovery"
+    content: str = ""
+    status: str = "open"
+    agent_name: str = "test-agent"
+    affected_files: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+
+
+class FakeBeadStore:
+    """Stand-in for the ``bead_store`` param HandoffSynthesizer queries.
+
+    Mirrors the ``.query(task_id=..., bead_type=..., status=..., limit=...)``
+    surface used by ``_query_beads_for_step_via_store`` /
+    ``_query_open_warnings_via_store`` in
+    agent_baton/core/intel/handoff_synthesizer.py.
+    """
+
+    def __init__(self, beads: list[FakeBead]) -> None:
+        self._beads = beads
+
+    def query(
+        self,
+        *,
+        task_id: str | None = None,
+        bead_type: str | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[FakeBead]:
+        out = list(self._beads)
+        if task_id is not None:
+            out = [b for b in out if b.task_id == task_id]
+        if bead_type is not None:
+            out = [b for b in out if b.bead_type == bead_type]
+        if status is not None:
+            out = [b for b in out if b.status == status]
+        return out[:limit]
+
+
 def _open_project_db(tmp_path: Path) -> sqlite3.Connection:
     """Initialize a fresh project baton.db at SCHEMA_VERSION and return a conn."""
     db_path = tmp_path / "baton.db"
@@ -44,98 +97,53 @@ def _open_project_db(tmp_path: Path) -> sqlite3.Connection:
     return mgr.get_connection()
 
 
-def _open_project_db_with_path(tmp_path: Path) -> tuple[sqlite3.Connection, Path]:
-    db_path = tmp_path / "baton.db"
-    mgr = ConnectionManager(db_path)
-    mgr.configure_schema(PROJECT_SCHEMA_DDL, SCHEMA_VERSION)
-    return mgr.get_connection(), db_path
-
-
-def _ensure_execution_row(conn: sqlite3.Connection, task_id: str) -> None:
-    """Insert a minimal executions row so beads-with-FK can be inserted.
-
-    Uses INSERT OR IGNORE so callers can call this multiple times safely.
-    Only the columns NOT NULL without DEFAULT are populated; everything
-    else falls back to its DDL default.
-    """
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO executions (task_id, status, started_at) "
-            "VALUES (?, ?, ?)",
-            (task_id, "running", "2026-04-27T12:00:00Z"),
-        )
-        conn.commit()
-    except Exception:
-        # If the schema changed shape, fall back to silent skip — the
-        # FK is OFF by default in SQLite anyway.
-        pass
-
-
-def _insert_bead(
-    conn: sqlite3.Connection,
-    *,
-    bead_id: str,
-    task_id: str,
-    step_id: str,
-    bead_type: str = "discovery",
-    content: str = "",
-    status: str = "open",
-    affected_files: list[str] | None = None,
-    tags: list[str] | None = None,
-    agent_name: str = "test-agent",
-) -> None:
-    affected_files = affected_files or []
-    tags = tags or []
-    conn.execute(
-        "INSERT INTO beads (bead_id, task_id, step_id, agent_name, bead_type, "
-        "content, affected_files, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            bead_id,
-            task_id,
-            step_id,
-            agent_name,
-            bead_type,
-            content,
-            json.dumps(affected_files),
-            status,
-            "2026-04-27T12:00:00Z",
-        ),
-    )
-    for tag in tags:
-        conn.execute(
-            "INSERT OR IGNORE INTO bead_tags (bead_id, tag) VALUES (?, ?)",
-            (bead_id, tag),
-        )
-    conn.commit()
-
-
 # ---------------------------------------------------------------------------
 # Schema migration
 # ---------------------------------------------------------------------------
 
 def test_migration_creates_table(tmp_path: Path) -> None:
-    """A fresh project DB at SCHEMA_VERSION must have handoff_beads."""
-    conn = _open_project_db(tmp_path)
-    row = conn.execute(
+    """HandoffSynthesizer's write target (DerivedBeadStore) has handoff_beads.
+
+    ADR-13b WP-G dropped ``handoff_beads`` from the project ``baton.db``
+    schema entirely (see migration v42 and
+    ``tests/storage/test_v42_bead_tables_dropped.py``) — ``bd`` is now the
+    sole bead system of record. ADR-13b WP-2 moved the table to the
+    disposable ``DerivedBeadStore`` cache (``baton-derived.db``) instead, so
+    that is what this test — and HandoffSynthesizer's persistence path —
+    must target.
+    """
+    derived = DerivedBeadStore(tmp_path / "baton-derived.db")
+    conn = sqlite3.connect(str(tmp_path / "baton-derived.db"))
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='handoff_beads'"
+        ).fetchone()
+        assert row is not None, "handoff_beads table missing from DerivedBeadStore schema"
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(handoff_beads)").fetchall()}
+        assert {
+            "handoff_id",
+            "task_id",
+            "from_step_id",
+            "to_step_id",
+            "content",
+            "created_at",
+        }.issubset(cols)
+    finally:
+        conn.close()
+
+    # A fresh project baton.db must NOT carry the table (ADR-13b WP-G).
+    project_conn = _open_project_db(tmp_path)
+    project_row = project_conn.execute(
         "SELECT name FROM sqlite_master "
         "WHERE type='table' AND name='handoff_beads'"
     ).fetchone()
-    assert row is not None, "handoff_beads table missing from PROJECT_SCHEMA_DDL"
-
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(handoff_beads)").fetchall()}
-    assert {
-        "handoff_id",
-        "task_id",
-        "from_step_id",
-        "to_step_id",
-        "content",
-        "created_at",
-    }.issubset(cols)
-
-    # Schema version stamp must be at v29 or higher.
-    ver = conn.execute("SELECT version FROM _schema_version").fetchone()
-    assert ver is not None and ver[0] >= 29
+    assert project_row is None, (
+        "handoff_beads unexpectedly present in PROJECT_SCHEMA_DDL — "
+        "ADR-13b WP-G moved it to DerivedBeadStore; re-adding it to the "
+        "project schema would reintroduce the dual bead-backend it removed."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,32 +190,30 @@ def test_handoff_includes_files_changed(tmp_path: Path) -> None:
 
 
 def test_handoff_includes_discoveries_from_beads(tmp_path: Path) -> None:
-    conn = _open_project_db(tmp_path)
-    _ensure_execution_row(conn, "t-disc")
-
     # Two beads tied to the prior step.
-    _insert_bead(
-        conn,
-        bead_id="bd-a001",
-        task_id="t-disc",
-        step_id="1.1",
-        content="found a thing",
-        affected_files=["agent_baton/x.py"],
-    )
-    _insert_bead(
-        conn,
-        bead_id="bd-a002",
-        task_id="t-disc",
-        step_id="1.1",
-        content="and another",
-    )
-    # Unrelated bead from a different step — must NOT show up.
-    _insert_bead(
-        conn,
-        bead_id="bd-a999",
-        task_id="t-disc",
-        step_id="0.9",
-        content="other step",
+    store = FakeBeadStore(
+        [
+            FakeBead(
+                bead_id="bd-a001",
+                task_id="t-disc",
+                step_id="1.1",
+                content="found a thing",
+                affected_files=["agent_baton/x.py"],
+            ),
+            FakeBead(
+                bead_id="bd-a002",
+                task_id="t-disc",
+                step_id="1.1",
+                content="and another",
+            ),
+            # Unrelated bead from a different step — must NOT show up.
+            FakeBead(
+                bead_id="bd-a999",
+                task_id="t-disc",
+                step_id="0.9",
+                content="other step",
+            ),
+        ]
     )
 
     prior = FakeStepResult(
@@ -220,7 +226,7 @@ def test_handoff_includes_discoveries_from_beads(tmp_path: Path) -> None:
         allowed_paths=["pmo-ui/src/App.tsx"],
     )
     out = HandoffSynthesizer().synthesize_for_dispatch(
-        prior, nxt, conn, task_id="t-disc"
+        prior, nxt, None, task_id="t-disc", bead_store=store
     )
     assert out is not None
     assert "Discoveries:" in out
@@ -230,43 +236,43 @@ def test_handoff_includes_discoveries_from_beads(tmp_path: Path) -> None:
 
 
 def test_handoff_includes_blockers_in_overlap(tmp_path: Path) -> None:
-    conn = _open_project_db(tmp_path)
-    _ensure_execution_row(conn, "t-blk")
-
-    # Open warning whose affected_files overlap the next step's allowed_paths.
-    _insert_bead(
-        conn,
-        bead_id="bd-w100",
-        task_id="t-blk",
-        step_id="0.5",
-        bead_type="warning",
-        content="careful, this module has a race",
-        affected_files=["agent_baton/api/foo.py"],
-        tags=["warning"],
-        status="open",
-    )
-    # Another warning that does NOT overlap the next step — should be ignored.
-    _insert_bead(
-        conn,
-        bead_id="bd-w200",
-        task_id="t-blk",
-        step_id="0.6",
-        bead_type="warning",
-        content="unrelated subsystem warning",
-        affected_files=["pmo-ui/src/legacy/old.tsx"],
-        tags=["legacy"],
-        status="open",
-    )
-    # Closed warning that overlaps — must NOT show (only OPEN).
-    _insert_bead(
-        conn,
-        bead_id="bd-w300",
-        task_id="t-blk",
-        step_id="0.7",
-        bead_type="warning",
-        content="already resolved",
-        affected_files=["agent_baton/api/foo.py"],
-        status="closed",
+    store = FakeBeadStore(
+        [
+            # Open warning whose affected_files overlap the next step's
+            # allowed_paths.
+            FakeBead(
+                bead_id="bd-w100",
+                task_id="t-blk",
+                step_id="0.5",
+                bead_type="warning",
+                content="careful, this module has a race",
+                affected_files=["agent_baton/api/foo.py"],
+                tags=["warning"],
+                status="open",
+            ),
+            # Another warning that does NOT overlap the next step — should
+            # be ignored.
+            FakeBead(
+                bead_id="bd-w200",
+                task_id="t-blk",
+                step_id="0.6",
+                bead_type="warning",
+                content="unrelated subsystem warning",
+                affected_files=["pmo-ui/src/legacy/old.tsx"],
+                tags=["legacy"],
+                status="open",
+            ),
+            # Closed warning that overlaps — must NOT show (only OPEN).
+            FakeBead(
+                bead_id="bd-w300",
+                task_id="t-blk",
+                step_id="0.7",
+                bead_type="warning",
+                content="already resolved",
+                affected_files=["agent_baton/api/foo.py"],
+                status="closed",
+            ),
+        ]
     )
 
     prior = FakeStepResult(
@@ -279,7 +285,7 @@ def test_handoff_includes_blockers_in_overlap(tmp_path: Path) -> None:
         allowed_paths=["agent_baton/api/foo.py"],
     )
     out = HandoffSynthesizer().synthesize_for_dispatch(
-        prior, nxt, conn, task_id="t-blk"
+        prior, nxt, None, task_id="t-blk", bead_store=store
     )
     assert out is not None
     assert "Blockers" in out
@@ -312,7 +318,9 @@ def test_handoff_caps_at_400_chars(tmp_path: Path) -> None:
 
 
 def test_handoff_persisted_to_db(tmp_path: Path) -> None:
-    conn = _open_project_db(tmp_path)
+    """HandoffSynthesizer persists via DerivedBeadStore (ADR-13b WP-2) —
+    the project baton.db no longer carries handoff_beads (ADR-13b WP-G)."""
+    derived = DerivedBeadStore(tmp_path / "baton-derived.db")
     prior = FakeStepResult(
         step_id="1.1",
         files_changed=["agent_baton/x.py"],
@@ -325,31 +333,24 @@ def test_handoff_persisted_to_db(tmp_path: Path) -> None:
         allowed_paths=["agent_baton/x.py"],
     )
     out = HandoffSynthesizer().synthesize_for_dispatch(
-        prior, nxt, conn, task_id="t-persist"
+        prior, nxt, derived, task_id="t-persist"
     )
     assert out is not None
 
-    rows = conn.execute(
-        "SELECT task_id, from_step_id, to_step_id, content FROM handoff_beads "
-        "WHERE task_id = ?",
-        ("t-persist",),
-    ).fetchall()
+    rows = derived.handoffs("t-persist")
     assert len(rows) == 1
-    task_id, frm, to, content = rows[0]
-    assert task_id == "t-persist"
-    assert frm == "1.1"
-    assert to == "1.2"
-    assert content == out
+    row = rows[0]
+    assert row["task_id"] == "t-persist"
+    assert row["from_step_id"] == "1.1"
+    assert row["to_step_id"] == "1.2"
+    assert row["content"] == out
 
     # Idempotent: synthesizing the same (from, to) pair again replaces.
     HandoffSynthesizer().synthesize_for_dispatch(
-        prior, nxt, conn, task_id="t-persist"
+        prior, nxt, derived, task_id="t-persist"
     )
-    rows2 = conn.execute(
-        "SELECT COUNT(*) FROM handoff_beads WHERE task_id = ?",
-        ("t-persist",),
-    ).fetchone()
-    assert rows2[0] == 1
+    rows2 = derived.handoffs("t-persist")
+    assert len(rows2) == 1
 
 
 def test_handoff_handles_no_files_changed(tmp_path: Path) -> None:
@@ -433,10 +434,54 @@ def test_dispatcher_no_handoff_when_no_prior(tmp_path: Path) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _run_beads_cli(db_path: Path, argv: list[str]) -> tuple[int, str]:
+    """Drive ``bead_cmd.handler`` in-process with a monkeypatched db path.
+
+    Mirrors the pattern already established in
+    ``tests/test_adr13b_wp2.py::TestCliDerivedStoreReads._run`` — invoking
+    the CLI in-process (rather than via ``subprocess`` + ``sys.executable``)
+    avoids depending on the test runner's ``python`` resolving a full
+    interpreter environment (site-packages / PYTHONPATH) when spawned as a
+    bare subprocess.
+    """
+    import argparse
+    import io
+    import sys as _sys
+    from unittest.mock import patch
+
+    from agent_baton.cli.commands import bead_cmd
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    bead_cmd.register(sub)
+    args = parser.parse_args(["beads"] + argv)
+
+    captured = io.StringIO()
+    exit_code = 0
+    with patch("agent_baton.cli.commands.bead_cmd._DEFAULT_DB_PATH", db_path):
+        old_stdout = _sys.stdout
+        _sys.stdout = captured
+        try:
+            bead_cmd.handler(args)
+        except SystemExit as exc:
+            exit_code = int(exc.code) if exc.code is not None else 0
+        finally:
+            _sys.stdout = old_stdout
+
+    return exit_code, captured.getvalue()
+
+
 def test_handoffs_cli_lists_rows(tmp_path: Path) -> None:
-    """`baton beads handoffs --task-id T` prints rows for the task."""
+    """`baton beads handoffs --task-id T` prints rows for the task.
+
+    ADR-13b WP-2: the CLI reads handoff rows from ``baton-derived.db`` via
+    ``DerivedBeadStore`` (a sibling of ``baton.db``, resolved from the
+    (possibly monkeypatched) db path's parent dir) — see
+    ``agent_baton/cli/commands/bead_cmd.py::_handle_handoffs``.
+    """
     # Synthesize one handoff so there is something to list.
-    conn, db_path = _open_project_db_with_path(tmp_path)
+    db_path = tmp_path / "baton.db"
+    derived = DerivedBeadStore(tmp_path / "baton-derived.db")
     prior = FakeStepResult(
         step_id="1.1", files_changed=["agent_baton/api/foo.py"], task_id="t-cli"
     )
@@ -447,25 +492,10 @@ def test_handoffs_cli_lists_rows(tmp_path: Path) -> None:
         allowed_paths=["agent_baton/api/foo.py"],
     )
     HandoffSynthesizer().synthesize_for_dispatch(
-        prior, nxt, conn, task_id="t-cli"
+        prior, nxt, derived, task_id="t-cli"
     )
-    # Ensure persistence survived across the connection (close to flush).
-    conn.commit()
 
-    # The CLI resolves the DB via ``_resolve_db_path``; we pin it via env.
-    env = {
-        "BATON_DB_PATH": str(db_path),
-        "BATON_TASK_ID": "t-cli",
-        "PATH": __import__("os").environ.get("PATH", ""),
-    }
-    proc = subprocess.run(
-        [sys.executable, "-m", "agent_baton.cli.main",
-         "beads", "handoffs", "--task-id", "t-cli"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 0, proc.stderr
-    out = proc.stdout
+    exit_code, out = _run_beads_cli(db_path, ["handoffs", "--task-id", "t-cli"])
+    assert exit_code == 0
     assert "Handoff beads for task t-cli" in out
     assert "1.1" in out and "1.2" in out
