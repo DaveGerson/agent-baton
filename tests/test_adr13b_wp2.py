@@ -355,6 +355,46 @@ def test_get_or_create_bead_store_creates_dir(tmp_path, monkeypatch):
     assert store is not None
 
 
+def test_get_bead_store_raises_bead_store_init_error_on_non_bd_failure(
+    tmp_path, monkeypatch,
+):
+    """F7: a construction failure that is NOT BdNotAvailable (e.g. a
+    permission error) must raise BeadStoreInitError, not be swallowed into
+    the same None returned for a genuinely-unavailable bd -- callers need
+    to tell the two apart to report an accurate message.
+    """
+    from unittest.mock import patch
+
+    from agent_baton.cli.commands import bead_cmd
+
+    monkeypatch.setattr(bead_cmd, "_DEFAULT_DB_PATH", tmp_path / "no-db.db")
+
+    with patch(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        side_effect=PermissionError("Access is denied (test stub)"),
+    ):
+        with pytest.raises(bead_cmd.BeadStoreInitError, match="Access is denied"):
+            bead_cmd._get_bead_store()
+
+
+def test_get_or_create_bead_store_raises_bead_store_init_error_on_non_bd_failure(
+    tmp_path, monkeypatch,
+):
+    """Same contract as above for the create-mode getter (F7)."""
+    from unittest.mock import patch
+
+    from agent_baton.cli.commands import bead_cmd
+
+    monkeypatch.setattr(bead_cmd, "_DEFAULT_DB_PATH", tmp_path / "new" / "baton.db")
+
+    with patch(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        side_effect=PermissionError("Access is denied (test stub)"),
+    ):
+        with pytest.raises(bead_cmd.BeadStoreInitError, match="Access is denied"):
+            bead_cmd._get_or_create_bead_store()
+
+
 # ---------------------------------------------------------------------------
 # CLI layer — create-exec uses script_hash canonical import
 # ---------------------------------------------------------------------------
