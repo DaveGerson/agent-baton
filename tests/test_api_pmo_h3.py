@@ -147,6 +147,49 @@ def test_scorecard_bead_store_unavailable_marks_data_unavailable(
     assert data["knowledge_contributions"] == 0
 
 
+class _RaisingQueryBeadStore:
+    """Stand-in for a store that constructs fine but whose bd invocations
+    fail at *query* time (F3): ``BdBeadStore.query`` normally swallows
+    ``BdError`` and returns ``[]``, which would make this indistinguishable
+    from a genuinely-empty result. The scorecard route opts into
+    ``strict=True`` so this failure propagates instead.
+    """
+
+    def query(self, *, strict: bool = False, **_kwargs):
+        if strict:
+            from agent_baton.core.engine.bd_client import BdError
+
+            raise BdError("bd list failed (test stub)")
+        return []
+
+
+def test_scorecard_query_runtime_failure_marks_data_unavailable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: a bead store that *constructs* successfully but whose ``query()``
+    fails at runtime (bd invocation error) must also flip
+    ``bead_data_available=False`` -- not just construction-time failures.
+    Without this, a runtime bd failure would silently look like a
+    genuinely-empty, coherent zero.
+    """
+
+    def _fake_make_bead_store(*_a, **_kw):
+        return _RaisingQueryBeadStore()
+
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        _fake_make_bead_store,
+    )
+
+    res = client.get("/api/v1/pmo/scorecard/alice")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["bead_data_available"] is False
+    assert data["incidents_authored"] == 0
+    assert data["incidents_resolved"] == 0
+    assert data["knowledge_contributions"] == 0
+
+
 # ---------------------------------------------------------------------------
 # H3.7 — arch beads
 # ---------------------------------------------------------------------------

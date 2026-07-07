@@ -260,9 +260,14 @@ async def get_developer_scorecard(user_id: str) -> DeveloperScorecardResponse:
 
     ``baton.db``-sourced fields still contribute zero when their tables are
     missing/empty (unchanged, never raises). Bead-derived fields are zero
-    AND ``bead_data_available=False`` when the store itself could not be
-    reached, so a caller can distinguish "genuinely zero" from "we don't
-    know" (never a silent zero -- bd-y0d).
+    AND ``bead_data_available=False`` both when the store could not be
+    *constructed* (bd unavailable, workspace not initialised) and when a
+    constructed store's ``query()`` fails at *runtime* (``strict=True`` --
+    F3 fix: ``BdBeadStore.query`` otherwise swallows ``BdError`` and returns
+    ``[]`` for its other callers, which would have made a runtime bd
+    failure here indistinguishable from a genuinely-empty result). So a
+    caller can always distinguish "genuinely zero" from "we don't know"
+    (never a silent zero -- bd-y0d).
     """
     db_path = _project_db_path()
     now = datetime.now(timezone.utc)
@@ -316,7 +321,11 @@ async def get_developer_scorecard(user_id: str) -> DeveloperScorecardResponse:
         from agent_baton.core.engine.bead_backend import make_bead_store
 
         store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
-        user_beads = store.query(agent_name=user_id, status=None, limit=1000)
+        # strict=True: a store that constructs fine but whose bd invocations
+        # fail at query time must also flip bead_data_available=False rather
+        # than silently reporting an empty (indistinguishable from
+        # genuinely-zero) result set (F3).
+        user_beads = store.query(agent_name=user_id, status=None, limit=1000, strict=True)
     except Exception:
         bead_data_available = False
         user_beads = []

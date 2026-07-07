@@ -152,12 +152,24 @@ class BdBeadStore:
         status: str | None = None,
         tags: list[str] | None = None,
         limit: int = 100,
+        strict: bool = False,
     ) -> list[Bead]:
         """Filtered search (AND semantics), newest first.
 
         Pushes the cheap facet filters down to ``bd`` via labels, then applies
         the remaining predicates in Python against the reconstructed beads so
         baton-specific fields (agent_name, confidence, …) filter correctly.
+
+        Args:
+            strict: When ``True``, re-raise :class:`BdError` from the
+                underlying ``bd list`` call instead of swallowing it and
+                returning ``[]``. Default ``False`` preserves the historical
+                "this method never raises" contract that most callers rely
+                on. Opt in only where the empty-results-vs-store-failure
+                ambiguity must be observable to the caller (e.g. the PMO
+                developer scorecard's ``bead_data_available`` flag, which
+                would otherwise report a runtime bd failure as a coherent
+                zero -- see the F3 finding this parameter was added for).
         """
         label_filters: list[str] = []
         if task_id is not None:
@@ -182,6 +194,8 @@ class BdBeadStore:
             issues = self._bd.list(**list_kwargs)
         except BdError as exc:
             _log.warning("BdBeadStore.query failed: %s", exc)
+            if strict:
+                raise
             return []
 
         beads = [bd_issue_to_bead(i) for i in issues]
