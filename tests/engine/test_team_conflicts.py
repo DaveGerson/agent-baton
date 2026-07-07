@@ -102,6 +102,22 @@ class TestOwnershipContract:
     def test_no_path_tokens_returns_empty_scope(self) -> None:
         assert extract_intended_scope("Implement the backend feature") == []
 
+    def test_prose_abbreviations_are_not_treated_as_paths(self) -> None:
+        """F4: 'e.g.'/'i.e.' parse as bare `word.ext` tokens under the
+        path-token regex (a file named "e" with extension "g") -- they must
+        be rejected, not extracted as scope."""
+        assert extract_intended_scope(
+            "..., e.g. tighten validation i.e. reject empty input, ..."
+        ) == []
+
+    def test_genuine_path_extracted_alongside_prose_abbreviation(self) -> None:
+        """A real path in the same sentence as 'e.g.' must still be found --
+        the abbreviation blacklist should not suppress genuine matches."""
+        scope = extract_intended_scope(
+            "Update src/api.py, e.g. tighten the validation there."
+        )
+        assert scope == ["src/api.py"]
+
     def test_shared_contracts_include_intended_scope(self, tmp_path: Path) -> None:
         plan = _team_plan([
             TeamMember(
@@ -197,6 +213,44 @@ class TestOverlapWarnings:
         warnings = detect_scope_overlaps(members)
         assert len(warnings) == 1
         assert "identical" in warnings[0]
+
+    def test_shared_prose_abbreviation_produces_no_overlap_warning(self) -> None:
+        """F4 regression: two members whose task_description both merely
+        contain 'e.g.' must not trigger a bogus overlap warning -- prior to
+        the fix, both would parse an 'e.g' pseudo-path token and collide."""
+        members = [
+            TeamMember(
+                member_id="1.1.a", agent_name="backend-engineer",
+                role="implementer",
+                task_description="Harden the API, e.g. reject empty input.",
+            ),
+            TeamMember(
+                member_id="1.1.b", agent_name="frontend-engineer",
+                role="implementer",
+                task_description="Harden the UI, e.g. disable the submit button.",
+            ),
+        ]
+        assert detect_scope_overlaps(members) == []
+
+    def test_genuine_path_overlap_still_warns_alongside_prose_abbreviation(self) -> None:
+        """The abbreviation fix must not mask a real overlap that happens to
+        sit in the same sentence as 'e.g.'."""
+        members = [
+            TeamMember(
+                member_id="1.1.a", agent_name="backend-engineer",
+                role="implementer",
+                task_description="Modify src/shared.py, e.g. tighten validation.",
+            ),
+            TeamMember(
+                member_id="1.1.b", agent_name="frontend-engineer",
+                role="implementer",
+                task_description="Modify src/shared.py, e.g. add a UI hook.",
+            ),
+        ]
+        warnings = detect_scope_overlaps(members)
+        assert len(warnings) == 1
+        assert "src/shared.py" in warnings[0]
+        assert "e.g" not in warnings[0]
 
     def test_disjoint_scopes_produce_no_warning(self) -> None:
         members = [
