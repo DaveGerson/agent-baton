@@ -217,11 +217,29 @@ class ConflictRecord:
         positions: Mapping of agent name to their position/recommendation.
         evidence: Mapping of agent name to supporting evidence or citations.
         severity: ``"low"``, ``"medium"``, or ``"high"`` based on impact.
+            Classified by ``ExecutionEngine._classify_conflict_severity``
+            (agent_baton/core/engine/executor.py) using deterministic,
+            path-based heuristics: ``high`` = a source file modified by two
+            ``implementer`` members, ``medium`` = a shared config/test file
+            (or a source file not confirmed high), ``low`` = docs or
+            generated artifacts.
         resolution: How it was resolved — ``"human_decision"``,
             ``"auto_merged"``, or ``"unresolved"``.
-        resolution_detail: The chosen resolution and rationale.
+        resolution_detail: The chosen resolution and rationale.  For
+            newly-detected conflicts this is pre-populated with an
+            actionable message naming the files, members, and agents
+            involved plus a suggested next action (see ``next_action``).
         resolved_by: Who resolved it — ``"human"``, ``"synthesis_agent"``,
             or ``"unresolved"``.
+        member_ids: ``TeamMember.member_id`` values involved in the
+            conflict (optional, backward-compatible addition — bd-rm-team-p2).
+            Distinct from ``agents`` because two members can share an
+            ``agent_name``; empty on records written before this field
+            existed.
+        files: Affected file paths shared by the conflicting members
+            (optional, backward-compatible addition — bd-rm-team-p2).
+        next_action: Suggested remediation, chosen from ``severity``
+            (optional, backward-compatible addition — bd-rm-team-p2).
     """
 
     conflict_id: str
@@ -233,6 +251,9 @@ class ConflictRecord:
     resolution: str = "unresolved"               # human_decision | auto_merged | unresolved
     resolution_detail: str = ""
     resolved_by: str = "unresolved"              # human | synthesis_agent | unresolved
+    member_ids: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+    next_action: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -245,6 +266,9 @@ class ConflictRecord:
             "resolution": self.resolution,
             "resolution_detail": self.resolution_detail,
             "resolved_by": self.resolved_by,
+            "member_ids": self.member_ids,
+            "files": self.files,
+            "next_action": self.next_action,
         }
 
     @classmethod
@@ -259,6 +283,9 @@ class ConflictRecord:
             resolution=data.get("resolution", "unresolved"),
             resolution_detail=data.get("resolution_detail", ""),
             resolved_by=data.get("resolved_by", "unresolved"),
+            member_ids=data.get("member_ids", []),
+            files=data.get("files", []),
+            next_action=data.get("next_action", ""),
         )
 
 
@@ -484,8 +511,14 @@ class Retrospective:
                 )
                 for agent, position in conflict.positions.items():
                     lines.append(f"  - **{agent}**: {position}")
+                if conflict.files:
+                    lines.append(f"  Files: {', '.join(conflict.files)}")
+                if conflict.member_ids:
+                    lines.append(f"  Members: {', '.join(conflict.member_ids)}")
                 if conflict.resolution_detail:
                     lines.append(f"  Resolution: {conflict.resolution_detail}")
+                if conflict.next_action:
+                    lines.append(f"  Suggested next action: {conflict.next_action}")
             lines.append("")
 
         return "\n".join(lines)

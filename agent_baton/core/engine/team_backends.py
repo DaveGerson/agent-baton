@@ -45,10 +45,11 @@ from dataclasses import dataclass, replace
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from agent_baton.models.execution import MachinePlan, PlanStep
+from agent_baton.models.execution import MachinePlan, PlanStep, TeamMember
 from agent_baton.utils.frontmatter import parse_frontmatter
 
 _log = logging.getLogger(__name__)
@@ -494,6 +495,109 @@ class ClaudeTeamsBackend:
 
 
 # ---------------------------------------------------------------------------
+# File ownership contracts + pre-dispatch overlap warnings (bd-rm-team-p2)
+# ---------------------------------------------------------------------------
+#
+# ``TeamMember`` has no ``allowed_paths`` field (unlike ``PlanStep`` —
+# and in practice the planner never populates ``PlanStep.allowed_paths``
+# either, so there is no upstream signal to carry forward even for the
+# lead step that gets folded into a team).  By existing convention (see
+# ``ClaudeTeamsBackend._render_spawn_prompt``, which already labels
+# ``task_description`` as "File-scope contract / task" in the spawn
+# prompt) ``task_description`` is the closest thing to a file-scope
+# contract a ``TeamMember`` carries.  These helpers make that contract
+# machine-readable without adding a new field to ``TeamMember``:
+#
+# * :func:`extract_intended_scope` parses path-shaped substrings
+#   (``dir/file.ext`` or ``file.ext``) out of a member's free-text
+#   ``task_description``.
+# * :func:`detect_scope_overlaps` flags member pairs whose parsed scope
+#   intersects, OR whose ``task_description`` is identical verbatim
+#   (the common "planner duplicated a step into the team" mistake, which
+#   carries no explicit path but is still a same-file risk).
+#
+# Both are best-effort / heuristic: a member whose ``task_description``
+# names no explicit path is simply not scored on that axis (empty scope
+# is "unknown", not "no overlap").
+
+_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])"
+    r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+"   # has a slash: dir/file.ext
+    r"|[A-Za-z0-9_\-]+\.[A-Za-z]{1,5})"           # or a bare file.ext
+    r"(?![\w])"
+)
+
+
+def extract_intended_scope(text: str) -> list[str]:
+    """Best-effort extraction of file/path tokens named in free text.
+
+    Returns a sorted, deduplicated list of path-shaped substrings found
+    in *text* (trailing punctuation stripped).  Empty when no path-like
+    token is present — treat that as "scope not stated", not "empty
+    scope".
+    """
+    if not text:
+        return []
+    found: set[str] = set()
+    for m in _PATH_TOKEN_RE.finditer(text):
+        token = m.group(1).strip().rstrip(".,;:)")
+        if token:
+            found.add(token)
+    return sorted(found)
+
+
+def _member_scope_signature(member: "TeamMember") -> str:
+    """Normalized ``task_description`` text used for exact-duplicate detection."""
+    return " ".join((member.task_description or "").split()).strip().lower()
+
+
+def detect_scope_overlaps(members: list["TeamMember"]) -> list[str]:
+    """Return pre-dispatch warnings for members whose file scope collides.
+
+    Checked pairwise (deterministic, ``O(n^2)`` over a small per-step
+    roster) across two failure modes:
+
+    1. **Identical scope text** — two distinct members carry the exact
+       same (whitespace-normalized) ``task_description``. Usually a
+       planning artifact (a step duplicated into the team) rather than
+       an intentional pairing.
+    2. **Overlapping path tokens** — the path-like substrings parsed
+       from each member's ``task_description`` via
+       :func:`extract_intended_scope` intersect.
+
+    Returns human-readable warning strings in deterministic order;
+    empty when no member pair collides.
+    """
+    warnings: list[str] = []
+    for i, a in enumerate(members):
+        for b in members[i + 1:]:
+            if a.member_id == b.member_id:
+                continue
+            sig_a = _member_scope_signature(a)
+            sig_b = _member_scope_signature(b)
+            if sig_a and sig_a == sig_b:
+                warnings.append(
+                    f"members {a.member_id} ({a.agent_name}) and "
+                    f"{b.member_id} ({b.agent_name}) declare identical "
+                    "file-scope text — verify this is an intentional pairing "
+                    "before dispatch"
+                )
+                continue
+            overlap = sorted(
+                set(extract_intended_scope(a.task_description))
+                & set(extract_intended_scope(b.task_description))
+            )
+            if overlap:
+                warnings.append(
+                    f"members {a.member_id} ({a.agent_name}) and "
+                    f"{b.member_id} ({b.agent_name}) both reference "
+                    f"{', '.join(overlap)} — confirm ownership before "
+                    "dispatch to avoid write conflicts"
+                )
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # Readiness diagnostics + report artifact
 # ---------------------------------------------------------------------------
 
@@ -514,6 +618,12 @@ def build_team_readiness_diagnostics(
     nested_team_count = sum(1 for member in flat_members if member.sub_team)
     synthesis = step.synthesis
     warnings: list[str] = []
+
+    # Pre-dispatch ownership-contract overlap warnings (bd-rm-team-p2 work
+    # item 2). Backend-agnostic — checked first so these actionable,
+    # per-plan warnings aren't crowded out of the capped dispatch-summary
+    # preview by the (potentially many) static claude-teams caveats below.
+    warnings.extend(detect_scope_overlaps(flat_members))
 
     if backend_name == ClaudeTeamsBackend.name:
         # Step-specific warnings come first: the dispatch summary caps
@@ -539,6 +649,11 @@ def build_team_readiness_diagnostics(
                 )
         warnings.extend(CLAUDE_TEAMS_CAVEATS)
 
+    # Machine-readable file ownership contract per member (bd-rm-team-p2
+    # work item 1). ``intended_scope`` is derived from ``task_description``
+    # (see the module-level comment above ``extract_intended_scope``) — it
+    # is empty when the description names no explicit path, which callers
+    # should read as "scope not stated" rather than "no scope".
     shared_contracts = [
         {
             "member_id": member.member_id,
@@ -546,6 +661,7 @@ def build_team_readiness_diagnostics(
             "role": member.role,
             "task_description": member.task_description,
             "deliverables": list(member.deliverables),
+            "intended_scope": extract_intended_scope(member.task_description),
         }
         for member in flat_members
     ]
@@ -765,4 +881,6 @@ __all__ = [
     "select_team_backend",
     "audit_agents_for_teammate_safety",
     "check_resumability_constraints",
+    "extract_intended_scope",
+    "detect_scope_overlaps",
 ]

@@ -372,6 +372,131 @@ _HIGH_RISK_LEVELS: frozenset[str] = frozenset({"HIGH", "CRITICAL"})
 
 
 # ---------------------------------------------------------------------------
+# Team-conflict severity classification (bd-rm-team-p2 work item 3)
+# ---------------------------------------------------------------------------
+#
+# ``_detect_team_conflict`` still flags a conflict purely on file overlap
+# (mechanism unchanged). These helpers additionally classify *how bad* an
+# overlap is, using deterministic, path-string heuristics only — no LLM
+# call, no new runtime model. Classification precedence when a single
+# conflict spans several files: the WORST (highest-ranked) per-file
+# severity wins, so one genuinely dangerous file is never diluted by
+# other low-risk files touched in the same conflict.
+#
+#   1. ``low``    — the path looks like documentation or a generated/
+#                    build artifact (``*.md`` under ``docs/``, ``dist/``,
+#                    lockfiles, ``__pycache__``, ...). Usually resolved by
+#                    re-running a generator or a doc edit.
+#   2. ``medium`` — the path looks like shared config or test scaffolding
+#                    (``conftest.py``, ``*.yml``/``*.toml``, ``tests/*``),
+#                    OR it is a source file NOT confirmed to be a
+#                    same-file clash between two ``implementer`` members
+#                    (e.g. an implementer + a reviewer touching the same
+#                    file — real, but usually mechanical to reconcile).
+#   3. ``high``   — a genuine source file modified by two ``implementer``
+#                    role team members. Most likely to be a silent logic
+#                    clash; needs a human (or synthesis agent) to diff.
+_DOC_EXTENSIONS: frozenset[str] = frozenset({".md", ".rst", ".txt", ".adoc"})
+_GENERATED_MARKERS: tuple[str, ...] = (
+    "dist/", "build/", "__pycache__", ".egg-info", "node_modules/",
+    "generated/", "/coverage/", ".min.js", ".lock", ".snap",
+)
+_CONFIG_EXTENSIONS: frozenset[str] = frozenset(
+    {".yml", ".yaml", ".toml", ".ini", ".cfg"}
+)
+_CONFIG_BASENAMES: frozenset[str] = frozenset({
+    "conftest.py", "pyproject.toml", "setup.cfg", "setup.py",
+    "package.json", "package-lock.json",
+})
+_TEST_PATH_MARKERS: tuple[str, ...] = ("/test/", "/tests/")
+_SEVERITY_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
+_CONFLICT_NEXT_ACTION_BY_SEVERITY: dict[str, str] = {
+    "high": (
+        "Two implementers modified the same source file(s) — have a human "
+        "(or the synthesis agent) diff and reconcile the changes before "
+        "merging; consider re-splitting the step so each member owns "
+        "disjoint files next time."
+    ),
+    "medium": (
+        "Shared config/test file(s) or a source file touched by a "
+        "non-implementer overlap — review the merged diff for mechanical "
+        "conflicts (duplicate fixtures, contradictory settings) before "
+        "the gate runs."
+    ),
+    "low": (
+        "Only docs/generated artifacts overlap — usually safe to "
+        "auto-merge or regenerate; spot-check the rendered output."
+    ),
+}
+
+
+def _conflict_file_category(path: str) -> str:
+    """Classify one conflicting file path into a severity-relevant bucket.
+
+    Returns ``"docs"``, ``"generated"``, ``"config"``, ``"test"``, or
+    ``"source"`` — pure path-string heuristics, no filesystem access.
+    """
+    normalized = path.replace("\\", "/").strip().lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    _, ext = os.path.splitext(basename)
+
+    if any(marker in normalized for marker in _GENERATED_MARKERS):
+        return "generated"
+    if ext in _DOC_EXTENSIONS or normalized.startswith("docs/") or "/docs/" in normalized:
+        return "docs"
+    if ext in _CONFIG_EXTENSIONS or basename in _CONFIG_BASENAMES:
+        return "config"
+    if (
+        normalized.startswith("test/")
+        or normalized.startswith("tests/")
+        or any(marker in normalized for marker in _TEST_PATH_MARKERS)
+        or basename.startswith("test_")
+        or basename.endswith("_test.py")
+    ):
+        return "test"
+    return "source"
+
+
+def _file_conflict_severity(path: str, roles: set[str]) -> str:
+    """Severity for a single conflicting *path*.
+
+    *roles* is the set of ``TeamMember.role`` values (``"implementer"``,
+    ``"lead"``, ``"reviewer"``) of the members who touched *path*.
+    """
+    category = _conflict_file_category(path)
+    if category in ("docs", "generated"):
+        return "low"
+    if category in ("config", "test"):
+        return "medium"
+    # category == "source"
+    if roles == {"implementer"}:
+        return "high"
+    return "medium"
+
+
+def _classify_conflict_severity(roles_by_file: dict[str, set[str]]) -> str:
+    """Overall severity for a conflict spanning one or more files.
+
+    *roles_by_file* maps each conflicting path to the set of
+    ``TeamMember.role`` values of the members who touched it. The worst
+    (highest-ranked) per-file severity wins.
+    """
+    if not roles_by_file:
+        return "low"
+    return max(
+        (_file_conflict_severity(path, roles) for path, roles in roles_by_file.items()),
+        key=lambda s: _SEVERITY_RANK[s],
+    )
+
+
+def _suggest_conflict_next_action(severity: str) -> str:
+    """Return a suggested remediation for a conflict of the given *severity*."""
+    return _CONFLICT_NEXT_ACTION_BY_SEVERITY.get(
+        severity, _CONFLICT_NEXT_ACTION_BY_SEVERITY["medium"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # ExecutionEngine
 # ---------------------------------------------------------------------------
 
@@ -5522,43 +5647,84 @@ class ExecutionEngine:
 
         A conflict is detected when two or more members modified the same
         file.  This is a heuristic — overlapping files suggest potentially
-        conflicting changes that may need human review.
+        conflicting changes that may need human review.  That file-overlap
+        mechanism is unchanged; on top of it (bd-rm-team-p2) this method
+        now:
+
+        * classifies a ``severity`` tier (``low``/``medium``/``high``) via
+          :func:`_classify_conflict_severity` — deterministic, path-based
+          heuristics documented above the class definition;
+        * records the ``TeamMember.member_id`` values involved (distinct
+          from ``agents``, since two members can share an agent) and the
+          affected file list on the returned :class:`ConflictRecord`;
+        * renders an actionable ``resolution_detail`` message naming the
+          files, member IDs, agents, and a severity-appropriate suggested
+          next action.
 
         Returns a :class:`ConflictRecord` if conflict found, else ``None``.
         """
         if len(member_results) < 2:
             return None
 
-        # Build file → list of members who touched it.
-        file_owners: dict[str, list[str]] = {}
+        # Build file → list of (member_id, agent_name) that touched it.
+        file_touches: dict[str, list[tuple[str, str]]] = {}
         for m in member_results:
             for f in m.files_changed:
-                file_owners.setdefault(f, []).append(m.agent_name)
+                file_touches.setdefault(f, []).append((m.member_id, m.agent_name))
 
         # Find files touched by multiple members.
         conflicting_files = {
-            f: agents for f, agents in file_owners.items()
-            if len(agents) > 1
+            f: touches for f, touches in file_touches.items()
+            if len(touches) > 1
         }
 
         if not conflicting_files:
             return None
 
+        involved_agents = sorted({
+            agent for touches in conflicting_files.values() for _, agent in touches
+        })
+        involved_member_ids = sorted({
+            mid for touches in conflicting_files.values() for mid, _ in touches
+        })
+        affected_files = sorted(conflicting_files.keys())
+
         # Build positions from outcomes.
         positions = {
             m.agent_name: m.outcome
             for m in member_results
-            if m.agent_name in {a for agents in conflicting_files.values() for a in agents}
+            if m.agent_name in involved_agents
         }
 
         # Build evidence from file overlap.
         evidence = {
             agent: ", ".join(
-                f for f, agents in conflicting_files.items()
-                if agent in agents
+                f for f, touches in conflicting_files.items()
+                if agent in {a for _, a in touches}
             )
             for agent in positions
         }
+
+        # Role lookup per conflicting file (for severity classification).
+        # Unknown member_ids (e.g. synthetic test fixtures with no matching
+        # PlanStep.team entry) default to "implementer" — the conservative
+        # choice, since that is TeamMember's own field default.
+        roles_by_file: dict[str, set[str]] = {}
+        for f, touches in conflicting_files.items():
+            roles: set[str] = set()
+            for mid, _agent in touches:
+                found = self._find_team_member(plan_step.team, mid)
+                roles.add(found.role if found is not None else "implementer")
+            roles_by_file[f] = roles
+
+        severity = _classify_conflict_severity(roles_by_file)
+        next_action = _suggest_conflict_next_action(severity)
+        resolution_detail = (
+            f"Members {involved_member_ids} (agents: {', '.join(involved_agents)}) "
+            f"in step {plan_step.step_id} modified overlapping file(s): "
+            f"{', '.join(affected_files)}. Severity: {severity}. "
+            f"Suggested next action: {next_action}"
+        )
 
         import hashlib
         conflict_id = hashlib.sha256(
@@ -5568,11 +5734,15 @@ class ExecutionEngine:
         return ConflictRecord(
             conflict_id=f"conflict-{conflict_id}",
             step_id=plan_step.step_id,
-            agents=sorted(positions.keys()),
+            agents=involved_agents,
             positions=positions,
             evidence=evidence,
-            severity="medium",
+            severity=severity,
             resolution="unresolved",
+            resolution_detail=resolution_detail,
+            member_ids=involved_member_ids,
+            files=affected_files,
+            next_action=next_action,
         )
 
     def _check_token_budget(self, state: ExecutionState) -> str | None:
