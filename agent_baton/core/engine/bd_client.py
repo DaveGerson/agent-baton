@@ -22,7 +22,12 @@ Configuration (env)
 - ``BATON_BD_BIN``    — path/name of the ``bd`` binary (default ``bd``).
 - ``BATON_BD_PREFIX`` — issue prefix used at ``bd init`` (default ``bd``),
   chosen so generated IDs match baton's historical ``bd-<hash>`` scheme.
-- ``BATON_BD_ENABLED`` — master switch for the beads backend (default ``1``).
+
+Note: ``BATON_BD_ENABLED`` is a legacy, no-op environment variable kept only
+for backward compatibility (documented in the root ``CLAUDE.md``). After
+ADR-13b WP-G removed the SQLite bead-store fallback, ``bd`` is always
+required — there is no "disabled" mode to switch, so this module defines no
+corresponding function.
 """
 from __future__ import annotations
 
@@ -37,7 +42,6 @@ _log = logging.getLogger(__name__)
 
 _BIN_ENV = "BATON_BD_BIN"
 _PREFIX_ENV = "BATON_BD_PREFIX"
-_ENABLED_ENV = "BATON_BD_ENABLED"
 
 _DEFAULT_BIN = "bd"
 _DEFAULT_PREFIX = "bd"
@@ -57,13 +61,6 @@ class BdError(RuntimeError):
 
 class BdNotAvailable(BdError):
     """The ``bd`` binary could not be found on PATH / at ``BATON_BD_BIN``."""
-
-
-def bd_enabled() -> bool:
-    """Return True when the beads (``bd``) backend is enabled (default ON)."""
-    return os.environ.get(_ENABLED_ENV, "1").strip().lower() not in (
-        "0", "false", "no", "",
-    )
 
 
 def bd_prefix() -> str:

@@ -153,9 +153,12 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
     payload = json.loads(capsys.readouterr().out)
     check_ids = {check["id"] for check in payload["checks"]}
 
-    assert rc == 0
+    # bd is mandatory after ADR-13b WP-G: with PATH cleared it is genuinely
+    # missing, so doctor reports it as a failing check and the CLI exits
+    # non-zero (unlike the still-optional claude_cli, which stays a warning).
+    assert rc == 1
     assert payload["schema_version"] == 1
-    assert payload["ok"] is True
+    assert payload["ok"] is False
     assert {
         "python",
         "package_version",
@@ -174,7 +177,7 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "planner_validation",
         "terminology",
     } <= check_ids
-    assert _check(payload, "bd")["status"] == "warning"
+    assert _check(payload, "bd")["status"] == "error"
     assert _check(payload, "claude_cli")["status"] == "warning"
     assert _check(payload, "project_agents")["details"]["count"] == 1
     assert _check(payload, "knowledge_packs")["details"]["project_count"] == 1
@@ -192,6 +195,73 @@ def test_doctor_json_reports_required_checks_and_optional_warnings(
         "templates",
         "pmo_static_assets",
     } <= set(resources["details"]["resources"])
+
+
+class TestCheckBd:
+    """bd-7is: ``bd`` is mandatory after ADR-13b WP-G, so doctor must fail
+    (not warn) when it cannot be found, with an actionable remediation
+    message, while honoring the same BATON_BD_BIN override the runtime
+    (BdClient) uses.
+    """
+
+    def test_missing_bd_is_an_error_with_remediation(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.cli.commands import diagnostics_cmd
+
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.delenv("BATON_BD_BIN", raising=False)
+
+        check = diagnostics_cmd._check_bd()
+
+        assert check.status == "error"
+        assert check.details["path"] is None
+        # Actionable: names an install path and the override knob.
+        assert "install" in check.message.lower()
+        assert "BATON_BD_BIN" in check.message
+
+    def test_bd_found_on_path_is_ok(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.cli.commands import diagnostics_cmd
+
+        monkeypatch.delenv("BATON_BD_BIN", raising=False)
+        monkeypatch.setattr(
+            diagnostics_cmd.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        check = diagnostics_cmd._check_bd()
+
+        assert check.status == "ok"
+        assert check.details["path"] == "/usr/bin/bd"
+
+    def test_baton_bd_bin_override_is_honored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.cli.commands import diagnostics_cmd
+
+        custom_bin = tmp_path / "custom-bd"
+        custom_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setenv("BATON_BD_BIN", str(custom_bin))
+
+        check = diagnostics_cmd._check_bd()
+
+        assert check.status == "ok"
+        assert check.details["executable"] == str(custom_bin)
+
+    def test_baton_bd_bin_missing_target_is_still_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.cli.commands import diagnostics_cmd
+
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setenv("BATON_BD_BIN", str(tmp_path / "does-not-exist"))
+
+        check = diagnostics_cmd._check_bd()
+
+        assert check.status == "error"
+        assert "does-not-exist" in check.message
 
 
 def test_doctor_handler_exits_nonzero_after_printing_error_payload(
@@ -395,9 +465,12 @@ def test_missing_optional_features_are_warnings_not_crashes(
 
     payload = diagnostics_cmd.build_report(tmp_path)
 
-    assert payload["ok"] is True
+    # bd is mandatory (ADR-13b WP-G): missing it is a real failure (`error`),
+    # reported cleanly rather than raising -- the other, still-optional
+    # features degrade to warnings as before.
+    assert payload["ok"] is False
     assert _check(payload, "pmo_ui_assets")["status"] == "warning"
-    assert _check(payload, "bd")["status"] == "warning"
+    assert _check(payload, "bd")["status"] == "error"
     assert _check(payload, "claude_cli")["status"] == "warning"
     assert _check(payload, "knowledge_packs")["status"] == "warning"
     assert _check(payload, "assurance_packs")["status"] == "warning"

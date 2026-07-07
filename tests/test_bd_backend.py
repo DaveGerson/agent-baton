@@ -10,7 +10,7 @@ import shutil
 
 import pytest
 
-from agent_baton.core.engine.bd_client import BD_BUILTIN_TYPES, BdClient, bd_enabled, bd_prefix
+from agent_baton.core.engine.bd_client import BD_BUILTIN_TYPES, BdClient, bd_prefix
 from agent_baton.core.engine.bd_mapping import (
     bd_issue_to_bead,
     bead_labels,
@@ -284,13 +284,6 @@ def test_backend_env_override_always_returns_bd(monkeypatch):
     assert selected_backend() == "bd"   # unknown; still returns "bd"
 
 
-def test_bd_enabled_default_on(monkeypatch):
-    monkeypatch.delenv("BATON_BD_ENABLED", raising=False)
-    assert bd_enabled() is True
-    monkeypatch.setenv("BATON_BD_ENABLED", "0")
-    assert bd_enabled() is False
-
-
 def test_make_bead_store_returns_bd_store(tmp_path, monkeypatch):
     # ADR-13b WP-G: make_bead_store() always returns BdBeadStore.
     from agent_baton.core.engine.bd_bead_store import BdBeadStore
@@ -302,6 +295,43 @@ def test_make_bead_store_returns_bd_store(tmp_path, monkeypatch):
     assert isinstance(store, BdBeadStore), (
         "make_bead_store() must return BdBeadStore after ADR-13b WP-G"
     )
+
+
+def test_make_bead_store_warns_once_per_process_on_failure(tmp_path, monkeypatch, caplog):
+    """bd-7is: ~20 call sites swallow BdNotAvailable at debug level, so a
+    missing bd binary was previously invisible. The factory now emits
+    exactly ONE process-wide WARNING on the first failed construction;
+    later failures in the same process stay at debug level.
+    """
+    import logging
+
+    from agent_baton.core.engine import bead_backend
+    from agent_baton.core.engine.bd_client import BdClient, BdNotAvailable
+
+    # Reset the module-level once-flag so this test is independent of
+    # whatever earlier tests in the process may have already tripped it.
+    monkeypatch.setattr(bead_backend, "_warned_bd_unavailable", False)
+    monkeypatch.setattr(BdClient, "available", lambda self: False)
+
+    db_path = tmp_path / "baton.db"
+
+    with caplog.at_level(logging.DEBUG, logger="agent_baton.core.engine.bead_backend"):
+        with pytest.raises(BdNotAvailable):
+            make_bead_store(db_path, repo_root=tmp_path)
+
+        first_call_records = list(caplog.records)
+        warnings = [r for r in first_call_records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "bd unavailable" in warnings[0].getMessage().lower()
+
+        caplog.clear()
+
+        with pytest.raises(BdNotAvailable):
+            make_bead_store(db_path, repo_root=tmp_path)
+
+        second_call_records = list(caplog.records)
+        assert not any(r.levelno == logging.WARNING for r in second_call_records)
+        assert any(r.levelno == logging.DEBUG for r in second_call_records)
 
 
 # ---------------------------------------------------------------------------

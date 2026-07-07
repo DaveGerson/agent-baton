@@ -10,7 +10,9 @@ have been replaced.
 
 Coverage:
 - baton beads --help exits 0 and lists all subcommands
-- baton beads list — no DB: prints informational message, exits 0
+- baton beads list — bd unavailable: accurate stderr message, exits non-zero
+  (bd-7is; bd is the only backend after ADR-13b WP-G, so an unavailable
+  store always means bd itself could not be reached)
 - baton beads list — with beads: prints bead table rows
 - baton beads list --type / --status / --task / --tag filters
 - baton beads list --limit respected
@@ -119,12 +121,16 @@ def _run_handler(store_or_none, argv: list[str]) -> tuple[int, str]:
 
     with ctx:
         try:
-            old_stdout = sys.stdout
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            # Combine stdout+stderr into one captured stream: bd-7is messaging
+            # (accurate bd-unavailable errors) is printed to stderr, and
+            # tests need to see it alongside any stdout output.
             sys.stdout = captured
+            sys.stderr = captured
             try:
                 bead_cmd.handler(args)
             finally:
-                sys.stdout = old_stdout
+                sys.stdout, sys.stderr = old_stdout, old_stderr
         except SystemExit as exc:
             exit_code = int(exc.code) if exc.code is not None else 0
 
@@ -191,10 +197,17 @@ class TestRegistration:
 
 
 class TestBeadsList:
-    def test_list_no_db_prints_message_exits_zero(self) -> None:
+    def test_list_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
+        """bd-7is: after ADR-13b WP-G, a store construction failure always
+        means bd itself is unreachable -- never "no baton.db yet". The CLI
+        must say so accurately and exit non-zero rather than silently
+        no-op'ing with the stale "No baton.db found" wording.
+        """
         code, out = _run_handler(None, ["list"])
-        assert code == 0
-        assert "No baton.db" in out or "no beads" in out.lower()
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()
+        assert "baton doctor" in out
 
     def test_list_shows_bead_rows(self, populated_store) -> None:
         code, out = _run_handler(populated_store, ["list"])
@@ -266,10 +279,11 @@ class TestBeadsShow:
         code, _ = _run_handler(bd_store, ["show", "bd-doesnotexist"])
         assert code != 0
 
-    def test_show_no_db_prints_message_exits_zero(self) -> None:
+    def test_show_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
         code, out = _run_handler(None, ["show", "bd-any"])
-        assert code == 0
-        assert "No baton.db" in out
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +298,11 @@ class TestBeadsReady:
         assert code == 0
         assert "bd-0001" in out
 
-    def test_ready_no_db_prints_message_exits_zero(self) -> None:
+    def test_ready_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
         code, out = _run_handler(None, ["ready", "--task", "task-x"])
-        assert code == 0
-        assert "No baton.db" in out
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()
 
     def test_ready_no_active_task_no_flag_exits_nonzero(self, bd_store) -> None:
         with patch("agent_baton.cli.commands.bead_cmd._get_active_task_id",
@@ -333,10 +348,11 @@ class TestBeadsClose:
         code, _ = _run_handler(bd_store, ["close", "bd-nonexistent"])
         assert code != 0
 
-    def test_close_no_db_prints_message_exits_zero(self) -> None:
+    def test_close_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
         code, out = _run_handler(None, ["close", "bd-any"])
-        assert code == 0
-        assert "No baton.db" in out
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -387,10 +403,11 @@ class TestBeadsAnnotate:
         code, _ = _run_handler(bd_store, ["annotate", "bd-nonexistent", "--note", "x"])
         assert code != 0
 
-    def test_annotate_no_db_prints_message_exits_zero(self) -> None:
+    def test_annotate_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
         code, out = _run_handler(None, ["annotate", "bd-any", "--note", "x"])
-        assert code == 0
-        assert "No baton.db" in out
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()
 
     def test_annotate_multiple_times_bead_stays_readable(self, populated_store) -> None:
         """ADR-13b WP-H: Multiple annotations create multiple bd notes. The bead
@@ -453,9 +470,10 @@ class TestBeadsLink:
         code, _ = _run_handler(two_bead_store, ["link", "bd-src", "--relates-to", "bd-ghost"])
         assert code != 0
 
-    def test_link_no_db_prints_message_exits_zero(self) -> None:
+    def test_link_bd_unavailable_prints_accurate_message_exits_nonzero(self) -> None:
         code, out = _run_handler(
             None, ["link", "bd-src", "--relates-to", "bd-tgt"]
         )
-        assert code == 0
-        assert "No baton.db" in out
+        assert code != 0
+        assert "No baton.db" not in out
+        assert "bd" in out.lower()

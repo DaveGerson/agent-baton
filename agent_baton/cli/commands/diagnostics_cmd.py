@@ -458,11 +458,46 @@ def _resource_entry_matches(name: str, pattern: str) -> bool:
 
 
 def _check_bd() -> DoctorCheck:
-    return _check_optional_cli(
-        check_id="bd",
+    """Verify the ``bd`` CLI is resolvable (ADR-13b WP-G: bd is mandatory).
+
+    Unlike the other optional local CLIs checked by doctor (e.g. ``claude``),
+    ``bd`` is not optional after WP-G removed the SQLite bead-store fallback:
+    every bead-backed feature (incidents, retrospectives, knowledge capture,
+    the PMO scorecard) silently goes dark without it. A missing ``bd``
+    binary is therefore reported as a failing (``error``) check, not a
+    warning, with an actionable remediation message.
+
+    Honors ``BATON_BD_BIN`` (same override the runtime uses via
+    :class:`agent_baton.core.engine.bd_client.BdClient`) so an operator who
+    has pointed baton at a non-PATH binary is not falsely flagged.
+    """
+    configured = os.environ.get("BATON_BD_BIN", "").strip()
+    executable = configured or "bd"
+    found = shutil.which(executable)
+    if not found and Path(executable).exists():
+        found = str(Path(executable))
+
+    if not found:
+        return DoctorCheck(
+            id="bd",
+            label="bd availability",
+            status="error",
+            message=(
+                f"Required 'bd' CLI not found (looked for {executable!r} on PATH). "
+                "bd is mandatory after ADR-13b WP-G -- bead-backed features "
+                "(incidents, retrospectives, knowledge capture, the PMO "
+                "scorecard) cannot record data without it. Install it with "
+                "`npm install -g @beads/bd` (or `brew install beads`), or "
+                "set BATON_BD_BIN to an existing bd binary."
+            ),
+            details={"executable": executable, "path": None},
+        )
+    return DoctorCheck(
+        id="bd",
         label="bd availability",
-        executable="bd",
-        missing_message="Optional bd CLI not found on PATH",
+        status="ok",
+        message=f"{executable} found at {found}",
+        details={"executable": executable, "path": found},
     )
 
 

@@ -16,8 +16,11 @@ graph        Show the dependency graph for a task's beads.
 synthesize   Run the BeadSynthesizer manually (refresh bead_edges/clusters).
 clusters     List bead clusters discovered by the synthesizer.
 
-All subcommands degrade gracefully when the bead store is unavailable
-(older schema, no baton.db in the current project).
+All subcommands fail loudly (accurate stderr message, non-zero exit) when
+the bead store is unavailable -- after ADR-13b WP-G the ``bd`` CLI is the
+only backend, so an unavailable store means ``bd`` itself could not be
+reached (missing binary, bad ``BATON_BD_BIN``, ...), not "no project data
+yet" (bd-7is).
 """
 from __future__ import annotations
 
@@ -35,6 +38,22 @@ from pathlib import Path
 
 _DEFAULT_DB_PATH = Path(".claude/team-context/baton.db")
 _DB_REL = Path(".claude/team-context/baton.db")
+
+# bd-7is: after ADR-13b WP-G the SQLite bead store was removed, so a bead
+# store construction failure always means the ``bd`` CLI itself could not
+# be reached (missing binary, bad BATON_BD_BIN, ...) -- never "no baton.db
+# yet" (bd does not need baton.db at all; see ``_get_bead_store`` below).
+# Every subcommand that cannot proceed without a store shares this one
+# accurate message instead of the stale (pre-WP-G) "No baton.db found"
+# wording, and exits non-zero rather than silently no-op'ing.
+def _print_bd_unavailable(action: str) -> None:
+    print(
+        f"error: cannot {action} -- the 'bd' CLI is unavailable. "
+        "Install it (npm install -g @beads/bd, or brew install beads) or "
+        "set BATON_BD_BIN to point at the binary. Run `baton doctor` for "
+        "details.",
+        file=sys.stderr,
+    )
 
 
 def _resolve_db_path() -> Path:
@@ -123,12 +142,23 @@ def _get_or_create_bead_store():
     ``FileNotFoundError``.
 
     ADR-13b WP-2: delegates to :func:`~agent_baton.core.engine.bead_backend.make_bead_store`.
+
+    Returns ``None`` (instead of letting :class:`BdNotAvailable` propagate as
+    an uncaught traceback) when ``bd`` cannot be reached, mirroring
+    :func:`_get_bead_store` so both helpers give callers one consistent
+    "store unavailable" signal to handle (bd-7is).
     """
     from agent_baton.core.engine.bead_backend import make_bead_store
+    from agent_baton.core.engine.bd_client import BdNotAvailable
 
     db = _resolve_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
-    return make_bead_store(db, repo_root=_derive_project_root(db))
+    try:
+        return make_bead_store(db, repo_root=_derive_project_root(db))
+    except BdNotAvailable:
+        return None
+    except Exception:
+        return None
 
 
 def _derive_project_root(db_path: Path) -> Path:
@@ -652,10 +682,15 @@ def _handle_create(args: argparse.Namespace) -> None:
     )
 
     store = _get_or_create_bead_store()
+    if store is None:
+        _print_bd_unavailable("create bead")
+        sys.exit(1)
+
     result = store.write(bead)
     if not result:
         print(
-            f"error: failed to write bead — check that baton.db schema is up to date.",
+            "error: bd rejected the write for this bead "
+            "-- check `bd` status/logs (see `baton doctor`).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -667,8 +702,8 @@ def _handle_create(args: argparse.Namespace) -> None:
 def _handle_list(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/ — no beads to list.")
-        return
+        _print_bd_unavailable("list beads")
+        sys.exit(1)
 
     tags = args.tag or None
     beads = store.query(
@@ -701,8 +736,8 @@ def _handle_list(args: argparse.Namespace) -> None:
 def _handle_show(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/ — no beads to show.")
-        return
+        _print_bd_unavailable("show bead")
+        sys.exit(1)
 
     bead = store.read(args.bead_id)
     if bead is None:
@@ -715,8 +750,8 @@ def _handle_show(args: argparse.Namespace) -> None:
 def _handle_ready(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/ — no beads available.")
-        return
+        _print_bd_unavailable("list ready beads")
+        sys.exit(1)
 
     task_id = args.task_id or _get_active_task_id()
     if not task_id:
@@ -743,8 +778,8 @@ def _handle_ready(args: argparse.Namespace) -> None:
 def _handle_close(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.")
-        return
+        _print_bd_unavailable("close bead")
+        sys.exit(1)
 
     bead = store.read(args.bead_id)
     if bead is None:
@@ -758,8 +793,8 @@ def _handle_close(args: argparse.Namespace) -> None:
 def _handle_annotate(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.")
-        return
+        _print_bd_unavailable("annotate bead")
+        sys.exit(1)
 
     bead = store.read(args.bead_id)
     if bead is None:
@@ -773,8 +808,8 @@ def _handle_annotate(args: argparse.Namespace) -> None:
 def _handle_link(args: argparse.Namespace) -> None:
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.")
-        return
+        _print_bd_unavailable("link beads")
+        sys.exit(1)
 
     # Determine link type and target from the mutually exclusive group.
     if args.relates_to:
@@ -809,8 +844,8 @@ def _handle_cleanup(args: argparse.Namespace) -> None:
     """F6 — Memory Decay: archive old closed beads."""
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/ — nothing to clean up.")
-        return
+        _print_bd_unavailable("clean up beads")
+        sys.exit(1)
 
     from agent_baton.core.engine.bead_decay import decay_beads
 
@@ -837,8 +872,8 @@ def _handle_promote(args: argparse.Namespace) -> None:
     """F9 — Bead-to-Knowledge Promotion: write bead content as a knowledge doc."""
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.")
-        return
+        _print_bd_unavailable("promote bead")
+        sys.exit(1)
 
     bead = store.read(args.bead_id)
     if bead is None:
@@ -918,8 +953,8 @@ def _handle_graph(args: argparse.Namespace) -> None:
     """F11 — Bead Dependency Graph: display link relationships for a task."""
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.")
-        return
+        _print_bd_unavailable("show bead graph")
+        sys.exit(1)
 
     task_id = args.task_id or _get_active_task_id()
     if not task_id:
@@ -1031,7 +1066,7 @@ def _handle_synthesize(args: argparse.Namespace) -> None:
     """
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/.", file=sys.stderr)
+        _print_bd_unavailable("synthesize beads")
         sys.exit(1)
 
     from agent_baton.core.intel.bead_synthesizer import synthesize_beads
@@ -1261,7 +1296,7 @@ def _handle_exec(args: argparse.Namespace) -> None:
 
     store = _get_bead_store()
     if store is None:
-        print("No baton.db found in .claude/team-context/ — no beads available.", file=sys.stderr)
+        _print_bd_unavailable("run executable bead")
         sys.exit(1)
 
     bead_id: str = args.bead_id
@@ -1428,6 +1463,9 @@ def _handle_create_exec(args: argparse.Namespace) -> None:
     )
 
     store = _get_or_create_bead_store()
+    if store is None:
+        _print_bd_unavailable("create executable bead")
+        sys.exit(1)
 
     from agent_baton.core.exec.runner import ExecutableBeadRunner
     from agent_baton.core.exec.sandbox import Sandbox, SandboxConfig
