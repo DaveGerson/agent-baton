@@ -1363,11 +1363,32 @@ step's `SynthesisSpec`:
 | `merge_files` | Same as concatenate but deduplicate `files_changed` |
 | `agent_synthesis` | Mark for synthesis agent dispatch (future) |
 
+### File Ownership Contracts and Pre-Dispatch Overlap Warnings
+
+`TeamMember` has no dedicated `allowed_paths` field (unlike `PlanStep`,
+and the planner does not populate `PlanStep.allowed_paths` for team
+members either). By existing convention, `task_description` doubles as
+each member's file-scope contract. `build_team_readiness_diagnostics`
+(`agent_baton/core/engine/team_backends.py`) makes that contract
+machine-readable without a new model field:
+
+- Each entry in `shared_contracts` (in `team-report.json` and
+  `plan_diagnostics["team_readiness"]`) carries an `intended_scope` list
+  — path-shaped substrings (`dir/file.ext`) parsed out of the member's
+  `task_description` via `extract_intended_scope()`. Empty means "scope
+  not stated", not "no scope".
+- `detect_scope_overlaps()` compares every member pair **before
+  dispatch** and appends a warning to `TeamReadinessDiagnostics.warnings`
+  when two members declare identical `task_description` text, or their
+  parsed `intended_scope` lists intersect. These warnings are ordered
+  ahead of the static `claude-teams` caveats so the capped dispatch
+  summary always surfaces them.
+
 ### Conflict Detection and Escalation
 
 The engine detects conflicts when two or more team members modify the
-same file.  The `conflict_handling` field on `SynthesisSpec` controls
-the response:
+same file — this file-overlap mechanism is unchanged. The
+`conflict_handling` field on `SynthesisSpec` controls the response:
 
 | Mode | Behavior |
 |------|----------|
@@ -1376,7 +1397,24 @@ the response:
 | `fail` | Fail the step if conflict detected |
 
 Conflicts are recorded as `ConflictRecord` instances in the
-retrospective, preserving each agent's position and evidence.
+retrospective, preserving each agent's position and evidence. Each
+conflict is additionally classified into a `severity` tier by
+`ExecutionEngine._classify_conflict_severity` (deterministic, path-based
+heuristics — no LLM call):
+
+| Severity | Rule |
+|----------|------|
+| `high` | A source file modified by two `implementer`-role members |
+| `medium` | A shared config/test file (`conftest.py`, `*.yml`/`*.toml`, `tests/*`), or a source file overlap not confirmed between two implementers |
+| `low` | Docs or generated/build artifacts (`docs/*.md`, `dist/`, lockfiles, `__pycache__`, ...) |
+
+When a single conflict spans several files, the worst per-file severity
+wins. `ConflictRecord` carries three additive, backward-compatible
+fields alongside `severity`: `member_ids` (the `TeamMember.member_id`
+values involved — distinct from `agents`, since two members can share an
+agent), `files` (the affected paths), and `next_action` (a
+severity-appropriate suggested remediation). `resolution_detail` is
+pre-populated with a message naming all of the above.
 
 ### Team Composition Tracking
 
