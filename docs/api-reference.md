@@ -2278,8 +2278,14 @@ Process (CRP) wizard. They are companion routes to `pmo.py` and live in
 
 #### `GET /api/v1/pmo/scorecard/{user_id}`
 
-Returns aggregated 30-day metrics for a developer. Queries `agent_usage`,
-`step_results`, and `beads` tables; missing tables contribute zeros.
+Returns aggregated 30-day metrics for a developer. `tasks_completed`,
+`avg_cycle_time_minutes`, and `gate_pass_rate` query the project's
+`agent_usage` / `step_results` tables (`baton.db`); missing tables
+contribute zeros. `incidents_authored`, `incidents_resolved`, and
+`knowledge_contributions` are bead-derived, sourced via
+`make_bead_store()` (the `bd`-backed store — same construction as
+`GET /pmo/arch-beads`), not the sqlite `beads` table (dropped by schema
+migration v42 and never recreated; bd-y0d).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2291,6 +2297,7 @@ Returns aggregated 30-day metrics for a developer. Queries `agent_usage`,
 | `incidents_authored` | int | Warning/incident/bug beads created by user |
 | `incidents_resolved` | int | Warning/incident/bug beads closed by user |
 | `knowledge_contributions` | int | Knowledge/decision/pattern beads created |
+| `bead_data_available` | bool | `false` when the bead store could not be reached (e.g. `bd` unavailable) — the three bead-derived fields above are `0` but not meaningfully zero in that case; `true` means they reflect real data (additive field, default `true`) |
 
 #### `GET /api/v1/pmo/arch-beads`
 

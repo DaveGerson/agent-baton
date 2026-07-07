@@ -20,6 +20,17 @@ _log = logging.getLogger(__name__)
 
 _BACKEND_ENV = "BATON_BD_BACKEND"
 
+# bd-7is: ~20 call sites construct the bead store through a
+# ``try/except -> bead_store = None`` wrapper at *debug* level (by design --
+# a missing bd binary must never crash a caller that can degrade). That
+# means, pre-fix, a missing ``bd`` binary was invisible unless someone
+# happened to run ``baton doctor`` or grep debug logs. Rather than touching
+# every call site, emit exactly ONE process-wide WARNING here, at the single
+# seam all of them funnel through, the first time construction fails.
+# Subsequent failures in the same process stay at debug level so a busy
+# session doesn't spam the log once the operator has been told.
+_warned_bd_unavailable = False
+
 
 def selected_backend() -> str:
     """Return ``"bd"`` — the only supported bead backend after WP-G.
@@ -66,6 +77,15 @@ def make_bead_store(
     client = BdClient(root)
 
     if not client.available():
+        global _warned_bd_unavailable
+        if not _warned_bd_unavailable:
+            _log.warning(
+                "bd unavailable — incidents/retrospectives will not be "
+                "recorded; install bd or set BATON_BD_BIN"
+            )
+            _warned_bd_unavailable = True
+        else:
+            _log.debug("bd unavailable (repeat construction failure; see earlier warning)")
         raise BdNotAvailable(
             "The 'bd' CLI is required after ADR-13b WP-G but was not found "
             "on PATH.  Install it with:  npm install -g @beads/bd  "

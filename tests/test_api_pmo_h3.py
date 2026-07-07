@@ -53,6 +53,100 @@ def test_scorecard_empty_db_returns_zeros(client: TestClient) -> None:
     assert data["gate_pass_rate"] == 0.0
 
 
+def _recent_iso(days_ago: int = 1) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class _FakeBeadStore:
+    """Minimal stand-in for BdBeadStore.query(), used to test the scorecard
+    endpoint's bead-derived fields without depending on a real bd binary
+    (bd-y0d)."""
+
+    def __init__(self, beads):
+        self._beads = beads
+
+    def query(self, *, agent_name=None, status=None, limit=100, **_kwargs):
+        return [b for b in self._beads if agent_name is None or b.agent_name == agent_name][:limit]
+
+
+def test_scorecard_with_beads_returns_nonzero_counts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bd-y0d: with a bead store containing known beads for the user, the
+    incidents/knowledge fields must reflect them (never the old permanent
+    zero caused by querying the dropped sqlite `beads` table)."""
+    from agent_baton.models.bead import Bead
+
+    beads = [
+        Bead(
+            bead_id="bd-inc-1", task_id="t1", step_id="s1", agent_name="alice",
+            bead_type="warning", content="prod incident", status="open",
+            created_at=_recent_iso(2), source="agent-signal",
+        ),
+        Bead(
+            bead_id="bd-inc-2", task_id="t1", step_id="s2", agent_name="alice",
+            bead_type="bug", content="fixed a bug", status="closed",
+            created_at=_recent_iso(10), closed_at=_recent_iso(1),
+            source="agent-signal",
+        ),
+        Bead(
+            bead_id="bd-know-1", task_id="t1", step_id="s3", agent_name="alice",
+            bead_type="decision", content="chose redis", status="open",
+            created_at=_recent_iso(3), source="agent-signal",
+        ),
+        # Different author — must not be counted for alice.
+        Bead(
+            bead_id="bd-other", task_id="t1", step_id="s4", agent_name="bob",
+            bead_type="warning", content="not alice's", status="open",
+            created_at=_recent_iso(1), source="agent-signal",
+        ),
+    ]
+
+    def _fake_make_bead_store(*_a, **_kw):
+        return _FakeBeadStore(beads)
+
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        _fake_make_bead_store,
+    )
+
+    res = client.get("/api/v1/pmo/scorecard/alice")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["bead_data_available"] is True
+    assert data["incidents_authored"] == 2  # bd-inc-1 (warning) + bd-inc-2 (bug)
+    assert data["incidents_resolved"] == 1  # bd-inc-2 closed within window
+    assert data["knowledge_contributions"] == 1  # bd-know-1 (decision)
+
+
+def test_scorecard_bead_store_unavailable_marks_data_unavailable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bd-y0d: when the bead store cannot be constructed, the response must
+    say so explicitly (bead_data_available=False) rather than silently
+    reporting zeros indistinguishable from "no incidents"."""
+    from agent_baton.core.engine.bd_client import BdNotAvailable
+
+    def _raise_unavailable(*_a, **_kw):
+        raise BdNotAvailable("bd not available (test stub)")
+
+    monkeypatch.setattr(
+        "agent_baton.core.engine.bead_backend.make_bead_store",
+        _raise_unavailable,
+    )
+
+    res = client.get("/api/v1/pmo/scorecard/alice")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["bead_data_available"] is False
+    assert data["incidents_authored"] == 0
+    assert data["incidents_resolved"] == 0
+    assert data["knowledge_contributions"] == 0
+
+
 # ---------------------------------------------------------------------------
 # H3.7 — arch beads
 # ---------------------------------------------------------------------------

@@ -78,13 +78,44 @@ def _playbooks_dir() -> Path:
     return Path("templates/playbooks").resolve()
 
 
+def _parse_iso(ts: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp (``Z`` or ``+00:00`` suffixed) to an aware
+    :class:`datetime`, or ``None`` if *ts* is empty/unparseable.
+
+    Bead timestamps (``Bead.created_at`` / ``closed_at``) are written as
+    ``...Z``; :meth:`datetime.fromisoformat` only accepts that suffix on
+    Python 3.11+, so it is normalized to ``+00:00`` first for portability.
+    """
+    if not ts:
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
 
 
 class DeveloperScorecardResponse(BaseModel):
-    """Aggregated metrics for a single developer over the last 30 days."""
+    """Aggregated metrics for a single developer over the last 30 days.
+
+    ``incidents_authored`` / ``incidents_resolved`` / ``knowledge_contributions``
+    are bead-derived. ``bead_data_available`` (bd-y0d, additive field --
+    existing consumers can ignore it) is ``False`` when the bead store could
+    not be reached, so those three fields read as legitimate zeros only when
+    ``bead_data_available`` is ``True``. ``tasks_completed`` /
+    ``avg_cycle_time_minutes`` / ``gate_pass_rate`` are unaffected -- they
+    are still sourced from the project's ``baton.db`` SQLite tables.
+    """
 
     user_id: str
     window_days: int = 30
@@ -94,6 +125,7 @@ class DeveloperScorecardResponse(BaseModel):
     incidents_authored: int = 0
     incidents_resolved: int = 0
     knowledge_contributions: int = 0
+    bead_data_available: bool = True
 
 
 class ArchBeadResponse(BaseModel):
@@ -211,19 +243,31 @@ class CRPResponse(BaseModel):
 async def get_developer_scorecard(user_id: str) -> DeveloperScorecardResponse:
     """Return a 30-day scorecard for *user_id*.
 
-    Aggregates over the project's ``baton.db`` tables when present:
+    - ``agent_usage`` (``baton.db``) for tasks_completed (rows where
+      ``agent_name`` matches the user-id are counted as their tasks).
+    - ``step_results`` (``baton.db``) for cycle time (avg of
+      ``duration_seconds``) and gate pass rate (rows where ``step_id``
+      looks like a gate, ``gate-*``).
+    - The bd-backed bead store (bd-y0d fix) for incidents authored /
+      resolved and knowledge contributions. These were previously raw SQL
+      against a ``beads`` table in ``baton.db`` that schema migration v42
+      drops and never recreates -- ``_safe_query`` swallowed the resulting
+      ``OperationalError`` and silently returned zeros forever. Beads have
+      lived in the ``bd``-backed store (not ``baton.db``) since ADR-13b
+      WP-G, so this now mirrors the sibling ``list_beads`` /
+      ``list_arch_beads`` endpoints' ``make_bead_store()`` construction and
+      error handling.
 
-    - ``agent_usage`` for tasks_completed (rows where ``agent_name``
-      matches the user-id are counted as their tasks).
-    - ``step_results`` for cycle time (avg of ``duration_seconds``).
-    - Gate pass rate from ``step_results`` rows where ``step_id`` looks
-      like a gate (``gate-*``).
-    - ``beads`` for incidents authored / resolved and knowledge entries.
-
-    Tables that don't exist or are empty contribute zero — never raise.
+    ``baton.db``-sourced fields still contribute zero when their tables are
+    missing/empty (unchanged, never raises). Bead-derived fields are zero
+    AND ``bead_data_available=False`` when the store itself could not be
+    reached, so a caller can distinguish "genuinely zero" from "we don't
+    know" (never a silent zero -- bd-y0d).
     """
     db_path = _project_db_path()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    now = datetime.now(timezone.utc)
+    cutoff_dt = now - timedelta(days=30)
+    cutoff = cutoff_dt.isoformat()
 
     # tasks_completed
     rows = _safe_query(
@@ -258,35 +302,40 @@ async def get_developer_scorecard(user_id: str) -> DeveloperScorecardResponse:
     else:
         gate_pass_rate = 0.0
 
-    # incidents authored / resolved
-    rows = _safe_query(
-        db_path,
-        "SELECT COUNT(*) AS n FROM beads "
-        "WHERE agent_name = ? AND bead_type IN ('warning', 'incident', 'bug') "
-        "AND created_at >= ?",
-        (user_id, cutoff),
-    )
-    incidents_authored = int(rows[0]["n"]) if rows else 0
+    # incidents authored / resolved / knowledge contributions (bd-y0d):
+    # mirrors list_arch_beads' construction + error handling exactly --
+    # construct via make_bead_store() and treat ANY failure (bd unavailable,
+    # workspace not initialised, ...) as "bead data unavailable" rather than
+    # a silent zero.
+    incidents_authored = 0
+    incidents_resolved = 0
+    knowledge_contributions = 0
+    bead_data_available = True
 
-    rows = _safe_query(
-        db_path,
-        "SELECT COUNT(*) AS n FROM beads "
-        "WHERE agent_name = ? AND status = 'closed' "
-        "AND bead_type IN ('warning', 'incident', 'bug') "
-        "AND closed_at >= ?",
-        (user_id, cutoff),
-    )
-    incidents_resolved = int(rows[0]["n"]) if rows else 0
+    try:
+        from agent_baton.core.engine.bead_backend import make_bead_store
 
-    # knowledge contributions
-    rows = _safe_query(
-        db_path,
-        "SELECT COUNT(*) AS n FROM beads "
-        "WHERE agent_name = ? AND bead_type IN ('knowledge', 'decision', 'pattern') "
-        "AND created_at >= ?",
-        (user_id, cutoff),
-    )
-    knowledge_contributions = int(rows[0]["n"]) if rows else 0
+        store = make_bead_store(db_path, repo_root=db_path.parent.parent.parent)
+        user_beads = store.query(agent_name=user_id, status=None, limit=1000)
+    except Exception:
+        bead_data_available = False
+        user_beads = []
+
+    if bead_data_available:
+        for bead in user_beads:
+            bead_type = bead.bead_type
+            if bead_type in ("warning", "incident", "bug"):
+                created = _parse_iso(bead.created_at)
+                if created is not None and created >= cutoff_dt:
+                    incidents_authored += 1
+                if bead.status == "closed":
+                    closed = _parse_iso(bead.closed_at)
+                    if closed is not None and closed >= cutoff_dt:
+                        incidents_resolved += 1
+            elif bead_type in ("knowledge", "decision", "pattern"):
+                created = _parse_iso(bead.created_at)
+                if created is not None and created >= cutoff_dt:
+                    knowledge_contributions += 1
 
     return DeveloperScorecardResponse(
         user_id=user_id,
@@ -297,6 +346,7 @@ async def get_developer_scorecard(user_id: str) -> DeveloperScorecardResponse:
         incidents_authored=incidents_authored,
         incidents_resolved=incidents_resolved,
         knowledge_contributions=knowledge_contributions,
+        bead_data_available=bead_data_available,
     )
 
 

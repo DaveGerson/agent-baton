@@ -2766,10 +2766,12 @@ baton source map ado-contoso-platform 12345 nds task-abc123 --type implements
 
 Read-only installation and workspace health report: Python and package
 versions, bundled and project agents, knowledge packs, assurance packs,
-PMO UI assets, package resources, optional CLIs (`bd`, `claude`), the
-`.beads` workspace, git and git-worktree status, `.claude/team-context`
-writability, saved-plan (planner) validation, and terminology. Makes no
-changes to the project.
+PMO UI assets, package resources, the `bd` CLI (**required** — ADR-13b
+WP-G removed the SQLite bead-store fallback, so a missing `bd` binary is
+reported as a failing `error` check, not a warning; honors
+`BATON_BD_BIN`), the optional `claude` CLI, the `.beads` workspace, git
+and git-worktree status, `.claude/team-context` writability, saved-plan
+(planner) validation, and terminology. Makes no changes to the project.
 
 ```
 baton doctor [--json]
