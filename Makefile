@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck doctor ci-local clean help
+.PHONY: install test test-verbose test-packaging lint typecheck doctor ci-local clean help agents validate
 
 PYTHON ?= python3
 VENV := .venv
@@ -18,6 +18,10 @@ test: install ## Run tests
 
 test-verbose: install ## Run tests with verbose output
 	$(VENV)/bin/python -m pytest tests/ -v --tb=short
+
+test-packaging: install ## Build a wheel, install it into a fresh venv, run baton --help/doctor (slow; skips cleanly if 'build' is not installed)
+	$(VENV)/bin/pip install --quiet build
+	$(VENV)/bin/python -m pytest -q -m packaging tests/packaging/
 
 lint: install ## Run lint if ruff is installed
 	@if $(VENV)/bin/python -c "import ruff" >/dev/null 2>&1; then \

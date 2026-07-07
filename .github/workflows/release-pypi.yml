@@ -28,6 +28,32 @@ jobs:
       - name: Build sdist and wheel
         run: python3 -m build
 
+      - name: Verify wheel installs and the CLI runs (bd-rm-ux-p2)
+        # Gate publishing on the artifact actually working: install the
+        # freshly built wheel into a throwaway venv (no source checkout, no
+        # editable install) and exercise the two entry points a first-time
+        # user hits immediately after `pip install agent-baton`. If this
+        # fails, `needs: build` keeps both publish jobs from running, so a
+        # broken wheel never reaches TestPyPI/PyPI.
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/wheel-smoke-venv
+          /tmp/wheel-smoke-venv/bin/pip install --quiet dist/*.whl
+          mkdir -p /tmp/wheel-smoke-cwd
+          cd /tmp/wheel-smoke-cwd
+          /tmp/wheel-smoke-venv/bin/baton --help
+          /tmp/wheel-smoke-venv/bin/baton doctor --json | python3 -c "
+          import json, sys
+          payload = json.load(sys.stdin)
+          assert payload['schema_version'] == 1
+          assert isinstance(payload['ok'], bool)
+          ids = {c['id'] for c in payload['checks']}
+          assert 'bundled_agents' in ids, ids
+          bundled = next(c for c in payload['checks'] if c['id'] == 'bundled_agents')
+          assert bundled['details']['count'] > 0, 'no bundled agents resolved from the installed wheel'
+          print('wheel smoke OK:', bundled['details']['count'], 'bundled agents')
+          "
+
       - name: Store distribution artifacts
         uses: actions/upload-artifact@v4
         with:
