@@ -1,9 +1,16 @@
 name: Tests (bd backend)
 
 # ADR-13b: `bd` (gastownhall/beads) is the mandatory bead/issue backend. CI
-# installs it so the bead-backed suite runs the way production does. Triggered
-# on PRs and pushes to the main branches; widen the test selection over time as
-# the broader suite is hardened for CI.
+# installs it so the bead-backed suite runs the way production does.
+#
+# bd-rm-ux-p2: this workflow used to run only a ~13-file bead-related slice
+# of the pytest suite. That gap let a branch merge with two failing e2e
+# tests go unnoticed until a manual audit. `test-suite` below now runs the
+# (near-)full suite so CI actually protects the developer-facing workflows
+# (`baton plan`, `baton doctor`, `baton execute`, the PMO UI). Packaging
+# (wheel install) and the PMO UI build/test are split into their own jobs
+# so a slow or environment-specific failure there doesn't mask a fast
+# Python-suite regression, and so each job's logs stay legible.
 on:
   push:
     branches: ["master", "claude/**"]
@@ -15,8 +22,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bead-suite:
-    name: Bead suite (bd backend)
+  test-suite:
+    name: Python test suite (bd backend)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -51,22 +58,64 @@ jobs:
       - name: Collection smoke (catches import/collection breakage repo-wide)
         run: python -m pytest --co -q
 
-      - name: Bead suite (exercises the bd backend end-to-end)
+      - name: Full test suite (exercises the bd backend end-to-end)
         env:
           BATON_BD_BACKEND: bd
+        # No path selection needed: pyproject.toml's `addopts` already
+        # excludes the `packaging` marker (see the packaging-smoke job
+        # below, which builds/installs a wheel and is too slow to run as
+        # part of every Python-suite invocation).
+        run: python -m pytest -p no:cacheprovider -q
+
+  packaging-smoke:
+    name: Packaging smoke (wheel build + install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Sync bundled agents
+        run: bash scripts/sync_bundled_agents.sh
+
+      - name: Install agent-baton (+ test extras) and the `build` frontend
         run: |
-          python -m pytest -p no:cacheprovider -q \
-            tests/test_bead_cli.py \
-            tests/test_bead_cmd_cli.py \
-            tests/test_bead_tiers234.py \
-            tests/test_executable_beads.py \
-            tests/test_adr13b_wp2.py \
-            tests/test_bd_backend.py \
-            tests/test_bead_signal_wiring.py \
-            tests/test_synthesize_beads.py \
-            tests/test_learning_regressions.py \
-            tests/test_soul_verify_revocation_through_callers.py \
-            tests/test_team_board.py \
-            tests/test_api_pmo_beads.py \
-            tests/storage/ \
-            tests/static/test_no_direct_bead_store_construction.py
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,pmo]" build
+
+      - name: Build a wheel, install it into a fresh venv, run the CLI
+        # tests/packaging/test_wheel_install.py does the build + fresh-venv
+        # install + `baton --help` / `baton doctor --json` run itself; this
+        # is the one place in CI that proves a real `pip install
+        # agent-baton` (no source checkout, no editable install) works,
+        # including that bundled resources (_bundled_agents/*.md, etc.) are
+        # real importable package data.
+        run: python -m pytest -q -m packaging tests/packaging/
+
+  pmo-ui:
+    name: PMO UI build + unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pmo-ui
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: pmo-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (tsc --noEmit && vite build)
+        run: npm run build
+
+      - name: Unit tests (vitest run)
+        run: npm run test:run

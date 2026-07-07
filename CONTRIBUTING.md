@@ -92,6 +92,34 @@ pytest tests/test_engine.py  # Run a specific test file
 pytest -x --tb=short      # Stop on first failure, short traceback
 ```
 
+`pytest` (no arguments) excludes the slow packaging smoke test
+(`tests/packaging/`, marked `packaging`) via `addopts` in `pyproject.toml`.
+Run it explicitly when touching packaging (`pyproject.toml`, bundled
+resources, entry points):
+
+```bash
+pip install build
+pytest -q -m packaging tests/packaging/
+```
+
+### `make` targets
+
+The `Makefile` wraps the common local checks (each auto-installs into a
+`.venv/` on first use):
+
+```bash
+make test            # pytest tests/ -q
+make test-packaging  # wheel build + fresh-venv install smoke (see above)
+make lint            # ruff, if installed
+make typecheck        # mypy, if installed
+make doctor           # baton doctor
+make ci-local         # lint + typecheck + test + doctor
+make validate         # baton validate agents/
+```
+
+CI (`.github/workflows/tests.yml`) mirrors this split: the full pytest
+suite, packaging smoke, and the PMO UI build/tests run as separate jobs.
+
 ## Reporting Issues
 
 Open an issue on GitHub with:

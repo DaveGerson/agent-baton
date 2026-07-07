@@ -96,3 +96,12 @@ agent_baton = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Packaging smoke tests (tests/packaging/) build a real wheel and install it
+# into a fresh venv -- slow, and requires the optional `build` package.
+# Excluded from the default run; CI's packaging-smoke job selects them
+# explicitly with `-m packaging`. Run locally with:
+#   pip install build && python -m pytest -q -m packaging tests/packaging/
+addopts = "-m \"not packaging\""
+markers = [
+    "packaging: builds a wheel + fresh venv install (slow; excluded by default, see addopts)",
+]

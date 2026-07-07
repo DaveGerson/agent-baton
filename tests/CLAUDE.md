@@ -28,6 +28,7 @@ steps, only run the specific tests that exercise the file you're editing.
 | `api/` | FastAPI integration tests (route-level) |
 | `cli/` | Click command-level tests |
 | `integration/` | End-to-end flows that span multiple subsystems |
+| `packaging/` | Wheel build + fresh-venv install smoke (`packaging` marker; see below) |
 | Top-level `test_*.py` | Older tests — keep adding new tests under the matching subdirectory instead |
 
 ## Conventions
@@ -45,4 +46,20 @@ pytest tests/govern -k classifier             # one area
 pytest -x                                     # stop at first failure
 ```
 
-The full suite is gated to maintainers + CI.
+The full suite is gated to maintainers + CI. CI (`.github/workflows/tests.yml`)
+runs the full suite (not just a hand-picked file list) so a regression
+anywhere in the developer-facing workflow gets caught — see bd-rm-ux-p2.
+
+`tests/packaging/` builds a real wheel and installs it into a fresh venv
+(no source checkout). It's slow and needs the optional `build` package, so
+it's tagged with the `packaging` pytest marker and excluded from the
+default run via `addopts` in `pyproject.toml`. Run it explicitly:
+
+```bash
+pip install build
+pytest -q -m packaging tests/packaging/
+```
+
+CI runs it in its own `packaging-smoke` job, separate from the main
+Python suite, so a slow/environment-specific packaging failure doesn't
+mask a fast unit-test regression.
