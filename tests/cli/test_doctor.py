@@ -263,6 +263,27 @@ class TestCheckBd:
         assert check.status == "error"
         assert "does-not-exist" in check.message
 
+    def test_baton_bd_bin_pointing_at_a_directory_is_an_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """F8: BATON_BD_BIN resolving to an existing directory (rather than
+        a file) must fail, not silently pass. The prior check used bare
+        Path.exists(), which is also True for directories.
+        """
+        from agent_baton.cli.commands import diagnostics_cmd
+
+        bd_dir = tmp_path / "bd"
+        bd_dir.mkdir()
+        monkeypatch.setenv("PATH", "")
+        monkeypatch.setenv("BATON_BD_BIN", str(bd_dir))
+
+        check = diagnostics_cmd._check_bd()
+
+        assert check.status == "error"
+        assert check.details["path"] is None
+        assert repr(str(bd_dir)) in check.message
+        assert "directory" in check.message.lower()
+
 
 def test_doctor_handler_exits_nonzero_after_printing_error_payload(
     monkeypatch: pytest.MonkeyPatch,

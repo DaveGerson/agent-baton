@@ -470,12 +470,36 @@ def _check_bd() -> DoctorCheck:
     Honors ``BATON_BD_BIN`` (same override the runtime uses via
     :class:`agent_baton.core.engine.bd_client.BdClient`) so an operator who
     has pointed baton at a non-PATH binary is not falsely flagged.
+
+    The resolved path must be an existing FILE. ``Path.exists()`` alone
+    (the prior check) also returns ``True`` for a directory, so a
+    ``BATON_BD_BIN`` accidentally pointed at a directory (e.g.
+    ``.../bd/`` instead of ``.../bd/bd``) used to pass as "ok" (F8); it
+    now fails with a message that says so specifically, rather than the
+    generic "not found".
     """
     configured = os.environ.get("BATON_BD_BIN", "").strip()
     executable = configured or "bd"
     found = shutil.which(executable)
-    if not found and Path(executable).exists():
-        found = str(Path(executable))
+    if not found:
+        candidate = Path(executable)
+        if candidate.is_file():
+            found = str(candidate)
+        elif candidate.exists():
+            # Exists but is not a file (directory, socket, ...) -- see the
+            # docstring note on F8; a more specific, more actionable
+            # failure than "not found at all".
+            return DoctorCheck(
+                id="bd",
+                label="bd availability",
+                status="error",
+                message=(
+                    f"BATON_BD_BIN={executable!r} exists but is not a file "
+                    "(looks like a directory). Point it at the actual bd "
+                    "binary, not its containing directory."
+                ),
+                details={"executable": executable, "path": None},
+            )
 
     if not found:
         return DoctorCheck(

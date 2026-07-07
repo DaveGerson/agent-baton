@@ -209,6 +209,45 @@ class TestBeadsList:
         assert "bd" in out.lower()
         assert "baton doctor" in out
 
+    def test_list_other_construction_failure_reports_accurately_not_bd_unavailable(
+        self,
+    ) -> None:
+        """F7: a non-BdNotAvailable construction failure (e.g. a permission
+        error creating .claude/team-context) must be reported accurately --
+        not misdiagnosed as "bd is unavailable". Before the fix, both
+        _get_bead_store and _get_or_create_bead_store caught a bare
+        Exception and returned None indistinguishably from BdNotAvailable,
+        so every caller printed the bd-install hint regardless of cause.
+        """
+        def _raise_permission_error(*_a, **_kw):
+            raise PermissionError("Access is denied: '.claude/team-context'")
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        bead_cmd.register(sub)
+        args = parser.parse_args(["beads", "list"])
+
+        captured = io.StringIO()
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = captured
+        sys.stderr = captured
+        try:
+            with patch(
+                "agent_baton.core.engine.bead_backend.make_bead_store",
+                side_effect=_raise_permission_error,
+            ):
+                with pytest.raises(SystemExit) as excinfo:
+                    bead_cmd.handler(args)
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+        assert excinfo.value.code != 0
+        out = captured.getvalue()
+        assert "failed to initialize bead store" in out
+        assert "Access is denied" in out
+        # Must NOT be misreported as the bd-unavailable installation hint.
+        assert "npm install -g @beads/bd" not in out
+
     def test_list_shows_bead_rows(self, populated_store) -> None:
         code, out = _run_handler(populated_store, ["list"])
         assert code == 0

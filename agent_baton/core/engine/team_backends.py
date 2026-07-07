@@ -522,10 +522,31 @@ class ClaudeTeamsBackend:
 
 _PATH_TOKEN_RE = re.compile(
     r"(?<![\w./-])"
-    r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+"   # has a slash: dir/file.ext
-    r"|[A-Za-z0-9_\-]+\.[A-Za-z]{1,5})"           # or a bare file.ext
+    r"([A-Za-z0-9_.\-]+(?:[/\\][A-Za-z0-9_.\-]+)+"   # has a separator: dir/file.ext
+    r"|[A-Za-z0-9_\-]+\.[A-Za-z]{1,10})"              # or a bare file.ext
     r"(?![\w])"
 )
+
+# Bare `word.ext` tokens (no path separator) only count as a path when the
+# text after the final "." is one of these -- this is what keeps prose like
+# "e.g." from parsing as a file named "e" with an extension of "g". Not
+# exhaustive; extend with evidence, not vibes.
+_PATH_EXTENSIONS = frozenset({
+    "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "json", "jsonc",
+    "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "md", "mdx", "rst",
+    "txt", "sh", "bash", "zsh", "ps1", "psm1", "bat", "cmd", "html", "htm",
+    "css", "scss", "sass", "less", "sql", "go", "rs", "rb", "java", "kt",
+    "kts", "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "cs", "php", "xml",
+    "csv", "lock", "gradle", "proto", "graphql", "vue", "svelte", "swift",
+    "scala", "log",
+})
+
+# English abbreviations that parse as bare `word.ext` under the regex above
+# (e.g. "e.g" looks like a file named "e" with extension "g"). Rejected
+# outright, case-insensitively, even if a whitelisted extension happened to
+# collide. This is the direct fix for the "e.g."/"i.e." false-positive
+# overlap-warning bug (F4).
+_PROSE_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "aka", "a.k.a"})
 
 
 def extract_intended_scope(text: str) -> list[str]:
@@ -535,13 +556,38 @@ def extract_intended_scope(text: str) -> list[str]:
     in *text* (trailing punctuation stripped).  Empty when no path-like
     token is present — treat that as "scope not stated", not "empty
     scope".
+
+    A candidate token only counts as a path if it contains a path
+    separator (``/`` or ``\\``), OR its text after the final ``.`` is a
+    whitelisted code/config/doc extension (:data:`_PATH_EXTENSIONS`) --
+    and, either way, it is not a known English abbreviation
+    (:data:`_PROSE_ABBREVIATIONS`, case-insensitive).
+
+    This is a heuristic, not a parser, with known limits:
+
+    - Only "e.g.", "i.e.", "etc.", and a few similar abbreviations are
+      blacklisted. Other dotted prose is not covered.
+    - Dotted product/technology names that happen to end in a whitelisted
+      extension (e.g. "Node.js" ends in "js") are NOT filtered and can
+      still produce a false-positive overlap warning. Path separators are
+      a much stronger signal than a trailing dot, so prefer writing an
+      actual path (``src/node.js``) over a bare product name when task
+      descriptions need to disambiguate.
     """
     if not text:
         return []
     found: set[str] = set()
     for m in _PATH_TOKEN_RE.finditer(text):
         token = m.group(1).strip().rstrip(".,;:)")
-        if token:
+        if not token:
+            continue
+        if token.lower() in _PROSE_ABBREVIATIONS:
+            continue
+        if "/" in token or "\\" in token:
+            found.add(token)
+            continue
+        _, _, ext = token.rpartition(".")
+        if ext.lower() in _PATH_EXTENSIONS:
             found.add(token)
     return sorted(found)
 
