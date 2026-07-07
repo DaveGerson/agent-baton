@@ -19,6 +19,7 @@
 /// <reference types="node" />
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export type TestStatus = 'pass' | 'fail' | 'skip';
 
@@ -52,8 +53,10 @@ export interface AuditSummary {
 
 // ---------------------------------------------------------------------------
 
+// fileURLToPath (not URL.pathname): on Windows, pathname yields "/C:/…",
+// which path.resolve mangles into "C:\C:\…".
 const REPORT_DIR = path.resolve(
-  new URL('..', import.meta.url).pathname,
+  fileURLToPath(new URL('..', import.meta.url)),
   'reports',
 );
 

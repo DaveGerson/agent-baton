@@ -16,9 +16,12 @@
 import type { Page, Locator } from '@playwright/test';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
+// fileURLToPath (not URL.pathname): on Windows, pathname yields "/C:/…",
+// which path.resolve mangles into "C:\C:\…".
 const SCREENSHOT_DIR = path.resolve(
-  new URL('..', import.meta.url).pathname,
+  fileURLToPath(new URL('..', import.meta.url)),
   'screenshots',
 );
 
