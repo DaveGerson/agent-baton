@@ -264,27 +264,61 @@ class TestSseWireFormat:
 # ===========================================================================
 
 
+def _iter_api_routes(app: FastAPI):
+    """Recursively yield (full_path, route) for every concrete APIRoute.
+
+    FastAPI's ``include_router()`` has, across versions, represented
+    included routers in ``app.routes`` in two different ways:
+
+    * Classic/eager: each child route is flattened directly into
+      ``app.routes`` with its full (prefixed) ``.path`` already resolved.
+    * Newer/lazy (seen with fastapi>=0.139 in this environment): each
+      ``include_router()`` call instead appends a single wrapper object
+      (``_IncludedRouter``) exposing ``original_router`` (the un-prefixed
+      ``APIRouter``) and ``include_context.prefix``; child routes must be
+      walked recursively and the prefix applied manually.
+
+    Walking both shapes here means route-registration tests assert on the
+    actual Starlette/FastAPI routing table (stronger evidence than the
+    OpenAPI schema alone) without being coupled to either representation.
+    """
+    from fastapi.routing import APIRoute
+
+    def _walk(routes, prefix: str):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield prefix + route.path, route
+                continue
+            original_router = getattr(route, "original_router", None)
+            if original_router is not None:
+                include_context = getattr(route, "include_context", None)
+                sub_prefix = getattr(include_context, "prefix", "") or ""
+                yield from _walk(original_router.routes, prefix + sub_prefix)
+
+    yield from _walk(app.routes, "")
+
+
 class TestRealAppSseRouteRegistration:
     """Verifies that the SSE route is wired into the production app."""
 
     def test_events_route_is_registered(self, real_app) -> None:
         """The route /api/v1/events/{task_id} must appear in the app's routes."""
-        paths = [
-            getattr(route, "path", "") for route in real_app.routes
-        ]
+        paths = [full_path for full_path, _route in _iter_api_routes(real_app)]
         assert any("/api/v1/events" in p for p in paths), (
             f"Expected /api/v1/events in routes. Found: {paths}"
         )
 
     def test_events_route_accepts_get(self, real_app) -> None:
         """The route must accept GET requests (SSE is GET-based)."""
-        from fastapi.routing import APIRoute
-        for route in real_app.routes:
-            if isinstance(route, APIRoute) and "/api/v1/events" in route.path:
+        for full_path, route in _iter_api_routes(real_app):
+            if "/api/v1/events" in full_path:
                 assert "GET" in route.methods
                 break
         else:
-            pytest.skip("Route not found (already covered by test_events_route_is_registered)")
+            pytest.fail(
+                "events route not found via _iter_api_routes "
+                "(test_events_route_is_registered should already have caught this)"
+            )
 
     def test_openapi_schema_includes_events_endpoint(self, real_app) -> None:
         """The OpenAPI schema must expose the events endpoint."""

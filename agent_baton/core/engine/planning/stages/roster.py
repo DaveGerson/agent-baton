@@ -25,6 +25,7 @@ from agent_baton.core.engine.planning.rules.default_agents import (
     MAX_AGENTS_BY_COMPLEXITY,
     MIN_PATTERN_CONFIDENCE,
 )
+from agent_baton.core.engine.planning.rules.phase_templates import SUBTASK_PHASE_NAMES
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.roster_logic import (
     apply_retro_feedback,
@@ -36,6 +37,7 @@ from agent_baton.core.engine.planning.utils.text_parsers import (
     parse_concerns,
     parse_subtasks,
 )
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS
 
 if TYPE_CHECKING:
     from agent_baton.core.engine.knowledge_resolver import StackProfile
@@ -48,6 +50,14 @@ class RosterStage:
     """Stage 2: settle on the agent roster for this plan."""
 
     name = "roster"
+
+    # Same derivation ValidationStage._REVIEWER_BASES / RiskStage._REVIEWER_BASES
+    # / DecompositionStage._REVIEWER_BASES use (validation.py:143, risk.py:48,
+    # decomposition.py:50) — keeps "is a reviewer-class agent" agreement across
+    # the roster-filtering, safety-injection, and gate stages. ``auditor`` is
+    # excluded: it is governed by the separate Audit phase/gate, not the
+    # Review phase this stage reasons about.
+    _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
 
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Early-return when both agents AND phases were explicitly supplied.
@@ -222,6 +232,36 @@ class RosterStage:
                         "task_type": st_type,
                         "agents": st_agents,
                     })
+
+                # SUBTASK_PHASE_NAMES (rules/phase_templates.py) never maps a
+                # subtask type to "Review" — a compound-decomposed plan has
+                # no terminal Review phase by construction. Whenever a
+                # subtask's type-default roster (or an --agents override
+                # applied uniformly across subtasks, bd-701e) contains a
+                # reviewer-class agent, that agent would be stranded with no
+                # phase to land in — ValidationStage's review_missing gate
+                # correctly rejects the plan once it can't find Review
+                # coverage. Mirror DecompositionStage's identical guard for
+                # its complexity-override path (decomposition.py ~156-179):
+                # strip reviewer-class agents (except auditor, governed by
+                # the separate Audit phase) from each subtask's roster
+                # before phases are built, rather than leaving them to be
+                # silently dropped from consolidated team steps downstream
+                # while still counting toward the gate. Never strip a
+                # subtask down to zero agents.
+                if not any(
+                    SUBTASK_PHASE_NAMES.get(st["task_type"], "Implement").lower()
+                    == "review"
+                    for st in _subtask_data
+                ):
+                    for st in _subtask_data:
+                        _filtered = [
+                            a for a in st["agents"]
+                            if a.split("--")[0] not in self._REVIEWER_BASES
+                        ]
+                        if _filtered:
+                            st["agents"] = _filtered
+
                 union_agents: list[str] = []
                 for st in _subtask_data:
                     for a in st["agents"]:

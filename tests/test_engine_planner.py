@@ -511,6 +511,23 @@ class TestCreatePlanAgentOverride:
 # ---------------------------------------------------------------------------
 
 class TestCreatePlanPhasesOverride:
+    """NOTE: these tests pass an explicit ``agents=`` list alongside
+    ``phases=``. ClassificationStage only takes ``resolved_agents`` from the
+    caller-supplied phases/agents when ``agents`` is explicit
+    (agent_baton/core/engine/planning/stages/classification.py
+    ``_classify_task``, the "explicit-override path"); when ``phases=`` is
+    given without ``agents=`` it falls back to ``DEFAULT_AGENTS[inferred_type]``
+    for scoring/review purposes, which for these summaries' inferred
+    "new-feature" type includes ``code-reviewer`` — a reviewer-class agent.
+    ValidationStage's hard gate (review_missing) then requires a terminal
+    Review phase for any plan whose resolved-agent set is reviewer-routed,
+    which these minimal 1-2-phase fixtures deliberately don't have. Pinning
+    ``agents=`` to exactly the roster under test keeps these tests scoped to
+    what they're actually verifying (phase/gate construction) instead of
+    tripping the reviewer-coverage gate via an unrelated default-roster
+    fallback.
+    """
+
     def test_explicit_phases_used(self, planner: IntelligentPlanner):
         explicit = [
             {"name": "Alpha", "agents": ["architect"]},
@@ -519,6 +536,7 @@ class TestCreatePlanPhasesOverride:
         plan = planner.create_plan(
             "Custom workflow task",
             phases=explicit,
+            agents=["architect", "backend-engineer"],
         )
         assert len(plan.phases) == 2
         assert plan.phases[0].name == "Alpha"
@@ -526,7 +544,9 @@ class TestCreatePlanPhasesOverride:
 
     def test_explicit_phases_contain_correct_agents(self, planner: IntelligentPlanner):
         explicit = [{"name": "Work", "agents": ["test-engineer"]}]
-        plan = planner.create_plan("Custom", phases=explicit)
+        plan = planner.create_plan(
+            "Custom", phases=explicit, agents=["test-engineer"]
+        )
         assert plan.phases[0].steps[0].agent_name == "test-engineer"
 
     def test_explicit_phases_with_gate(self, planner: IntelligentPlanner):
@@ -537,7 +557,9 @@ class TestCreatePlanPhasesOverride:
                 "gate": {"gate_type": "lint", "command": "ruff check ."},
             }
         ]
-        plan = planner.create_plan("Task", phases=explicit)
+        plan = planner.create_plan(
+            "Task", phases=explicit, agents=["backend-engineer"]
+        )
         gate = plan.phases[0].gate
         assert gate is not None
         assert gate.gate_type == "lint"
@@ -886,7 +908,25 @@ class TestQAGates:
 # ---------------------------------------------------------------------------
 
 class TestRiskAssessmentStructural:
-    """Tests for structural risk signals beyond keyword matching."""
+    """Tests for structural risk signals beyond keyword matching.
+
+    These call ``planner._assess_risk(summary, agents)`` — the pure
+    ``assess_risk()`` signal computation (agent_baton/core/engine/planning/
+    utils/risk_and_policy.py) — directly, the same way the authoritative
+    ``tests/engine/planning/test_planner_smoke.py::TestRiskAssessment*``
+    suite does, rather than routing through ``create_plan()``.  Several
+    fixtures here use a single-agent roster where that one agent IS a
+    reviewer-class agent (``auditor``/``security-reviewer``/``code-reviewer``)
+    specifically to probe the "reviewer-class agent present" risk signal.
+    Post-hard-gate, ``create_plan()`` for that exact roster shape now
+    correctly raises ``PlanQualityError`` (``agent_phase_mismatch`` — a lone
+    reviewer-class agent with no Review/Audit phase lands in an
+    Implement/Draft phase, which ValidationStage rightly blocks). That's a
+    correct, intentional behavior of the full pipeline, not a bug in
+    ``assess_risk()`` — so these tests exercise the signal function in
+    isolation instead of asserting on a plan the pipeline is supposed to
+    reject.
+    """
 
     @pytest.mark.parametrize("summary,agents", [
         # 6 agents → elevates
@@ -907,15 +947,15 @@ class TestRiskAssessmentStructural:
         ("Review the production code", ["auditor"]),
     ])
     def test_risk_elevated(self, planner: IntelligentPlanner, summary: str, agents: list[str]):
-        plan = planner.create_plan(summary, agents=agents)
-        assert plan.risk_level in ("MEDIUM", "HIGH")
+        risk_level = planner._assess_risk(summary, agents)
+        assert risk_level in ("MEDIUM", "HIGH")
 
     @pytest.mark.parametrize("summary,agents", [
         ("Add a helper utility function", ["backend-engineer"]),
     ])
     def test_risk_stays_low(self, planner: IntelligentPlanner, summary: str, agents: list[str]):
-        plan = planner.create_plan(summary, agents=agents)
-        assert plan.risk_level == "LOW"
+        risk_level = planner._assess_risk(summary, agents)
+        assert risk_level == "LOW"
 
     @pytest.mark.parametrize("summary,agents", [
         ("Review the production code for style issues", ["code-reviewer"]),
@@ -923,17 +963,17 @@ class TestRiskAssessmentStructural:
     ])
     def test_readonly_production_dampened_to_medium(self, planner: IntelligentPlanner, summary: str, agents: list[str]):
         """Read-only tasks about production are dampened one level: HIGH → MEDIUM."""
-        plan = planner.create_plan(summary, agents=agents)
-        assert plan.risk_level == "MEDIUM"
+        risk_level = planner._assess_risk(summary, agents)
+        assert risk_level == "MEDIUM"
 
     def test_five_agents_not_elevated(self, planner: IntelligentPlanner):
         # Threshold is >5 — exactly 5 should not elevate
-        plan = planner.create_plan(
+        risk_level = planner._assess_risk(
             "Add a simple feature",
-            agents=["a", "b", "c", "d", "e"],  # 5 agents
+            ["a", "b", "c", "d", "e"],  # 5 agents
         )
         # 5 agents alone should not push above LOW (no other signals)
-        assert plan.risk_level == "LOW"
+        assert risk_level == "LOW"
 
     def test_direct_assess_risk_method(self, planner: IntelligentPlanner):
         """_assess_risk is callable directly; returns a string risk level."""
