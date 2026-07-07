@@ -23,7 +23,7 @@ Commands are organized into functional groups:
 | **Improve** | Scoring, learning, patterns, budgets | `scores`, `learn`, `patterns`, `budget`, `changelog`, `anomalies` |
 | **Knowledge** | Knowledge pack validation, search, briefing, lifecycle, effectiveness | `knowledge doctor`, `knowledge search`, `knowledge resolve`, `knowledge brief`, `knowledge harvest`, `knowledge stale`, `knowledge deprecate`, `knowledge retire`, `knowledge sweep`, `knowledge usage`, `knowledge effectiveness`, `knowledge ranking`, `knowledge ab` |
 | **Distribute** | Packaging, publishing, installation | `package`, `publish`, `pull`, `install`, `transfer` |
-| **Agents** | Agent discovery, routing, events | `agents`, `route`, `events`, `incident` |
+| **Agents** | Agent discovery, validation, routing, events | `agents`, `agents doctor`, `route`, `events`, `incident` |
 | **PMO** | Portfolio management overlay | `pmo serve`, `pmo status`, `pmo add`, `pmo health` |
 | **Sync** | Federated data sync | `sync`, `sync status` |
 | **Query** | Project-local structured queries | `query` |
@@ -2329,6 +2329,61 @@ governance:
 
 19 agents loaded.
 ```
+
+---
+
+### `baton agents doctor`
+
+Validate every agent definition `AgentRegistry` would load (bundled,
+`~/.claude/agents`, `.claude/agents`) against the Phase 1 generated-agent
+contract (see [references/agent-authoring.md](../references/agent-authoring.md))
+before Baton dispatches them. Read-only -- no file is ever mutated.
+
+Checks performed:
+
+| # | Check | Severity |
+|---|-------|----------|
+| 1 | Required frontmatter fields present: `name`, `description`, `model`, `permissionMode`, `tools` | error |
+| 2 | Recognized `model`/`permissionMode` values, `tools` parses as a list, description length bounds (40-4000 chars), `## Output Format` section present, body size under ~15K chars | error (model/permissionMode/tools shape) or warning (description bounds, output-format section, body size) |
+| 3 | Every `knowledge_packs` entry resolves to a pack loaded in the knowledge registry | error |
+| 4 | Local file paths referenced in "Before Starting" exist relative to the project | warning |
+| 5 | Safety: implementer agents with broad tools (`*` or `Bash`+`Write`+`Edit`) and no stated justification in the body; reviewer/auditor-type agents with `Write` or `Edit`; very large baked-in knowledge bodies | warning |
+
+```
+baton agents doctor [--json] [--strict]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Emit the doctor report as JSON |
+| `--strict` | false | Exit non-zero when any warning is found (in addition to errors) |
+
+Exit code: `0` when clean or only warnings were found (non-`--strict`);
+non-zero when any error was found, or any warning under `--strict`.
+
+**Output (`--json`):**
+
+```json
+{
+  "ok": true,
+  "summary": {"agents": 30, "errors": 0, "warnings": 3},
+  "issues": [
+    {
+      "severity": "warning",
+      "code": "broad-tools-no-justification",
+      "message": "Agent 'my-agent' has broad tool access ...",
+      "agent": "my-agent",
+      "field": "tools",
+      "path": "/path/to/my-agent.md"
+    }
+  ]
+}
+```
+
+Many bundled agents predate the Phase 1 contract and will surface `warning`
+findings (missing `## Output Format` section, unjustified broad tools) --
+this is expected and non-blocking by default; fix genuinely broken agents
+(missing required fields) but don't chase every warning on legacy agents.
 
 ---
 

@@ -30,6 +30,13 @@ from agent_baton.utils.frontmatter import parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
+# Markdown files that live alongside agent definitions but are not agent
+# definitions themselves (per-directory instructions, human-facing docs).
+# Excluded from every directory/bundle scan so they never surface as a
+# bogus pseudo-agent (mirrors AgentValidator.validate_directory's own
+# exclusion list).
+_NON_AGENT_FILES = frozenset({"CLAUDE.md", "README.md"})
+
 
 class AgentRegistry:
     """Load, index, and query agent definitions from markdown files.
@@ -85,6 +92,8 @@ class AgentRegistry:
 
         count = 0
         for path in sorted(directory.glob("*.md")):
+            if path.name in _NON_AGENT_FILES:
+                continue
             agent = self._parse_agent_file(path)
             if agent is None:
                 continue
@@ -138,7 +147,7 @@ class AgentRegistry:
                     count = 0
                     for entry in pkg.iterdir():  # type: ignore[union-attr]
                         name = getattr(entry, "name", "")
-                        if not name.endswith(".md"):
+                        if not name.endswith(".md") or name in _NON_AGENT_FILES:
                             continue
                         try:
                             content = entry.read_text(encoding="utf-8")  # type: ignore[union-attr]
@@ -167,6 +176,42 @@ class AgentRegistry:
         """Return the canonical project-level agents directory path."""
         return (Path(".claude") / "agents").resolve()
 
+    @staticmethod
+    def bundled_agents_dir() -> Path | None:
+        """Return the real filesystem directory backing bundled agents, if any.
+
+        Mirrors the directory-resolution fallback used internally by
+        :meth:`_load_bundled_agents`, exposed read-only for callers (e.g.
+        ``baton agents doctor``) that need to read raw agent file content
+        rather than parsed :class:`AgentDefinition` objects — bundled
+        agents loaded via the ``importlib.resources`` traversal branch get
+        a synthetic, non-resolvable ``source_path`` (just the filename), so
+        callers that need the real path must resolve it themselves.
+
+        Returns ``None`` if bundled resources are not available as a real
+        directory on disk (e.g. packaged inside a zipped wheel).
+        """
+        try:
+            import importlib.resources as pkg_resources
+
+            try:
+                pkg = pkg_resources.files("agent_baton").joinpath("_bundled_agents")
+                if pkg.is_dir():  # type: ignore[union-attr]
+                    candidate = Path(str(pkg))
+                    if candidate.is_dir():
+                        return candidate
+            except (AttributeError, TypeError):
+                pass
+
+            import agent_baton as _pkg
+
+            bundled_dir = Path(_pkg.__file__).parent / "_bundled_agents"
+            if bundled_dir.is_dir():
+                return bundled_dir
+        except Exception as exc:
+            logger.debug("Bundled agents dir resolution skipped (non-fatal): %s", exc)
+        return None
+
     def has_project_agents(self) -> bool:
         """Return True if the project has any local agent definition files.
 
@@ -177,7 +222,9 @@ class AgentRegistry:
         agents_dir = self.project_agents_dir()
         if not agents_dir.is_dir():
             return False
-        return any(agents_dir.glob("*.md"))
+        return any(
+            path.name not in _NON_AGENT_FILES for path in agents_dir.glob("*.md")
+        )
 
     def get(self, name: str) -> AgentDefinition | None:
         """Look up an agent by exact name."""

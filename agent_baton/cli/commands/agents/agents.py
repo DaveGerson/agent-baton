@@ -1,7 +1,10 @@
 """``baton agents`` -- list available agents.
 
 Loads agent definitions from default paths and displays them grouped
-by category with model tags and flavor indicators.
+by category with model tags and flavor indicators. This is the default
+(no-subcommand) behavior of the shared ``baton agents`` parser; see
+``agents/__init__.py`` for the cooperative-parser convention and
+``doctor_cmd.py`` for ``baton agents doctor``.
 
 Delegates to:
     agent_baton.core.orchestration.registry.AgentRegistry
@@ -10,15 +13,25 @@ from __future__ import annotations
 
 import argparse
 
+from agent_baton.cli.commands.agents import ensure_parent_parser, register_handler
 from agent_baton.core.orchestration.registry import AgentRegistry
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    p = subparsers.add_parser("agents", help="List available agents")
-    return p
+    ensure_parent_parser(subparsers)
+    register_handler(None, _run_list)
+    return subparsers.choices["agents"]
 
 
 def handler(args: argparse.Namespace) -> None:
+    """Auto-discovery entry point; delegate to the parent dispatcher."""
+    dispatch = getattr(args, "_dispatch", None)
+    if dispatch is None:
+        raise SystemExit("baton agents: dispatcher missing")
+    dispatch(args)
+
+
+def _run_list(args: argparse.Namespace) -> None:
     registry = AgentRegistry()
     count = registry.load_default_paths()
 

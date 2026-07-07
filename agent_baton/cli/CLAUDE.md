@@ -29,6 +29,8 @@ Subpackages (`agents/`, `distribute/`, `execution/`, `finops/`, `govern/`, `impr
 - All output that an agent will parse must go through `formatting.py` — never `print()` directly.
 - Errors raise `BatonError` (or subclass) from `errors.py`; never bare `sys.exit(1)`.
 - Long operations stream progress through the visualize package, not ad-hoc prints.
+- **Module basenames must be unique across all of `commands/**`, not just within one subpackage.** `main.discover_commands()` keys its module map by the bare filename (e.g. `doctor_cmd`), not the qualified package path — a second `doctor_cmd.py` anywhere else under `commands/` silently shadows the first in that dict (whichever subpackage's `pkgutil.iter_modules()` returns last wins), so its `register()`/`handler()` are never actually wired into `main.py`'s dispatch table. `knowledge/doctor_cmd.py` already exists; that's why the agents-group doctor command lives in `commands/agents/agent_doctor_cmd.py`, not `commands/agents/doctor_cmd.py`. Grep `find agent_baton/cli/commands -name "*.py" | xargs -n1 basename | sort | uniq -c` before naming a new file.
+- Multiple modules contributing subcommands to one shared parser (e.g. `agents doctor`, `knowledge doctor`, `release profile`) must cooperate through a shared-parser helper (see `commands/knowledge/__init__.py` or `commands/agents/__init__.py`) rather than each calling `subparsers.add_parser(<same name>)` directly — repeated calls don't raise, they just silently clobber each other's parser object.
 
 ## Adding a command
 
