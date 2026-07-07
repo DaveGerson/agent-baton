@@ -15,6 +15,19 @@ doctor_cmd.py): a flat issue list with ``severity``/``code``/``message``,
 ``--json``, and ``--strict``. Report shape mirrors ``baton doctor``
 (agent_baton/cli/commands/diagnostics_cmd.py): a summary line + per-item
 output.
+
+Required-field severity is scoped by authorship. ``name``/``description``
+are required for every agent -- error if missing, regardless of origin.
+``model``/``permissionMode``/``tools`` are only mandated by the Phase 1
+generated-agent contract that governs ``talent-builder`` output (frontmatter
+``created_by: talent-builder``): missing there is an error
+(``missing-required-field``). For hand-authored agents (no ``created_by``,
+or any other value) missing those three is a warning
+(``missing-recommended-field``) -- omitting them is a meaningful, valid
+choice (e.g. no ``tools`` means "inherit all tools", which agents like
+``orchestrator`` rely on to spawn subagents). Lint compliance must never
+force a hand-authored agent to add a restrictive ``tools:`` list just to
+silence this doctor.
 """
 from __future__ import annotations
 
@@ -68,7 +81,18 @@ _LOCAL_PATH_RE = re.compile(
 _SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _OUTPUT_FORMAT_RE = re.compile(r"^##\s+Output Format\s*$", re.IGNORECASE | re.MULTILINE)
 
-_REQUIRED_FIELDS = ("name", "description", "model", "permissionMode", "tools")
+# name/description are required for every agent, hand-authored or generated:
+# without them the router/orchestrator has nothing to match on.
+_REQUIRED_FIELDS_ALWAYS = ("name", "description")
+# model/permissionMode/tools are only mandated by the Phase 1 generated-agent
+# contract (references/agent-authoring.md), which governs talent-builder
+# output (frontmatter `created_by: talent-builder`). For hand-authored agents,
+# omitting them is a meaningful choice -- e.g. no `tools` means "inherit all
+# tools", which is the correct default for agents like `orchestrator` that
+# must be able to spawn subagents. Flag the omission as a warning there
+# instead of an error so lint compliance can't silently revoke capability
+# (see the F2 finding this scoping was added to fix).
+_REQUIRED_FIELDS_GENERATED_ONLY = ("model", "permissionMode", "tools")
 
 
 @dataclass(frozen=True)
@@ -250,9 +274,11 @@ def _check_agent_file(
         ))
     for warn in result.warnings:
         if "'model' field should be present" in warn:
-            # Superseded below by a harder "missing-required-field" error
-            # under the Phase 1 contract -- avoid double-reporting the
-            # same root cause at two severities.
+            # Superseded below by `_check_required_fields`, which reports the
+            # same root cause at the correct severity for this agent (error
+            # for talent-builder-generated agents under the Phase 1 contract,
+            # warning for hand-authored ones) -- avoid double-reporting it
+            # here at a fixed severity.
             continue
         issues.append(DoctorIssue(
             severity="warning",
@@ -281,11 +307,21 @@ def _check_agent_file(
 # Check 1: frontmatter shape (Phase 1 generated-agent contract)
 # ---------------------------------------------------------------------------
 
+def _is_generated_agent(metadata: dict[str, Any]) -> bool:
+    """Return True when frontmatter declares this a talent-builder output.
+
+    Only generated agents (`created_by: talent-builder`) are bound by the
+    Phase 1 contract's model/permissionMode/tools requirement -- see the
+    module docstring and the comment above `_REQUIRED_FIELDS_GENERATED_ONLY`.
+    """
+    return str(metadata.get("created_by") or "").strip() == "talent-builder"
+
+
 def _check_required_fields(
     name: str, path: Path, metadata: dict[str, Any],
 ) -> list[DoctorIssue]:
     issues: list[DoctorIssue] = []
-    for required in _REQUIRED_FIELDS:
+    for required in _REQUIRED_FIELDS_ALWAYS:
         if not metadata.get(required):
             issues.append(DoctorIssue(
                 severity="error",
@@ -296,6 +332,39 @@ def _check_required_fields(
                 message=(
                     f"Agent '{name}' is missing required field '{required}' "
                     f"(see references/agent-authoring.md). Edit {path}."
+                ),
+            ))
+
+    generated = _is_generated_agent(metadata)
+    for required in _REQUIRED_FIELDS_GENERATED_ONLY:
+        if metadata.get(required):
+            continue
+        if generated:
+            issues.append(DoctorIssue(
+                severity="error",
+                code="missing-required-field",
+                agent=name,
+                field=required,
+                path=str(path),
+                message=(
+                    f"Generated agent '{name}' (created_by: talent-builder) is "
+                    f"missing required field '{required}' (see "
+                    f"references/agent-authoring.md). Edit {path}."
+                ),
+            ))
+        else:
+            issues.append(DoctorIssue(
+                severity="warning",
+                code="missing-recommended-field",
+                agent=name,
+                field=required,
+                path=str(path),
+                message=(
+                    f"Agent '{name}' omits recommended field '{required}'. "
+                    "This is only an error for talent-builder-generated "
+                    "agents; for hand-authored agents the omission can be a "
+                    "deliberate choice (e.g. no 'tools' means inherit all "
+                    f"tools). Confirm the omission is intentional. Edit {path}."
                 ),
             ))
     return issues

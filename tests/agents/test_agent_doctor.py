@@ -95,6 +95,9 @@ def test_missing_required_field_is_error_and_exits_nonzero(
     _isolate_defaults(monkeypatch, tmp_path)
     # No 'tools' or 'permissionMode' field -- violates the Phase 1
     # generated-agent contract even though AgentRegistry happily loads it.
+    # `created_by: talent-builder` marks this as a *generated* agent, which
+    # is what makes the omission an error rather than a warning (see
+    # test_hand_authored_agent_missing_tools_is_warning_not_error below).
     _write_agent(
         tmp_path / ".claude" / "agents" / "test-missing-tools-agent.md",
         {
@@ -104,6 +107,7 @@ def test_missing_required_field_is_error_and_exits_nonzero(
                 "verify the doctor's required-field contract check."
             ),
             "model": "sonnet",
+            "created_by": "talent-builder",
         },
         _CLEAN_BODY,
     )
@@ -121,6 +125,49 @@ def test_missing_required_field_is_error_and_exits_nonzero(
     }
     assert fields_flagged == {"tools", "permissionMode"}
     assert all(issue["severity"] == "error" for issue in issues if issue["code"] == "missing-required-field")
+
+
+def test_hand_authored_agent_missing_tools_is_warning_not_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    """Hand-authored agents (no `created_by`) omitting model/permissionMode/
+    tools get a warning, not an error -- omitting `tools` means "inherit all
+    tools", a meaningful and valid choice (e.g. orchestrator needs to spawn
+    subagents). Lint compliance must never force a restrictive `tools:` list
+    onto a hand-authored agent just to silence this doctor (finding F2).
+    """
+    _isolate_defaults(monkeypatch, tmp_path)
+    _write_agent(
+        tmp_path / ".claude" / "agents" / "test-hand-authored-agent.md",
+        {
+            "name": "test-hand-authored-agent",
+            "description": (
+                "Hand-authored specialist that deliberately omits model, "
+                "permissionMode, and tools, used to verify the doctor "
+                "downgrades this to a warning for non-generated agents."
+            ),
+        },
+        _CLEAN_BODY,
+    )
+
+    rc = _run_cli(["agents", "doctor", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    issues = _issues_for(payload, "test-hand-authored-agent")
+    codes = {issue["code"] for issue in issues}
+
+    assert "missing-required-field" not in codes
+    assert "missing-recommended-field" in codes
+    fields_flagged = {
+        issue["field"] for issue in issues if issue["code"] == "missing-recommended-field"
+    }
+    assert fields_flagged == {"model", "permissionMode", "tools"}
+    assert all(
+        issue["severity"] == "warning"
+        for issue in issues if issue["code"] == "missing-recommended-field"
+    )
+    # Non-blocking in default (non-strict) mode.
+    assert rc == 0
+    assert payload["ok"] is True
 
 
 def test_missing_knowledge_pack_reported_with_agent_and_field(

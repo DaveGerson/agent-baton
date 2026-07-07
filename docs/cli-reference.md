@@ -2343,7 +2343,7 @@ Checks performed:
 
 | # | Check | Severity |
 |---|-------|----------|
-| 1 | Required frontmatter fields present: `name`, `description`, `model`, `permissionMode`, `tools` | error |
+| 1 | Required frontmatter fields present: `name`, `description` (always); `model`, `permissionMode`, `tools` — required **only** for talent-builder-generated agents (frontmatter `created_by: talent-builder`), which the Phase 1 contract governs. For hand-authored agents, missing `model`/`permissionMode`/`tools` is a warning (`missing-recommended-field`), not an error — omitting `tools` is a meaningful choice (inherit all tools), e.g. `orchestrator` relies on this to spawn subagents. | error (`name`/`description`, or `model`/`permissionMode`/`tools` on generated agents) or warning (`model`/`permissionMode`/`tools` on hand-authored agents) |
 | 2 | Recognized `model`/`permissionMode` values, `tools` parses as a list, description length bounds (40-4000 chars), `## Output Format` section present, body size under ~15K chars | error (model/permissionMode/tools shape) or warning (description bounds, output-format section, body size) |
 | 3 | Every `knowledge_packs` entry resolves to a pack loaded in the knowledge registry | error |
 | 4 | Local file paths referenced in "Before Starting" exist relative to the project | warning |

@@ -7,7 +7,6 @@ description: |
 model: opus
 permissionMode: auto-edit
 color: purple
-tools: Read, Glob, Grep, Bash
 ---
 
 # Orchestrator — Adaptive Planning & Execution
