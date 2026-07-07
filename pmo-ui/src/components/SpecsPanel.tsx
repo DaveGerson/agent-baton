@@ -603,7 +603,11 @@ export function SpecsPanel({ onBack }: SpecsPanelProps) {
       if (stateFilter)    params.state = stateFilter;
       if (taskTypeFilter) params.task_type = taskTypeFilter;
       const res = await api.listSpecs(params);
-      setSpecs(res.specs);
+      // GET /api/v1/pmo/specs is owned by the spec-queue router and returns
+      // a bare SpecDraftResponse[] — not the {specs: [...]} SpecListResponse
+      // this panel was written against. Coerce defensively: an undefined
+      // deref here crashes the whole app at mount (no error boundary above).
+      setSpecs(Array.isArray(res) ? [] : res?.specs ?? []);
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : 'Failed to load specs');
     } finally {

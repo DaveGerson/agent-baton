@@ -258,6 +258,37 @@ class TestAgentAudit:
         flagged = audit_agents_for_teammate_safety(tmp_path / "nope")
         assert flagged == {}
 
+    def test_step_audit_honors_first_existing_dir_over_stale_sibling(
+        self, tmp_path: Path,
+    ) -> None:
+        """C2 regression: an authoritative clean .claude/agents must not be
+        overridden by a stale divergent repo-level agents/ copy. The step
+        audit resolves against the FIRST EXISTING directory, so a clean
+        higher-priority dir wins even when a lower-priority sibling flags.
+        """
+        team_context_root = tmp_path / ".claude" / "team-context"
+        team_context_root.mkdir(parents=True)
+
+        # Authoritative, clean .claude/agents (first candidate dir).
+        claude_agents = tmp_path / ".claude" / "agents"
+        claude_agents.mkdir()
+        (claude_agents / "backend-engineer.md").write_text(
+            "---\nname: backend-engineer\nmodel: sonnet\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        # Stale divergent repo-level agents/ copy that flags the same agent.
+        repo_agents = tmp_path / "agents"
+        repo_agents.mkdir()
+        (repo_agents / "backend-engineer.md").write_text(
+            "---\nname: backend-engineer\nmodel: sonnet\nskills: foo\n---\n",
+            encoding="utf-8",
+        )
+
+        step = _plan_with_team().phases[0].steps[0]
+        flagged = ClaudeTeamsBackend._audit_step_agents(step, team_context_root)
+        assert flagged == {}
+
 
 class TestTeamReadinessDiagnostics:
     def test_worktree_diagnostics_summarize_team_shape(self, tmp_path: Path) -> None:

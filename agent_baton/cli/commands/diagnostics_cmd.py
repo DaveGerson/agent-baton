@@ -790,12 +790,30 @@ def _check_terminology() -> DoctorCheck:
     )
 
 
+def _with_fallback_caveat(message: str, details: dict[str, Any]) -> str:
+    """Append a caveat when the plan came from an unguided fallback guess.
+
+    Only applies once a plan was actually found (``plan_path`` set) — a
+    ``fallback-first-found`` selection with no plan at all is just "no plan",
+    not a guess worth flagging.
+    """
+    if details.get("plan_selection") == "fallback-first-found" and details.get(
+        "plan_path"
+    ):
+        return (
+            f"{message} (caveat: no active task resolved; validating the "
+            "first saved plan found, not necessarily the current one)"
+        )
+    return message
+
+
 def _check_planner_validation(project_root: Path) -> DoctorCheck:
     plan_candidates = _saved_plan_candidates(project_root)
     plan_path, active_task_state = _select_saved_plan_for_validation(project_root)
     details: dict[str, Any] = {
         "active_task_id": active_task_state["active_task_id"],
         "active_task_source": active_task_state["active_task_source"],
+        "plan_selection": active_task_state["plan_selection"],
         "plan_candidates": [str(path) for path in plan_candidates],
         "plan_path": None,
         "machine_plan_importable": False,
@@ -865,7 +883,9 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             id="planner_validation",
             label="Planner validation",
             status="error",
-            message=f"Saved plan could not be parsed: {exc}",
+            message=_with_fallback_caveat(
+                f"Saved plan could not be parsed: {exc}", details
+            ),
             details=details,
         )
 
@@ -878,7 +898,9 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             id="planner_validation",
             label="Planner validation",
             status="error",
-            message="Saved plan JSON has invalid top-level shape",
+            message=_with_fallback_caveat(
+                "Saved plan JSON has invalid top-level shape", details
+            ),
             details=details,
         )
 
@@ -891,7 +913,9 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             id="planner_validation",
             label="Planner validation",
             status="error",
-            message=f"Saved plan validation could not run: {exc}",
+            message=_with_fallback_caveat(
+                f"Saved plan validation could not run: {exc}", details
+            ),
             details=details,
         )
 
@@ -912,9 +936,10 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             id="planner_validation",
             label="Planner validation",
             status="error",
-            message=(
+            message=_with_fallback_caveat(
                 f"Saved plan validation found {error_count} errors and "
-                f"{warning_count} warnings"
+                f"{warning_count} warnings",
+                details,
             ),
             details=details,
         )
@@ -923,14 +948,18 @@ def _check_planner_validation(project_root: Path) -> DoctorCheck:
             id="planner_validation",
             label="Planner validation",
             status="warning",
-            message=f"Saved plan validation found {warning_count} warnings",
+            message=_with_fallback_caveat(
+                f"Saved plan validation found {warning_count} warnings", details
+            ),
             details=details,
         )
     return DoctorCheck(
         id="planner_validation",
         label="Planner validation",
         status="ok",
-        message="Saved plan validation passed with no findings",
+        message=_with_fallback_caveat(
+            "Saved plan validation passed with no findings", details
+        ),
         details=details,
     )
 
@@ -1062,6 +1091,7 @@ def _select_saved_plan_for_validation(
         "active_task_id": active_task_id,
         "active_task_source": active_task_source,
         "active_plan_missing": False,
+        "plan_selection": "active-task" if active_task_id else "fallback-first-found",
         **active_task_details,
     }
     if active_task_id:
@@ -1097,7 +1127,13 @@ def _resolve_active_task_for_validation(
 def _read_active_task_id_from_sqlite(
     context_root: Path,
 ) -> tuple[str | None, dict[str, Any]]:
-    db_path = context_root / "baton.db"
+    # Honour BATON_DB_PATH (mirrors bead_cmd._resolve_db_path's override
+    # precedence) so doctor probes the same DB the rest of the CLI uses.
+    override = os.environ.get("BATON_DB_PATH", "").strip()
+    if override:
+        db_path = Path(override).expanduser().resolve()
+    else:
+        db_path = context_root / "baton.db"
     from agent_baton.core.storage.active_task import (
         read_active_task_id_from_db_copy,
     )

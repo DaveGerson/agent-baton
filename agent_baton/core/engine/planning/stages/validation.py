@@ -44,7 +44,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from agent_baton.core.engine.planning.draft import PlanDraft
-from agent_baton.core.engine.planning.rules.phase_roles import PHASE_BLOCKED_ROLES
+from agent_baton.core.engine.planning.rules.phase_roles import (
+    IMPLEMENT_PHASE_NAMES,
+    PHASE_BLOCKED_ROLES,
+)
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.phase_builder import (
     consolidate_team_step,
@@ -68,6 +71,26 @@ if TYPE_CHECKING:
     from agent_baton.models.execution import MachinePlan, PlanPhase
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_member_agent_names(member: object) -> list[str]:
+    """Collect ``agent_name`` from a TeamMember and its full ``sub_team`` tree.
+
+    ``TeamMember.sub_team`` (models/execution.py) is self-referential and
+    unbounded, so this recurses to arbitrary depth.  Used by both
+    ``ValidationStage._step_agent_bases`` (coverage/mismatch checks) and
+    ``_resolved_agents_from_plan`` so the two never disagree about which
+    agents a team step contains — a depth-1-only walk let depth-2+ auditors
+    trigger false ``audit_missing`` blocks and depth-2+ reviewers evade the
+    reviewer-in-implement check.
+    """
+    names: list[str] = []
+    name = str(getattr(member, "agent_name", "") or "")
+    if name:
+        names.append(name)
+    for nested in getattr(member, "sub_team", []) or []:
+        names.extend(_collect_member_agent_names(nested))
+    return names
 
 
 class PlanQualityError(RuntimeError):
@@ -111,14 +134,12 @@ class ValidationStage:
     _DEV_MODE_ENV = "BATON_DEV_MODE"
     _WARN_ONLY_ENV = "BATON_PLANNER_WARN_ONLY"
     _TRUTHY = frozenset({"1", "true", "yes", "on"})
-    _IMPLEMENT_PHASE_KEYS = frozenset({
-        "implement",
-        "implementation",
-        "fix",
-        "build",
-        "develop",
-        "development",
-    })
+    # Derived from the canonical implement-phase table so the reviewer-in-
+    # implement check stays in lockstep with routing (which folds
+    # implementation/development variants via ``_phase_key``).  Deriving here
+    # keeps the documentation archetype's ``Draft`` phase in scope instead of
+    # silently dropping it (phase_roles.IMPLEMENT_PHASE_NAMES includes "draft").
+    _IMPLEMENT_PHASE_KEYS = IMPLEMENT_PHASE_NAMES
     _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 10+11+11b — score check, budget tier, policy validation.
@@ -211,8 +232,19 @@ class ValidationStage:
                     draft.policy_violations = validate_agents_against_policy(
                         resolved_agents, policy_set, plan_phases, services.policy_engine
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Non-fatal: a policy-engine failure must not abort planning,
+                # but swallowing it silently voids the policy-driven
+                # audit-requirement branch (risk_and_policy.py:139-149).  Make
+                # it visible so the missing audit gate is traceable.
+                logger.warning(
+                    "planner.validation: policy validation failed for task %s "
+                    "— policy-driven audit requirement not evaluated: %s",
+                    draft.task_id, exc, exc_info=True,
+                )
+                draft.score_warnings.append(
+                    f"policy_validation_failed: {exc}"
+                )
 
         return budget_tier
 
@@ -383,7 +415,12 @@ class ValidationStage:
                     f"task_id={draft.task_id} agents={sorted(agent_bases)} "
                     f"{audit_requirement}. "
                     "Compliance or auditor-routed plans require Audit coverage. "
-                    "Remediation: add a terminal Audit phase with an auditor step."
+                    "Remediation: add the auditor agent to the roster and a "
+                    "terminal Audit phase with an auditor step. Headless/forge "
+                    "plans (validate_assembled_plan) are NOT auto-remediated the "
+                    "way the interactive RiskStage safety-roster path is — "
+                    "regenerate the plan with the auditor included so the "
+                    "auditor is guaranteed on both paths (parity of outcome)."
                 ),
             ))
 
@@ -516,13 +553,8 @@ class ValidationStage:
         if agent_name:
             bases.add(agent_name.split("--")[0])
         for member in getattr(step, "team", []) or []:
-            member_name = getattr(member, "agent_name", "")
-            if member_name:
-                bases.add(member_name.split("--")[0])
-            for nested in getattr(member, "sub_team", []) or []:
-                nested_name = getattr(nested, "agent_name", "")
-                if nested_name:
-                    bases.add(nested_name.split("--")[0])
+            for name in _collect_member_agent_names(member):
+                bases.add(name.split("--")[0])
         return bases
 
 
@@ -533,15 +565,11 @@ def _resolved_agents_from_plan(plan: "MachinePlan") -> list[str]:
         if agent_name and agent_name != "team":
             agents.append(agent_name)
 
-    def _collect_member_agents(member: object) -> None:
-        _append(str(getattr(member, "agent_name", "") or ""))
-        for nested in getattr(member, "sub_team", []) or []:
-            _collect_member_agents(nested)
-
     for step in plan.all_steps:
         _append(step.agent_name)
         for member in getattr(step, "team", []) or []:
-            _collect_member_agents(member)
+            for name in _collect_member_agent_names(member):
+                _append(name)
 
     return list(dict.fromkeys(agents))
 

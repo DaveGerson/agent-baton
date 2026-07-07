@@ -262,8 +262,15 @@ def validate_knowledge_roots(
     }
 
     if require_roots:
+        seen_roots: set[Path] = set()
         for root in roots:
             resolved = root.expanduser()
+            # De-dup consistent with _unique_existing_roots so a repeated
+            # --knowledge-root argument doesn't inflate the warning count.
+            dedup_key = resolved.resolve()
+            if dedup_key in seen_roots:
+                continue
+            seen_roots.add(dedup_key)
             if not resolved.is_dir():
                 issues.append(_issue(
                     code="missing-root",
@@ -278,95 +285,126 @@ def validate_knowledge_roots(
 
     for root in _unique_existing_roots(roots):
         summary["roots"] += 1
-        for pack_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-            summary["packs"] += 1
-            manifest, manifest_ok = _read_manifest(pack_dir, issues)
-            default_delivery = str(
-                manifest.get("default_delivery") or "reference"
-            ).strip().lower()
+        try:
+            pack_candidates = sorted(root.iterdir())
+        except OSError as exc:
+            issues.append(_issue(
+                code="unreadable-pack",
+                path=root,
+                pack="",
+                message=(
+                    f"Knowledge root '{root}' could not be listed: {exc}. "
+                    "Check directory permissions and re-run doctor."
+                ),
+            ))
+            continue
 
-            declared_paths = _declared_doc_paths(manifest)
-            for rel_path in declared_paths:
-                doc_path = pack_dir / rel_path
-                if not _declared_doc_exists(pack_dir, rel_path):
+        for pack_dir in pack_candidates:
+            # Isolate per-pack filesystem failures (Windows ACLs, cloud-sync
+            # placeholders) so one unreadable pack doesn't abort the whole
+            # doctor run — mirror KnowledgeRegistry.load_directory's guard.
+            try:
+                if not pack_dir.is_dir():
+                    continue
+                summary["packs"] += 1
+                manifest, manifest_ok = _read_manifest(pack_dir, issues)
+                default_delivery = str(
+                    manifest.get("default_delivery") or "reference"
+                ).strip().lower()
+
+                declared_paths = _declared_doc_paths(manifest)
+                for rel_path in declared_paths:
+                    doc_path = pack_dir / rel_path
+                    if not _declared_doc_exists(pack_dir, rel_path):
+                        issues.append(_issue(
+                            code="missing-declared-file",
+                            path=doc_path,
+                            pack=pack_dir.name,
+                            message=(
+                                f"Pack '{pack_dir.name}' declares missing document "
+                                f"'{rel_path}'. Edit {pack_dir / 'knowledge.yaml'} "
+                                "or create that file."
+                            ),
+                        ))
+
+                if manifest_ok and not str(manifest.get("description") or "").strip():
                     issues.append(_issue(
-                        code="missing-declared-file",
-                        path=doc_path,
+                        code="empty-pack-description",
+                        path=pack_dir / "knowledge.yaml",
                         pack=pack_dir.name,
                         message=(
-                            f"Pack '{pack_dir.name}' declares missing document "
-                            f"'{rel_path}'. Edit {pack_dir / 'knowledge.yaml'} "
-                            "or create that file."
+                            f"Pack '{pack_dir.name}' has an empty description. "
+                            f"Edit {pack_dir / 'knowledge.yaml'} and add a "
+                            "description for search and resolver matching."
                         ),
                     ))
 
-            if manifest_ok and not str(manifest.get("description") or "").strip():
-                issues.append(_issue(
-                    code="empty-pack-description",
-                    path=pack_dir / "knowledge.yaml",
-                    pack=pack_dir.name,
-                    message=(
-                        f"Pack '{pack_dir.name}' has an empty description. "
-                        f"Edit {pack_dir / 'knowledge.yaml'} and add a "
-                        "description for search and resolver matching."
-                    ),
-                ))
+                names: dict[str, list[Path]] = {}
+                for doc_path in sorted(pack_dir.glob("*.md")):
+                    summary["documents"] += 1
+                    doc_metadata = _read_doc_metadata(
+                        doc_path, pack_dir.name, issues
+                    )
+                    if doc_metadata is None:
+                        continue
+                    doc_name, metadata, raw = doc_metadata
+                    names.setdefault(doc_name, []).append(doc_path)
 
-            names: dict[str, list[Path]] = {}
-            for doc_path in sorted(pack_dir.glob("*.md")):
-                summary["documents"] += 1
-                doc_metadata = _read_doc_metadata(
-                    doc_path, pack_dir.name, issues
-                )
-                if doc_metadata is None:
-                    continue
-                doc_name, metadata, raw = doc_metadata
-                names.setdefault(doc_name, []).append(doc_path)
+                    description = str(metadata.get("description") or "").strip()
+                    if not description:
+                        issues.append(_issue(
+                            code="empty-doc-description",
+                            path=doc_path,
+                            pack=pack_dir.name,
+                            doc=doc_name,
+                            message=(
+                                f"Document '{doc_name}' has an empty description. "
+                                f"Edit {doc_path} frontmatter and add description."
+                            ),
+                        ))
 
-                description = str(metadata.get("description") or "").strip()
-                if not description:
+                    if _is_large_inline_candidate(
+                        doc_path, raw, default_delivery=default_delivery
+                    ):
+                        issues.append(_issue(
+                            code="large-inline-candidate",
+                            path=doc_path,
+                            pack=pack_dir.name,
+                            doc=doc_name,
+                            message=(
+                                f"Document '{doc_name}' is too large for likely "
+                                f"inline delivery. Edit {doc_path} to shorten it "
+                                f"or edit {pack_dir / 'knowledge.yaml'} and set "
+                                "default_delivery: reference."
+                            ),
+                        ))
+
+                for doc_name, paths in sorted(names.items()):
+                    if len(paths) <= 1:
+                        continue
+                    joined = ", ".join(str(p) for p in paths)
                     issues.append(_issue(
-                        code="empty-doc-description",
-                        path=doc_path,
+                        code="duplicate-doc-name",
+                        path=paths[0],
                         pack=pack_dir.name,
                         doc=doc_name,
                         message=(
-                            f"Document '{doc_name}' has an empty description. "
-                            f"Edit {doc_path} frontmatter and add description."
+                            f"Document name '{doc_name}' is duplicated in "
+                            f"{joined}. Edit one frontmatter name field so each "
+                            "document name is unique within the pack."
                         ),
                     ))
-
-                if _is_large_inline_candidate(
-                    doc_path, raw, default_delivery=default_delivery
-                ):
-                    issues.append(_issue(
-                        code="large-inline-candidate",
-                        path=doc_path,
-                        pack=pack_dir.name,
-                        doc=doc_name,
-                        message=(
-                            f"Document '{doc_name}' is too large for likely "
-                            f"inline delivery. Edit {doc_path} to shorten it "
-                            f"or edit {pack_dir / 'knowledge.yaml'} and set "
-                            "default_delivery: reference."
-                        ),
-                    ))
-
-            for doc_name, paths in sorted(names.items()):
-                if len(paths) <= 1:
-                    continue
-                joined = ", ".join(str(p) for p in paths)
+            except OSError as exc:
                 issues.append(_issue(
-                    code="duplicate-doc-name",
-                    path=paths[0],
+                    code="unreadable-pack",
+                    path=pack_dir,
                     pack=pack_dir.name,
-                    doc=doc_name,
                     message=(
-                        f"Document name '{doc_name}' is duplicated in "
-                        f"{joined}. Edit one frontmatter name field so each "
-                        "document name is unique within the pack."
+                        f"Pack '{pack_dir.name}' could not be validated: {exc}. "
+                        "Check directory permissions and re-run doctor."
                     ),
                 ))
+                continue
 
     summary["warnings"] = len(issues)
     return issues, summary
@@ -472,13 +510,21 @@ def _declared_doc_paths(manifest: dict[str, Any]) -> list[str]:
     return paths
 
 
+# Suffixes that are plausible standalone file types in their own right.
+# A declaration ending in one of these (e.g. "config.json") should not
+# be satisfied by a shadow "config.json.md" — only genuinely extensionless
+# stems (e.g. "notes.v2") get the +.md fallback.
+_KNOWN_NON_MD_EXTENSIONS = {
+    ".json", ".yaml", ".yml", ".txt", ".py", ".toml", ".csv",
+}
+
+
 def _declared_doc_exists(pack_dir: Path, rel_path: str) -> bool:
     doc_path = pack_dir / rel_path
     if doc_path.is_file():
         return True
-    # Only treat the declaration as extensionless when it does not already
-    # end in .md — Path.suffix would misread dotted stems like "notes.v2".
-    if rel_path.lower().endswith(".md"):
+    suffix = doc_path.suffix.lower()
+    if suffix == ".md" or suffix in _KNOWN_NON_MD_EXTENSIONS:
         return False
     return doc_path.with_name(doc_path.name + ".md").is_file()
 

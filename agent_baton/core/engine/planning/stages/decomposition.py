@@ -20,6 +20,7 @@ from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.rules.phase_templates import PHASE_NAMES as _PHASE_NAMES
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.phase_builder import (
+    _normalize_phase_name,
     apply_pattern,
     assign_agents_to_phases,
     build_compound_phases,
@@ -28,6 +29,7 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     enrich_phases,
     phases_from_dicts,
 )
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS
 
 if TYPE_CHECKING:
     from agent_baton.models.execution import PlanPhase
@@ -39,6 +41,13 @@ class DecompositionStage:
     """Stage 4: build the phase list, attach knowledge, apply foresight."""
 
     name = "decomposition"
+
+    # Same derivation ValidationStage._REVIEWER_BASES / RiskStage._REVIEWER_BASES
+    # use (validation.py:143, risk.py:48) — keeps "is a reviewer-class agent"
+    # agreement across the roster-filtering, safety-injection, and gate stages.
+    # ``auditor`` is excluded: it is governed by the separate Audit
+    # phase/gate, not the Review phase this stage reasons about.
+    _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
 
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 9+9b — build phase list.
@@ -143,6 +152,32 @@ class DecompositionStage:
             # Explicit complexity override — scale phases to match.
             from agent_baton.core.engine.classifier import KeywordClassifier as _KC
             complexity_phases = _KC()._select_phases(inferred_type, inferred_complexity, _PHASE_NAMES)
+
+            # The complexity-driven phase count and the roster are computed
+            # independently on this path (phases via KeywordClassifier,
+            # roster via rules/default_agents.py's static DEFAULT_AGENTS).
+            # KeywordClassifier keeps its own roster/phase selection paired
+            # (_select_agents drops reviewer-class agents at the same
+            # complexity tiers _select_phases drops "Review"), but this
+            # override path does not inherit that pairing. If the resulting
+            # phase list has no Review phase, drop reviewer-class agents
+            # (except auditor, which is governed by the separate Audit
+            # phase/gate) from the roster before phases are built, so a
+            # rostered reviewer never ends up stranded inside an Implement
+            # phase where ValidationStage's review_missing gate would
+            # reject the plan.
+            has_review_phase = any(
+                _normalize_phase_name(name) == "review" for name in complexity_phases
+            )
+            if not has_review_phase:
+                filtered_agents = [
+                    a for a in resolved_agents
+                    if a.split("--")[0] not in self._REVIEWER_BASES
+                ]
+                if filtered_agents != resolved_agents:
+                    resolved_agents = filtered_agents
+                    draft.resolved_agents = filtered_agents
+
             plan_phases = build_phases_for_names(complexity_phases, resolved_agents, task_summary, registry)
         else:
             plan_phases = default_phases(inferred_type, resolved_agents, task_summary, registry)

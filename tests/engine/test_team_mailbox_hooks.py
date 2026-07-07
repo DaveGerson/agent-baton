@@ -192,6 +192,47 @@ class TestMailboxOnDispatch:
             == "worktree"
         )
 
+    def test_resume_first_entry_persists_team_readiness(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """C1 regression: when resume() is the FIRST walk into a team step,
+        the team_readiness diagnostic mutated by _team_dispatch_action must be
+        persisted. resume() previously returned without saving, so the
+        once-per-step diagnostic (gated on the parent StepResult being absent)
+        was lost after a crash/resume boundary and never recomputed once
+        team-record created the parent StepResult.
+        """
+        monkeypatch.delenv("BATON_TEAMS_BACKEND", raising=False)
+        monkeypatch.delenv("BATON_TEAMS_BACKEND_STRICT", raising=False)
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_solo_then_team_plan())
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="setup-agent",
+            status="complete",
+            outcome="inputs ready",
+        )
+
+        # Persisted state now has no team_readiness for the still-locked 1.2.
+        pre = StatePersistence(tmp_path).load()
+        assert pre is not None
+        assert "1.2" not in pre.plan.plan_diagnostics.get("team_readiness", {})
+
+        # Simulate crash/resume: reconstruct a fresh engine and let resume()
+        # perform the first walk into the team step.
+        resumed = ExecutionEngine(team_context_root=tmp_path)
+        action = resumed.resume()
+        assert action is not None
+
+        state = StatePersistence(tmp_path).load()
+        assert state is not None
+        assert (
+            state.plan.plan_diagnostics["team_readiness"]["1.2"]["backend"]
+            == "worktree"
+        )
+
 
 class TestMailboxOnMemberResult:
     def test_task_completed_event_on_success(self, tmp_path: Path) -> None:

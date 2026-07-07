@@ -712,14 +712,20 @@ class StorageMigrator:
         )
         new_execution = cur.rowcount > 0
 
-        # plans row
+        # plans row.  Column list mirrors sqlite_backend._upsert_plan
+        # (minus release_id, which legacy JSON state never carried and
+        # which is owned exclusively by release_store.tag_plan/untag_plan).
         conn.execute(
             """
             INSERT OR IGNORE INTO plans
                 (task_id, task_summary, risk_level, budget_tier,
                  execution_mode, git_strategy, shared_context,
-                 pattern_source, plan_markdown, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 pattern_source, plan_markdown, created_at,
+                 explicit_knowledge_packs, explicit_knowledge_docs,
+                 intervention_level, task_type,
+                 classification_signals, classification_confidence,
+                 manager_mode, plan_diagnostics)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 plan.task_id,
@@ -732,6 +738,17 @@ class StorageMigrator:
                 plan.pattern_source,
                 plan.to_markdown(),
                 plan.created_at,
+                json.dumps(plan.explicit_knowledge_packs),
+                json.dumps(plan.explicit_knowledge_docs),
+                plan.intervention_level,
+                plan.task_type,
+                plan.classification_signals,
+                plan.classification_confidence,
+                # v40-ish (manager-mode PMO layer): legacy JSON state predates
+                # this field on older MachinePlan objects, so fall back to
+                # the model default (False) via getattr for tolerance.
+                int(getattr(plan, "manager_mode", False)),
+                json.dumps(plan.plan_diagnostics),
             ),
         )
 
