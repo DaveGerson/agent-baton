@@ -106,7 +106,10 @@ class KnowledgePlanBuilder:
 
     ``missing_packs`` lists every ``default_packs``/``required_for_code_steps``
     name absent from the registry (reason ``"config: default_packs"`` or
-    ``"config: required_for_code_steps"``). ``stale_packs`` lists every
+    ``"config: required_for_code_steps"``), plus every role-card
+    ``required_knowledge_packs`` name absent from the registry (reason
+    ``"role: <role>"`` -- see :meth:`build`'s keyword-only
+    ``role_required_packs``, bd-t8u). ``stale_packs`` lists every
     *registered* pack (not just selected ones — staleness is a manager-wide
     signal, spec §4.4 "track source/confidence/staleness") whose
     ``last_reviewed`` + effective ``stale_after_days`` (pack-level value,
@@ -118,7 +121,22 @@ class KnowledgePlanBuilder:
         self._config = config
         self._registry = registry
 
-    def build(self, plan: "MachinePlan", blueprint_roles: list[str]) -> KnowledgePlan:
+    def build(
+        self,
+        plan: "MachinePlan",
+        blueprint_roles: list[str],
+        *,
+        role_required_packs: dict[str, list[str]] | None = None,
+    ) -> KnowledgePlan:
+        """Build the plan-wide :class:`KnowledgePlan`.
+
+        The ``(plan, blueprint_roles)`` positional signature is frozen --
+        extras are keyword-only. *role_required_packs* maps each role to
+        its role card's ``required_knowledge_packs`` (bd-t8u): names the
+        registry has are selected (reason ``"role: <role>"``); names it
+        does not have are reported in ``missing_packs`` with the same
+        reason instead of silently becoming phantom references downstream.
+        """
         kp_config = self._config.knowledge_packs
 
         selected: dict[str, KnowledgePackReference] = {}
@@ -187,6 +205,23 @@ class KnowledgePlanBuilder:
                     selected[pack.name] = self._make_reference(
                         pack.name, reason=f"role: {role}"
                     )
+
+        # Role-card hard requirements (bd-t8u): registry-present names are
+        # selected so downstream bundle building resolves them to real
+        # (path-bearing) references even when the pack's ``target_agents``
+        # doesn't name the role; registry-absent names are reported missing
+        # (deduped against config-driven missing entries above -- first
+        # reason wins).
+        for role, names in (role_required_packs or {}).items():
+            for name in names:
+                if self._registry.get_pack(name) is None:
+                    if name not in seen_missing:
+                        seen_missing.add(name)
+                        missing.append(
+                            MissingKnowledgePack(name=name, reason=f"role: {role}")
+                        )
+                elif name not in selected:
+                    selected[name] = self._make_reference(name, reason=f"role: {role}")
 
         return KnowledgePlan(
             task_id=plan.task_id,

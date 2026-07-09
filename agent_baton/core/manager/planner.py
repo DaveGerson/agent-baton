@@ -203,9 +203,18 @@ class ManagerModePlanner:
         # docstring): injected review steps do not exist yet, so they can
         # never pick up `required_for_code_steps` packs via per-step
         # attachment; they get knowledge exclusively through their role
-        # card's `required_knowledge_packs`.
+        # card's `required_knowledge_packs`. Those role-card requirements
+        # are threaded in as `role_required_packs` (bd-t8u) so a hard-
+        # required pack the registry lacks (e.g. review-rubric) is reported
+        # in `missing_packs` with a `role: <role>` reason instead of
+        # surfacing downstream as a phantom bundle reference.
         knowledge_plan = KnowledgePlanBuilder(config, self._registry()).build(
-            plan, [card.role for card in blueprint.roles]
+            plan,
+            [card.role for card in blueprint.roles],
+            role_required_packs={
+                card.role: list(card.required_knowledge_packs)
+                for card in blueprint.roles
+            },
         )
         artifacts.knowledge_plan = knowledge_plan
 

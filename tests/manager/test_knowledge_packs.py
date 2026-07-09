@@ -363,6 +363,77 @@ def test_default_packs_selected_when_present(tmp_path: Path) -> None:
     assert selected_names.get("repo-architecture") == "config: default_packs"
 
 
+def test_role_required_pack_absent_reported_missing(tmp_path: Path) -> None:
+    """bd-t8u: a role card's ``required_knowledge_packs`` entry absent from
+    the registry must land in ``missing_packs`` with a ``role: <role>``
+    reason -- never silently become a phantom selected ref."""
+    registry = KnowledgeRegistry()  # empty -- nothing on disk
+    config = _make_manager_config(tmp_path, "knowledge_packs:\n  default_packs: []\n")
+    plan = _make_plan()
+
+    result = KnowledgePlanBuilder(config, registry).build(
+        plan,
+        blueprint_roles=["code-reviewer"],
+        role_required_packs={"code-reviewer": ["review-rubric"]},
+    )
+
+    missing_by_name = {m.name: m.reason for m in result.missing_packs}
+    assert missing_by_name.get("review-rubric") == "role: code-reviewer"
+    assert "review-rubric" not in {p.name for p in result.selected_packs}
+
+
+def test_role_required_pack_missing_dedupes(tmp_path: Path) -> None:
+    """A name already reported missing (config reason, or an earlier role)
+    is never duplicated -- first reason wins."""
+    registry = KnowledgeRegistry()
+    config = _make_manager_config(
+        tmp_path,
+        "knowledge_packs:\n"
+        "  default_packs: []\n"
+        "  required_for_code_steps:\n"
+        "    - coding-conventions\n",
+    )
+    plan = _make_plan()
+
+    result = KnowledgePlanBuilder(config, registry).build(
+        plan,
+        blueprint_roles=["backend-engineer", "code-reviewer", "auditor"],
+        role_required_packs={
+            "backend-engineer": ["coding-conventions"],
+            "code-reviewer": ["review-rubric"],
+            "auditor": ["review-rubric"],
+        },
+    )
+
+    names = [m.name for m in result.missing_packs]
+    assert names.count("coding-conventions") == 1
+    assert names.count("review-rubric") == 1
+    missing_by_name = {m.name: m.reason for m in result.missing_packs}
+    assert missing_by_name["coding-conventions"] == "config: required_for_code_steps"
+    assert missing_by_name["review-rubric"] == "role: code-reviewer"
+
+
+def test_role_required_pack_present_selected_with_real_path(tmp_path: Path) -> None:
+    """A role-required pack the registry DOES have is selected with real
+    registry metadata (non-empty path), not reported missing -- even when
+    its manifest's ``target_agents`` does not name the role."""
+    registry = _make_registry(tmp_path, {"review-rubric": "name: review-rubric\n"})
+    config = _make_manager_config(tmp_path, "knowledge_packs:\n  default_packs: []\n")
+    plan = _make_plan()
+
+    result = KnowledgePlanBuilder(config, registry).build(
+        plan,
+        blueprint_roles=["code-reviewer"],
+        role_required_packs={"code-reviewer": ["review-rubric"]},
+    )
+
+    selected = {p.name: p for p in result.selected_packs}
+    assert "review-rubric" in selected
+    assert selected["review-rubric"].path
+    assert selected["review-rubric"].reason == "role: code-reviewer"
+    assert "review-rubric" not in {m.name for m in result.missing_packs}
+
+
 def test_knowledge_plan_round_trips_through_write_all(tmp_path: Path) -> None:
     """Sanity: the builder's output satisfies the frozen KnowledgePlan model
     (round-trips via to_dict/from_dict, as write_all will do)."""

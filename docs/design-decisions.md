@@ -1329,13 +1329,21 @@ work, in the same file the registry actually reads.
 
 **Accepted debt** (this increment):
 
-- `ManagerConfig.gates.mode` accepts `project_configured | focused |
+- ~~`ManagerConfig.gates.mode` accepts `project_configured | focused |
   full | smoke | off`, but only `project_configured` (the default) has
-  behavior: `PhasePolicyApplier` rescopes phase gates to
-  `gates.gate_scope` only when `mode == "project_configured"` and the
-  CLI did not pass an explicit `--gate-scope`. Other `mode` values are
-  recorded on `PolicyDecisions.gates_mode` (surfaced via `baton team`/
-  `baton report`) but do not change gate commands yet.
+  behavior.~~ **Paid (bd-6dn, 2026-07-02)**: `PhasePolicyApplier` now
+  enforces every `gates.mode` value when the CLI did not pass an
+  explicit `--gate-scope` (an explicit `--gate-scope` still always
+  wins): `project_configured` rescopes phase gates to
+  `gates.gate_scope`; `focused`/`full`/`smoke` force that scope directly
+  (same fidelity rules — `focused` leaves planner gates untouched,
+  `full`/`smoke` rescope via `default_gate` with `detected_stack`
+  threaded); `off` strips every phase gate (`PlanPhase.gate` is
+  Optional, so the plan stays round-trip valid) and records the
+  stripped phase ids on `PolicyDecisions.gates_stripped`. Remaining
+  record-only debt: `gates.allow_smoke_fallback` and
+  `gates.missing_gate_policy` are validated and recorded but have no
+  runtime behavior yet.
 - Review steps injected by `PhasePolicyApplier` use the existing
   `step_type: "reviewing"` value from
   `planning/rules/step_types.py::AGENT_STEP_TYPE` — no new step type was

@@ -102,7 +102,13 @@ def _routing_plan(task_id: str) -> MachinePlan:
     )
 
 
-def _build_manager_sidecars(plan: MachinePlan, project_root: Path, ctx_dir: Path) -> None:
+def _build_manager_sidecars(
+    plan: MachinePlan,
+    project_root: Path,
+    ctx_dir: Path,
+    *,
+    knowledge_registry: KnowledgeRegistry | None = None,
+) -> None:
     """Run the real ManagerModePlanner post-processor over *plan*, writing
     every PMO sidecar (including injecting review steps -- see
     PhasePolicyApplier) and mutating *plan* in place, mirroring
@@ -111,9 +117,32 @@ def _build_manager_sidecars(plan: MachinePlan, project_root: Path, ctx_dir: Path
         ManagerConfig(),
         project_root=project_root,
         team_context_dir=ctx_dir,
-        knowledge_registry=KnowledgeRegistry(),
+        knowledge_registry=knowledge_registry or KnowledgeRegistry(),
     )
     planner.build_and_write(plan, plan.task_summary)
+
+
+def _registry_with_code_step_packs(root: Path) -> KnowledgeRegistry:
+    """A registry backing the default ``required_for_code_steps`` packs
+    (coding-conventions, testing-strategy) with real on-disk packs -- since
+    bd-t8u, registry-absent packs no longer attach to bundles as phantom
+    name-only refs, so tests that need pack refs in a bundle must supply a
+    real registry."""
+    knowledge_root = root / ".claude" / "knowledge"
+    for pack_name in ("coding-conventions", "testing-strategy"):
+        pack_dir = knowledge_root / pack_name
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        (pack_dir / "knowledge.yaml").write_text(
+            f"name: {pack_name}\ndescription: {pack_name} pack.\n",
+            encoding="utf-8",
+        )
+        (pack_dir / "doc.md").write_text(
+            f"---\nname: {pack_name}-doc\ndescription: {pack_name} doc\n---\n\n# Doc\n",
+            encoding="utf-8",
+        )
+    registry = KnowledgeRegistry()
+    registry.load_directory(knowledge_root)
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +299,18 @@ class TestDispatchPromptManagerSidecars:
     ) -> None:
         """The role card for backend-engineer requires
         knowledge_packs.required_for_code_steps packs by default
-        (coding-conventions, testing-strategy) -- even with an empty
-        registry (no packs found on disk), the bundle still records pack
-        *names* as required/missing references, which is what the prompt
-        section renders (never full doc bodies)."""
+        (coding-conventions, testing-strategy) -- with a registry that has
+        them, the bundle records registry-backed pack references, which is
+        what the prompt section renders by name (never full doc bodies).
+        Since bd-t8u a registry-absent pack no longer produces a phantom
+        name-only ref, so this test supplies real packs on disk."""
         task_id = "task-m9-dispatch-packs"
         plan = _single_phase_plan(task_id, manager_mode=True)
         ctx_dir = tmp_path / ".claude" / "team-context"
-        _build_manager_sidecars(plan, tmp_path, ctx_dir)
+        _build_manager_sidecars(
+            plan, tmp_path, ctx_dir,
+            knowledge_registry=_registry_with_code_step_packs(tmp_path),
+        )
 
         paths = _paths(tmp_path, task_id)
         bundle_data = json.loads(paths.context_bundle("1.1").read_text(encoding="utf-8"))

@@ -198,7 +198,11 @@ def test_review_steps_use_review_role_card_not_phase_owner(tmp_path: Path) -> No
         assert contract.agent_name == review_agent
         bundle = artifacts.context_bundles[review_step_id]
         assert bundle.agent_name == review_agent
-        assert any(p.name == "review-rubric" for p in bundle.knowledge_packs)
+        # Registry is empty here: the role-required review-rubric pack is
+        # NOT attached as a phantom ref (bd-t8u) -- it surfaces as a
+        # truncation warning instead (see
+        # test_missing_role_required_pack_reported_not_phantom).
+        assert any("review-rubric" in w for w in bundle.truncation_warnings)
 
     # The implementation steps still resolve to their own workstream owner.
     assert artifacts.scope_contracts["1.1"].agent_name == "backend-engineer"
@@ -299,6 +303,52 @@ def test_review_bundle_integration(tmp_path: Path) -> None:
         rubric_refs = [p for p in bundle.knowledge_packs if p.name == "review-rubric"]
         assert rubric_refs, f"{review_step_id} missing review-rubric pack ref"
         assert rubric_refs[0].path  # registry-backed, not a bare placeholder
+        # ...and no missing-pack warning fires for it (bd-t8u complement).
+        assert not any("review-rubric" in w for w in bundle.truncation_warnings)
+    assert "review-rubric" not in {
+        m.name for m in artifacts.knowledge_plan.missing_packs
+    }
+
+
+# ---------------------------------------------------------------------------
+# test_missing_role_required_pack_reported_not_phantom (bd-t8u)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_role_required_pack_reported_not_phantom(tmp_path: Path) -> None:
+    """Debt-ledger fix (bd-t8u): a role card's hard-required pack that the
+    registry does not have (canonical case: ``review-rubric`` required by
+    the review role cards, empty registry) must:
+
+    1. appear in ``knowledge_plan.missing_packs`` with a ``role: <role>``
+       reason, and
+    2. NOT attach to review-step context bundles as a phantom ref
+       (``path=""``, ``token_estimate=0``) -- instead each affected bundle
+       carries a truncation-warnings note naming the pack.
+    """
+    plan = _two_phase_plan()
+    config = ManagerConfig()
+    planner = _planner(tmp_path, config=config)  # empty registry
+
+    artifacts = planner.build(plan, plan.task_summary)
+
+    missing_by_name = {
+        m.name: m.reason for m in artifacts.knowledge_plan.missing_packs
+    }
+    phase_review_agent = config.policies.review_agents.adversarial_review
+    assert missing_by_name.get("review-rubric") == f"role: {phase_review_agent}"
+
+    for review_step_id in ("review-1", "review-2", "review-2-final"):
+        bundle = artifacts.context_bundles[review_step_id]
+        assert all(p.name != "review-rubric" for p in bundle.knowledge_packs), (
+            f"{review_step_id} still carries a phantom review-rubric ref"
+        )
+        assert all(p.path for p in bundle.knowledge_packs), (
+            f"{review_step_id} carries an empty-path (phantom) pack ref"
+        )
+        assert any("review-rubric" in w for w in bundle.truncation_warnings), (
+            f"{review_step_id} bundle lacks a warning naming review-rubric"
+        )
 
 
 # ---------------------------------------------------------------------------
