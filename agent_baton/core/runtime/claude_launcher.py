@@ -46,6 +46,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_baton.core.engine.planning.scope_contract import (
+    normalize_path_list,
+    paths_overlap,
+)
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.runtime._redaction import (
     _REDACT_PATTERNS,
@@ -114,6 +118,159 @@ def _redact_stderr(text: str) -> str:
     ``_redact_stderr`` by name continue to work without modification.
     """
     return _redact_sensitive(text)
+
+
+# ---------------------------------------------------------------------------
+# Path-scope enforcement (Phase 3 "Make scope contracts authoritative", 3.2)
+# ---------------------------------------------------------------------------
+#
+# Converts a step's ``allowed_paths``/``blocked_paths`` scope contract into
+# a runtime control that is actually applied to the ``claude`` subprocess,
+# rather than the pre-existing ``ExecutionAction.path_enforcement`` bash
+# guard string, which only ever reached the interactive orchestrator loop
+# and only did anything if that agent remembered to wire it into a hook.
+# ``TaskWorker`` (see ``core/runtime/worker.py``) calls
+# ``ClaudeCodeLauncher.configure_step_scope`` once per DISPATCH action
+# before handing the step to the scheduler; ``launch()`` consumes it below.
+
+
+@dataclass(frozen=True)
+class _ResolvedPathScope:
+    """Normalized, filesystem-verified path scope for one launch."""
+
+    allowed: tuple[str, ...]
+    blocked: tuple[str, ...]
+    rejected: tuple[str, ...]  # raw entries dropped: malformed, traversal, or symlink escape
+
+
+def _filesystem_safe(repo_root: Path, rel_path: str) -> bool:
+    """True when *rel_path* (already lexically normalized, repo-relative,
+    no ``..``) does not escape *repo_root* once symlinks are resolved.
+
+    Lexical normalization (``normalize_scope_path``) already rejects ``..``
+    segments and absolute paths; this catches what a purely lexical check
+    cannot: an existing symlink *inside* the repo whose target points
+    outside it (e.g. ``allowed_paths=["app/link"]`` where
+    ``app/link -> /etc``). A nonexistent path (the common case -- an agent
+    about to create a new file) resolves safely because ``Path.resolve()``
+    only follows symlinks that actually exist on disk.
+    """
+    try:
+        root_resolved = repo_root.resolve(strict=False)
+        candidate_resolved = (repo_root / rel_path).resolve(strict=False)
+        candidate_resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolve_path_scope(
+    effective_cwd: str,
+    allowed_paths: list[str],
+    blocked_paths: list[str],
+) -> _ResolvedPathScope:
+    """Normalize *allowed_paths*/*blocked_paths* against *effective_cwd*.
+
+    Applies, in order: lexical normalization + traversal/absolute-path
+    rejection (``normalize_path_list``), filesystem symlink-escape
+    rejection (:func:`_filesystem_safe`), then blocked-path precedence
+    (any allowed entry that collides with a blocked entry is dropped from
+    the effective allowed set -- a path is never simultaneously permitted
+    and forbidden).
+    """
+    repo_root = Path(effective_cwd)
+    rejected: list[str] = []
+
+    lexical_allowed = normalize_path_list(allowed_paths)
+    lexical_blocked = normalize_path_list(blocked_paths)
+    # normalize_path_list() silently drops malformed/traversal/absolute
+    # entries; surface exactly which raw entries it dropped so operators
+    # can see what was rejected rather than silently narrowed.
+    for raw in (allowed_paths or []) + (blocked_paths or []):
+        if raw and raw.strip() and not normalize_path_list([raw]):
+            rejected.append(raw)
+
+    safe_allowed: list[str] = []
+    for p in lexical_allowed:
+        if _filesystem_safe(repo_root, p):
+            safe_allowed.append(p)
+        else:
+            rejected.append(p)
+    safe_blocked: list[str] = []
+    for p in lexical_blocked:
+        if _filesystem_safe(repo_root, p):
+            safe_blocked.append(p)
+        else:
+            rejected.append(p)
+
+    effective_allowed = [
+        p for p in safe_allowed if not any(paths_overlap(p, b) for b in safe_blocked)
+    ]
+
+    return _ResolvedPathScope(
+        allowed=tuple(effective_allowed),
+        blocked=tuple(safe_blocked),
+        rejected=tuple(rejected),
+    )
+
+
+def _build_bash_path_guard(scope: _ResolvedPathScope) -> str | None:
+    """Bash ``PreToolUse`` guard command for *scope*, or ``None`` when the
+    scope has no allowed/blocked entries left to enforce.
+
+    Stronger than ``agent_baton.core.engine.dispatcher.PromptDispatcher.
+    build_path_enforcement`` (the pre-existing, purely-advisory version):
+    every path here is already repo-root-normalized and regex-escaped
+    (``re.escape``, not a naive ``.``/``*`` string replace), and
+    blocked-path precedence has already been resolved upstream in
+    :func:`_resolve_path_scope`.
+    """
+    if not scope.allowed and not scope.blocked:
+        return None
+    parts: list[str] = []
+    if scope.allowed:
+        allowed_pattern = "|".join(re.escape(p) for p in scope.allowed)
+        parts.append(
+            f'if ! echo "$FILE" | grep -qE "^({allowed_pattern})(/|$)"; then '
+            'echo "BLOCKED: write outside scope contract allowed_paths: $FILE" >&2; exit 2; fi'
+        )
+    if scope.blocked:
+        blocked_pattern = "|".join(re.escape(p) for p in scope.blocked)
+        parts.append(
+            f'if echo "$FILE" | grep -qE "^({blocked_pattern})(/|$)"; then '
+            'echo "BLOCKED: write to scope contract blocked_paths: $FILE" >&2; exit 2; fi'
+        )
+    inner = "; ".join(parts)
+    return f'bash -c \'FILE="$CLAUDE_TOOL_INPUT_FILE_PATH"; {inner}; exit 0\''
+
+
+def _build_scope_enforcement_args(scope: _ResolvedPathScope) -> list[str]:
+    """Build the ``claude`` CLI argv fragment that actually enforces *scope*.
+
+    Delivers the PreToolUse guard via ``--settings <inline JSON>`` -- an
+    override merged with whatever ``.claude/settings.json`` /
+    ``settings.local.json`` the subprocess would otherwise discover in its
+    cwd (see references/hooks-enforcement.md), with zero filesystem writes
+    of our own (no temp settings file to create or clean up). This is the
+    "actually applied" control: unlike the pre-existing
+    ``ExecutionAction.path_enforcement`` string, this is on the literal
+    subprocess argv the launcher execs -- there is no step where a driving
+    agent can forget to wire it up.
+    """
+    guard = _build_bash_path_guard(scope)
+    if guard is None:
+        return []
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Write|Edit|MultiEdit",
+                    "hooks": [{"type": "command", "command": guard}],
+                }
+            ]
+        }
+    }
+    return ["--settings", json.dumps(settings)]
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +636,47 @@ class ClaudeCodeLauncher:
         # Set operations are safe without locks because asyncio is single-threaded.
         self._active_processes: set[asyncio.subprocess.Process] = set()
 
+        # Phase 3 "Make scope contracts authoritative" (3.2): step_id ->
+        # (allowed_paths, blocked_paths, write_capable), set via
+        # configure_step_scope() and consumed (popped) by the matching
+        # launch() call. Callers that never call configure_step_scope get
+        # zero behavior change -- enforcement only activates when a caller
+        # (TaskWorker) opts a step in.
+        self._step_scopes: dict[str, tuple[list[str], list[str], bool]] = {}
+
     # ── Public API ───────────────────────────────────────────────────────────
+
+    def configure_step_scope(
+        self,
+        step_id: str,
+        allowed_paths: list[str] | None,
+        blocked_paths: list[str] | None = None,
+        *,
+        write_capable: bool = True,
+    ) -> None:
+        """Register the scope contract *step_id* must be dispatched under.
+
+        One-shot: consumed by the next matching ``launch()`` call so scope
+        configured for one step can never leak onto a later, unrelated
+        step_id. See ``core/runtime/worker.py``'s ``TaskWorker`` for the
+        (only) production call site -- one call per DISPATCH action, using
+        the dispatched ``PlanStep``'s ``allowed_paths``/``blocked_paths``.
+
+        ``write_capable=True`` (the default) makes ``launch()`` fail
+        closed -- refuse to spawn the subprocess at all -- when the scope
+        normalizes to an empty allowed set; pass ``False`` for
+        intentionally read-only steps (see
+        ``agent_baton.core.engine.planning.scope_contract.
+        READ_ONLY_STEP_TYPES``) where an empty allowed set is the valid,
+        intentional representation of "this step does not write".
+        """
+        if not step_id:
+            return
+        self._step_scopes[step_id] = (
+            list(allowed_paths or []),
+            list(blocked_paths or []),
+            write_capable,
+        )
 
     async def launch(
         self,
@@ -517,12 +714,49 @@ class ClaudeCodeLauncher:
         # isolated worktree is invisible to pre/post HEAD capture and gets
         # silently discarded by callers that clean up "commit-less" worktrees.
         effective_cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+
+        # ── Path-scope enforcement (Phase 3 "Make scope contracts
+        # authoritative", 3.2) — runs BEFORE any git probing or subprocess
+        # spawn so a fail-closed refusal never touches git or the process
+        # table. See configure_step_scope()'s docstring for the contract.
+        scope_extra_cmd_args: list[str] = []
+        scope_spec = self._step_scopes.pop(step_id, None) if step_id else None
+        if scope_spec is not None:
+            raw_allowed, raw_blocked, write_capable = scope_spec
+            scope = _resolve_path_scope(effective_cwd, raw_allowed, raw_blocked)
+            if scope.rejected:
+                logger.warning(
+                    "ClaudeCodeLauncher: dropped %d unsafe allowed/blocked "
+                    "path(s) for step %s (traversal, malformed, or symlink "
+                    "escape outside %s): %s",
+                    len(scope.rejected), step_id, effective_cwd, scope.rejected,
+                )
+            if write_capable and not scope.allowed:
+                # Fail closed: a write-capable step with no enforceable
+                # write scope is never dispatched. Converts the previously
+                # advisory-only guardrail into a hard runtime control --
+                # no subprocess is spawned, no git probe runs.
+                return LaunchResult(
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    status="failed",
+                    error=(
+                        "PATH_SCOPE_EMPTY: step declares a write-capable "
+                        "scope contract but allowed_paths is empty after "
+                        f"normalization (raw allowed_paths={raw_allowed!r}, "
+                        f"rejected={list(scope.rejected)!r}) — refusing to "
+                        "dispatch the subprocess (fail-closed)."
+                    ),
+                )
+            scope_extra_cmd_args = _build_scope_enforcement_args(scope)
+
         pre_commit = await self._git_rev_parse(effective_cwd)
 
         agent: AgentDefinition | None = None
         if self._registry is not None:
             agent = self._registry.get(agent_name)
         cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
+        cmd.extend(scope_extra_cmd_args)
         env = self._build_env()
         # bd-37a9: when running in a Wave 1.3 worktree, inject pointers to
         # the parent project's state so the subagent's upward-walk db

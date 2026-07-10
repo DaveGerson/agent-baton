@@ -202,6 +202,44 @@ class TaskWorker:
                             _wt_path = _wt_dict.get("path") or ""
                             if _wt_path:
                                 _worktree_paths[a.step_id] = _wt_path
+
+                        # Phase 3 "Make scope contracts authoritative" (3.2):
+                        # forward the dispatched PlanStep's scope contract to
+                        # the launcher so allowed_paths/blocked_paths are
+                        # enforced as a real subprocess control, not just
+                        # prose in the delegation prompt. Best-effort and
+                        # duck-typed: launchers that don't implement
+                        # configure_step_scope (DryRunLauncher, test doubles)
+                        # are silently skipped, and any lookup failure here
+                        # must never block dispatch.
+                        _configure_scope = getattr(
+                            self._launcher, "configure_step_scope", None
+                        )
+                        if (
+                            _configure_scope is not None
+                            and _wt_state is not None
+                            and _wt_state.plan is not None
+                            and getattr(a, "step_type", "") != "automation"
+                        ):
+                            _plan_step = next(
+                                (
+                                    s
+                                    for p in _wt_state.plan.phases
+                                    for s in p.steps
+                                    if s.step_id == a.step_id
+                                ),
+                                None,
+                            )
+                            if _plan_step is not None:
+                                from agent_baton.core.engine.planning.scope_contract import (
+                                    is_write_capable,
+                                )
+                                _configure_scope(
+                                    a.step_id,
+                                    list(_plan_step.allowed_paths),
+                                    list(_plan_step.blocked_paths),
+                                    write_capable=is_write_capable(_plan_step.step_type),
+                                )
                     except Exception:
                         pass
 

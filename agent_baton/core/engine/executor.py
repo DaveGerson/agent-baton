@@ -2290,6 +2290,218 @@ class ExecutionEngine:
             f"{head}"
         )
 
+    def _file_diff_scope_decision(
+        self,
+        state: "ExecutionState",
+        *,
+        step_id: str,
+        agent_name: str,
+        violations: list,
+        real_changed_files: list[str],
+    ) -> None:
+        """File a durable, evidence-backed ``ManagerDecision`` for a
+        diff-derived out-of-scope change (Phase 3 "Make scope contracts
+        authoritative", 3.2).
+
+        Always uses ``scope_expansion`` decision semantics regardless of
+        ``ManagerConfig.scoping.scope_expansion_policy`` -- see the caller
+        (``record_step_result``) for why. Persists the evidence (the
+        violated paths + the full independently-computed diff) to a JSON
+        sidecar (``ManagerArtifactPaths.scope_evidence``) keyed by the
+        decision id, via
+        :func:`agent_baton.core.manager.scope_amendment.write_scope_evidence`,
+        so a later :meth:`resolve_scope_expansion` call can locate exactly
+        what step/paths the decision concerns without re-parsing free text.
+        """
+        from agent_baton.core.config.manager import ManagerConfig
+        from agent_baton.core.manager.decisions import (
+            DecisionPacketBuilder,
+            compute_decision_id,
+        )
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.scope_amendment import write_scope_evidence
+        from agent_baton.core.runtime.decisions import DecisionManager
+        from agent_baton.models.manager import ManagerDecision
+        from agent_baton.utils.time import utcnow_zulu
+
+        try:
+            mgr_config = ManagerConfig.load(self._project_root())
+        except Exception:  # noqa: BLE001
+            mgr_config = ManagerConfig()
+
+        mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+        decision_mgr: DecisionManager | None = None
+        try:
+            decision_mgr = DecisionManager(decisions_dir=self._root / "decisions", bus=self._bus)
+        except Exception:  # noqa: BLE001
+            decision_mgr = None
+
+        created_at = utcnow_zulu()
+        paths_str = ", ".join(v.path for v in violations)
+        summary = f"Out-of-contract diff detected for step {step_id}: {paths_str}"
+        decision_id = compute_decision_id(summary, created_at)
+
+        decision = ManagerDecision(
+            decision_type="scope_expansion",
+            decision_id=decision_id,
+            task_id=state.task_id,
+            summary=summary,
+            context=(
+                f"Step {step_id} ({agent_name})'s actual git diff "
+                "(independently computed from the worktree's base_sha to "
+                "its own HEAD -- not self-reported) touched paths outside "
+                "its declared scope contract: "
+                + "; ".join(f"{v.path} ({v.reason})" for v in violations)
+                + f". Full independently-verified changed-file list: {real_changed_files}. "
+                "The step has been marked failed and its worktree retained "
+                "(never folded back) pending this decision."
+            ),
+            options=["approve", "reject"],
+            recommended_option="reject",
+            created_at=created_at,
+        )
+
+        builder = DecisionPacketBuilder(mgr_config, mgr_paths, decision_manager=decision_mgr)
+        builder.create(decision)
+
+        write_scope_evidence(
+            paths=mgr_paths,
+            decision_id=decision.decision_id,
+            step_id=step_id,
+            agent_name=agent_name,
+            violations=violations,
+            real_changed_files=real_changed_files,
+            created_at=created_at,
+        )
+
+    def resolve_scope_expansion(
+        self,
+        decision_id: str,
+        resolution: str,
+        *,
+        additional_paths: list[str] | None = None,
+    ) -> dict:
+        """Resolve a durable, evidence-backed scope-expansion decision
+        (Phase 3 "Make scope contracts authoritative", 3.2).
+
+        ``resolution="approve"``: atomically widens the failed step's
+        scope-contract sidecars via
+        :func:`agent_baton.core.manager.scope_amendment.apply_scope_amendment`
+        -- and only once that succeeds -- mutates the in-memory
+        ``PlanStep.allowed_paths``, drops the step's failed ``StepResult``
+        (so it is eligible for re-dispatch on the next ``next_actions()``
+        pass) and its stale worktree registry entry (the retained worktree
+        directory itself is left on disk for forensic recovery / eventual
+        ``gc_stale`` reclamation -- only the live pointer that would make
+        the next dispatch reuse it is cleared), and persists via
+        ``_save_execution``.
+
+        ``resolution="reject"``: marks the decision resolved and mutates
+        nothing else -- the failed ``StepResult`` and retained worktree
+        are left exactly as the violation left them, fully recoverable.
+
+        Returns a small status dict (rather than raising) for expected
+        "not found" / "already resolved" conditions, since the intended
+        callers (CLI/API decision-resolution surfaces) are outside this
+        step's allowed scope and must be able to surface a clean error.
+        """
+        if resolution not in ("approve", "reject"):
+            return {
+                "applied": False,
+                "error": f"invalid resolution {resolution!r}; must be 'approve' or 'reject'",
+            }
+
+        state = self._require_execution("resolve_scope_expansion")
+
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.scope_amendment import (
+            apply_scope_amendment,
+            deny_scope_amendment,
+            load_decision,
+            load_scope_evidence,
+        )
+
+        mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+        decision = load_decision(mgr_paths, decision_id)
+        if decision is None:
+            return {"applied": False, "error": f"no decision found for decision_id={decision_id!r}"}
+        if decision.resolved_at:
+            return {
+                "applied": False,
+                "error": (
+                    f"decision {decision_id!r} is already resolved "
+                    f"(resolved_at={decision.resolved_at!r})"
+                ),
+            }
+
+        evidence = load_scope_evidence(mgr_paths, decision_id)
+        step_id = (evidence or {}).get("step_id", "")
+        violated_paths = [v.get("path", "") for v in (evidence or {}).get("violations", [])]
+
+        if resolution == "reject":
+            deny_scope_amendment(paths=mgr_paths, decision=decision)
+            return {
+                "applied": True,
+                "resolution": "reject",
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        # resolution == "approve"
+        plan_step = self._find_step(state, step_id) if step_id else None
+        if plan_step is None:
+            return {
+                "applied": False,
+                "error": (
+                    f"step {step_id!r} referenced by decision {decision_id!r} "
+                    "not found in the current plan"
+                ),
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        widen = list(additional_paths) if additional_paths else violated_paths
+        amendment = apply_scope_amendment(
+            step_id=step_id,
+            current_allowed_paths=list(plan_step.allowed_paths),
+            additional_paths=widen,
+            paths=mgr_paths,
+            decision=decision,
+        )
+        if not amendment.applied:
+            return {
+                "applied": False,
+                "error": amendment.error,
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        # Only now -- after the sidecars/decision durably reflect the
+        # approval -- mutate the authoritative plan and persist.
+        plan_step.allowed_paths = list(amendment.new_allowed_paths)
+        existing_idx = next(
+            (i for i, r in enumerate(state.step_results) if r.step_id == step_id),
+            None,
+        )
+        if existing_idx is not None and state.step_results[existing_idx].status == "failed":
+            state.step_results.pop(existing_idx)
+        # Clear the retained worktree's live registry pointer so re-dispatch
+        # creates a fresh one; the old directory is left on disk (never
+        # deleted here) for forensic recovery.
+        step_worktrees = dict(getattr(state, "step_worktrees", {}))
+        if step_worktrees.pop(step_id, None) is not None:
+            state.step_worktrees = step_worktrees
+        state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
+        self._save_execution(state)
+
+        return {
+            "applied": True,
+            "resolution": "approve",
+            "step_id": step_id,
+            "decision_id": decision_id,
+            "new_allowed_paths": amendment.new_allowed_paths,
+        }
+
     def record_step_result(
         self,
         step_id: str,
@@ -2856,6 +3068,108 @@ class ExecutionEngine:
                         _log.debug(
                             "Scope-expansion queue_for_manager routing failed "
                             "(non-fatal): %s", _route_exc,
+                        )
+
+        # ── Independent diff-derived scope-expansion evidence (Phase 3
+        # "Make scope contracts authoritative", 3.2) ──────────────────────
+        # The manager-mode block above only reacts to what the agent SAID
+        # ("SCOPE_EXPANSION: <path> — <reason>"). This block never trusts
+        # that -- and never trusts the files_changed/commit_hash arguments
+        # this call received either. It independently recomputes the real
+        # changed-file list from the worktree's own git history (base_sha
+        # -> its own current HEAD; see
+        # manager_scope_signal.independent_worktree_diff) and compares it
+        # to the step's scope contract. An out-of-contract diff can never
+        # be silently accepted regardless of manager_config.scoping.
+        # scope_expansion_policy (that policy governs how much trust to
+        # extend to an agent's own forward-looking marker; it has no
+        # bearing on independently-verified evidence that a step ALREADY
+        # wrote outside its contract): it always forces the step to
+        # "failed" -- so the Wave 1.3 fold-back block below (which only
+        # folds when status == "complete") retains the worktree instead of
+        # folding it -- and always files a durable, evidence-backed
+        # ManagerDecision via _file_diff_scope_decision().
+        if (
+            status == "complete"
+            and state.plan is not None
+            and state.plan.manager_mode
+            and _plan_step is not None
+            and (_plan_step.allowed_paths or _plan_step.blocked_paths)
+            and self._worktree_mgr is not None
+        ):
+            _diff_wt_dict = getattr(state, "step_worktrees", {}).get(step_id)
+            if _diff_wt_dict is not None:
+                _real_changed: list[str] | None = None
+                _diff_error = ""
+                try:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        independent_worktree_diff,
+                    )
+                    _real_changed = independent_worktree_diff(_diff_wt_dict)
+                except Exception as _diff_exc:  # noqa: BLE001
+                    _diff_error = str(_diff_exc)
+                    _log.warning(
+                        "Independent diff verification failed for step %s "
+                        "(fail-closed -- treating as a violation): %s",
+                        step_id, _diff_error,
+                    )
+
+                if _real_changed is None:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        ScopeExpansionSignal as _SES,
+                    )
+                    _diff_violations = [_SES(
+                        path="<diff-unavailable>",
+                        reason=(
+                            "[diff-verified] independent git diff "
+                            f"verification failed: {_diff_error}"
+                        ),
+                        step_id=step_id,
+                    )]
+                else:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        derive_scope_expansion_from_diff,
+                    )
+                    _diff_violations = derive_scope_expansion_from_diff(
+                        changed_files=_real_changed,
+                        allowed_paths=_plan_step.allowed_paths,
+                        blocked_paths=_plan_step.blocked_paths,
+                        step_id=step_id,
+                    )
+
+                if _diff_violations:
+                    _diff_msg = (
+                        f"OUT_OF_SCOPE_DIFF: step {step_id} ({agent_name})'s "
+                        "actual git diff (independently verified from "
+                        "worktree base_sha -> HEAD, not agent-reported) "
+                        "touched paths outside its scope contract: "
+                        + "; ".join(f"{v.path} ({v.reason})" for v in _diff_violations)
+                    )
+                    _log.warning("%s", _diff_msg)
+                    result.deviations.append(_diff_msg)
+                    result.status = "failed"
+                    status = "failed"
+                    result.error = _diff_msg
+
+                    try:
+                        self._file_diff_scope_decision(
+                            state,
+                            step_id=step_id,
+                            agent_name=agent_name,
+                            violations=_diff_violations,
+                            real_changed_files=_real_changed or [],
+                        )
+                    except Exception as _dec_exc:  # noqa: BLE001
+                        _log.debug(
+                            "Durable diff-derived scope-expansion decision "
+                            "filing failed (non-fatal): %s", _dec_exc,
+                        )
+
+                    if self._worktree_mgr._bead_store:
+                        self._worktree_mgr._file_bead_warning(
+                            task_id=state.task_id,
+                            step_id=step_id,
+                            content=f"BEAD_WARNING: {_diff_msg}",
                         )
 
         # Determine phase + step index for trace context.
