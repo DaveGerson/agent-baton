@@ -20,6 +20,7 @@ from agent_baton.core.engine.planning.scope_contract import (
     normalize_path_list,
     normalize_scope_path,
     path_candidates_from_text,
+    path_within,
     paths_overlap,
 )
 
@@ -112,6 +113,43 @@ class TestPathsOverlap:
 
     def test_malformed_path_never_overlaps(self) -> None:
         assert paths_overlap("../escape", "app") is False
+
+
+# ---------------------------------------------------------------------------
+# path_within (directional containment)
+# ---------------------------------------------------------------------------
+
+
+class TestPathWithin:
+    def test_exact_match(self) -> None:
+        assert path_within("app/a.py", "app/a.py") is True
+
+    def test_candidate_under_allowed_directory(self) -> None:
+        assert path_within("app/reporting/service.py", "app") is True
+
+    def test_allowed_under_candidate_is_not_within(self) -> None:
+        # DIRECTIONAL: unlike paths_overlap, a coarse candidate does NOT
+        # contain a more-specific allowed file. This is the collapsed
+        # new-directory bypass fix.
+        assert path_within("newdir", "newdir/allowed.py") is False
+        assert paths_overlap("newdir", "newdir/allowed.py") is True
+
+    def test_double_star_candidate_segment_is_literal(self) -> None:
+        # A file literally named ``**`` must not glob-match everything.
+        assert path_within("**", "app/reporting/service.py") is False
+        assert path_within("app/**", "app/reporting/service.py") is False
+        # ...but is fine when it genuinely lives under an allowed dir.
+        assert path_within("app/**", "app") is True
+
+    def test_allowed_side_glob_still_honored(self) -> None:
+        assert path_within("app/reporting/deep/x.py", "app/reporting/**") is True
+        assert path_within("app/other/x.py", "app/reporting/**") is False
+
+    def test_sibling_prefix_without_separator_is_not_within(self) -> None:
+        assert path_within("app/reporting2/x.py", "app/reporting") is False
+
+    def test_malformed_path_never_within(self) -> None:
+        assert path_within("../escape", "app") is False
 
 
 # ---------------------------------------------------------------------------

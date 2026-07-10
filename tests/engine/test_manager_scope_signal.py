@@ -441,3 +441,59 @@ class TestDeriveScopeExpansionFromDiff:
         )
         assert len(violations) == 1
         assert violations[0].path == "blocked"
+
+    def test_double_star_filename_does_not_glob_match_any_allowed_path(self) -> None:
+        """Adversarial (phase 3 review): a changed file whose path is
+        literally ``**`` (or ends in a ``**`` segment) must be treated as
+        a concrete out-of-scope file, NOT glob-interpreted into matching
+        every allowed path. Using bidirectional ``paths_overlap`` on the
+        allow-list check let a root-level ``**`` entry match any allowed
+        prefix -- an out-of-scope diff silently accepted."""
+        violations = derive_scope_expansion_from_diff(
+            changed_files=["**", "app/**"],
+            allowed_paths=["app/reporting/service.py"],
+            blocked_paths=[],
+            step_id="s1",
+        )
+        flagged = {v.path for v in violations}
+        assert "**" in flagged
+        assert "app/**" in flagged
+
+    def test_double_star_file_inside_an_allowed_dir_is_still_clean(self) -> None:
+        """The fix must not over-correct: a file literally named ``**``
+        that genuinely lives under an allowed directory is in-scope."""
+        violations = derive_scope_expansion_from_diff(
+            changed_files=["app/**"],
+            allowed_paths=["app"],
+            blocked_paths=[],
+        )
+        assert violations == []
+
+    def test_collapsed_new_directory_not_swallowed_by_more_specific_allowed_file(
+        self,
+    ) -> None:
+        """Adversarial (phase 3 review): git collapses a wholly-new
+        untracked directory to a single ``newdir/`` entry. When the
+        contract allows only a specific FILE inside it
+        (``newdir/allowed.py``), the coarse ``newdir`` entry must NOT be
+        accepted as in-scope -- an out-of-scope sibling (``newdir/evil.py``)
+        created in the same new directory would ride in on it. The
+        collapsed-directory ambiguity must fail closed (flagged)."""
+        violations = derive_scope_expansion_from_diff(
+            changed_files=["newdir/"],
+            allowed_paths=["newdir/allowed.py"],
+            blocked_paths=[],
+        )
+        assert len(violations) == 1
+        assert violations[0].path == "newdir"
+
+    def test_directory_allowed_still_admits_its_collapsed_form(self) -> None:
+        """Counterpart to the above: when the whole directory is allowed
+        (``newdir``), its collapsed ``newdir/`` diff entry is in-scope --
+        no false positive."""
+        violations = derive_scope_expansion_from_diff(
+            changed_files=["newdir/"],
+            allowed_paths=["newdir"],
+            blocked_paths=[],
+        )
+        assert violations == []

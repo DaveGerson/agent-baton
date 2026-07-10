@@ -56,6 +56,7 @@ __all__ = [
     "normalize_scope_path",
     "normalize_path_list",
     "paths_overlap",
+    "path_within",
     "is_generated_path",
     "is_write_capable",
     "is_intentionally_read_only",
@@ -229,6 +230,53 @@ def paths_overlap(candidate: str, allowed: str) -> bool:
         return not prefix or a == prefix or a.startswith(prefix + "/")
 
     return c.startswith(a + "/") or a.startswith(c + "/")
+
+
+def path_within(candidate: str, allowed: str) -> bool:
+    """Directional containment: is *candidate* the same as, or nested
+    inside, *allowed*?
+
+    Unlike :func:`paths_overlap` (which is deliberately *bidirectional* --
+    it also returns ``True`` when *allowed* is nested inside *candidate*,
+    needed by the blocked-path collision / collapsed-directory checks),
+    this is one-directional: it answers strictly "does *candidate* fall
+    under *allowed*?" and nothing else.
+
+    That direction matters for verifying a concrete changed file against an
+    allow-list contract (see ``agent_baton.core.engine.manager_scope_signal.
+    derive_scope_expansion_from_diff``): a real diff entry is only in-scope
+    when it is the allowed path itself or lives underneath it. Using the
+    bidirectional :func:`paths_overlap` there is a fail-*open* bug:
+
+    * a changed file whose own trailing segment is ``**`` (a file literally
+      named ``**`` -- valid on POSIX) would be glob-interpreted and match
+      any allowed path whose prefix it covers, and
+    * git's whole-new-untracked-directory collapse (``newdir/``) would be
+      treated as "inside" a more-specific allowed *file*
+      (``newdir/allowed.py``) because *allowed* is nested under the coarse
+      *candidate* -- silently admitting an out-of-scope sibling created in
+      the same new directory.
+
+    Here *candidate*'s own segments are always literal (a segment named
+    ``**`` is just a directory called ``**``); only *allowed* may carry a
+    trailing ``**`` glob. A malformed path never contains anything
+    (returns ``False`` rather than raising).
+    """
+    try:
+        c = normalize_scope_path(candidate)
+        a = normalize_scope_path(allowed)
+    except ScopeContractError:
+        return False
+
+    if c == a:
+        return True
+
+    a_segments = a.split("/")
+    if a_segments[-1] == "**":
+        prefix = "/".join(a_segments[:-1])
+        return not prefix or c == prefix or c.startswith(prefix + "/")
+
+    return c.startswith(a + "/")
 
 
 # ---------------------------------------------------------------------------

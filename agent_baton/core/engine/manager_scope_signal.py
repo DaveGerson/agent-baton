@@ -41,6 +41,7 @@ from agent_baton.core.engine.planning.scope_contract import (
     ScopeContractError,
     normalize_path_list,
     normalize_scope_path,
+    path_within,
     paths_overlap,
 )
 
@@ -336,8 +337,19 @@ def derive_scope_expansion_from_diff(
             ))
             continue
 
+        # Allow-list membership is DIRECTIONAL: a concrete changed file is
+        # in-scope only when it *is* an allowed path or lives *under* one
+        # (path_within), never the reverse. Using the bidirectional
+        # paths_overlap here fails open -- a file literally named ``**``
+        # would glob-match any allowed prefix, and git's collapsed
+        # whole-new-directory entry (``newdir/``) would swallow a
+        # more-specific allowed file (``newdir/allowed.py``) and hide an
+        # out-of-scope sibling created in the same new directory. The
+        # blocked-path check below stays bidirectional on purpose: a
+        # coarse collapsed directory that *contains* a blocked path must
+        # still be flagged.
         if normalized_allowed and not any(
-            paths_overlap(candidate, a) for a in normalized_allowed
+            path_within(candidate, a) for a in normalized_allowed
         ):
             violations.append(ScopeExpansionSignal(
                 path=candidate,
