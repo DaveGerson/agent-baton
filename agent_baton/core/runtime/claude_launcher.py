@@ -500,12 +500,24 @@ class ClaudeCodeLauncher:
                 directory as its working directory instead of the default
                 ``config.working_directory``.  Used by Wave 1.3 worktree
                 isolation to run each agent inside its isolated worktree.
+                Every git inspection tied to this launch (pre/post HEAD
+                capture, diff/file discovery) also targets this directory —
+                never the parent repository — so a commit made inside an
+                isolated worktree is detected from that worktree.
             task_id: Optional task identifier propagated to the subprocess as
                 ``BATON_TASK_ID`` when ``cwd_override`` is set, so the
                 subagent's bead/state writes target the correct task.
         """
         start = time.monotonic()
-        pre_commit = await self._git_rev_parse()
+        # The launch's effective working directory: cwd_override takes
+        # precedence over the configured directory (Wave 1.3 worktree
+        # isolation).  ALL git inspection associated with this launch must
+        # use this same directory — never the parent repo's
+        # config.working_directory — otherwise a commit made inside an
+        # isolated worktree is invisible to pre/post HEAD capture and gets
+        # silently discarded by callers that clean up "commit-less" worktrees.
+        effective_cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+        pre_commit = await self._git_rev_parse(effective_cwd)
 
         agent: AgentDefinition | None = None
         if self._registry is not None:
@@ -519,8 +531,7 @@ class ClaudeCodeLauncher:
             self._inject_parent_state_env(env, task_id=task_id)
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
-        # Wave 1.3: cwd_override takes precedence over the configured directory.
-        cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+        cwd = effective_cwd
 
         if use_stdin:
             # Large prompt — deliver via stdin; drop the -p flag from the command.
@@ -559,12 +570,16 @@ class ClaudeCodeLauncher:
 
             break
 
-        # Populate git fields if the agent committed anything.
+        # Populate git fields if the agent committed anything.  Probed from
+        # the same effective_cwd used for pre_commit above, and for the
+        # subprocess launch itself — never the parent repository.
         if result.status == "complete" and pre_commit:
-            post_commit = await self._git_rev_parse()
+            post_commit = await self._git_rev_parse(effective_cwd)
             if post_commit and post_commit != pre_commit:
                 result.commit_hash = post_commit
-                result.files_changed = await self._git_diff_files(pre_commit, post_commit)
+                result.files_changed = await self._git_diff_files(
+                    pre_commit, post_commit, effective_cwd
+                )
 
         return result
 
@@ -892,8 +907,17 @@ class ClaudeCodeLauncher:
         lower = stderr.lower()
         return "rate limit" in lower or "429" in lower
 
-    async def _git_rev_parse(self) -> str:
-        """Return the current HEAD commit hash, or ``""`` on failure."""
+    async def _git_rev_parse(self, cwd: str) -> str:
+        """Return the current HEAD commit hash in *cwd*, or ``""`` on failure.
+
+        Args:
+            cwd: The launch's effective working directory (``cwd_override``
+                when set, otherwise ``config.working_directory``).  Callers
+                MUST pass the same effective cwd used for the subprocess
+                launch itself — probing a different directory (e.g. the
+                parent repository while the agent worked in an isolated
+                worktree) silently hides real commits.
+        """
         if self._git_bin is None:
             return ""
         try:
@@ -901,7 +925,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "rev-parse", "HEAD",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode == 0:
@@ -910,8 +934,16 @@ class ClaudeCodeLauncher:
             pass
         return ""
 
-    async def _git_diff_files(self, from_commit: str, to_commit: str) -> list[str]:
-        """Return files changed between *from_commit* and *to_commit*."""
+    async def _git_diff_files(
+        self, from_commit: str, to_commit: str, cwd: str
+    ) -> list[str]:
+        """Return files changed between *from_commit* and *to_commit* in *cwd*.
+
+        Args:
+            cwd: The launch's effective working directory — see
+                :meth:`_git_rev_parse` for why this must match the cwd used
+                to capture *from_commit*/*to_commit*.
+        """
         if self._git_bin is None or not from_commit or not to_commit:
             return []
         try:
@@ -919,7 +951,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "diff", "--name-only", from_commit, to_commit,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:

@@ -24,6 +24,7 @@ from agent_baton.core.engine.worktree_manager import (
     WorktreeFoldError,
     WorktreeHandle,
     WorktreeManager,
+    WorktreeProvenanceError,
 )
 
 
@@ -334,6 +335,124 @@ class TestWorktreeFoldBackConflict:
 
         # Worktree directory must still exist after a fold conflict
         assert handle.path.is_dir(), "Worktree must be retained after fold conflict"
+
+
+# ---------------------------------------------------------------------------
+# Commit provenance guard — a worktree's fold-back / cleanup must never
+# succeed when the caller-reported commit_hash (or its absence) disagrees
+# with the worktree's own ground-truth git state. Regression coverage for
+# the "successful agent commit silently discarded" defect: a launcher that
+# probes the wrong directory (e.g. the parent repo) for pre/post HEAD
+# capture can report an empty or stale commit_hash even though the
+# worktree genuinely has new work — these guards make that fail closed
+# instead of silently folding a phantom commit or deleting real work.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldBackRejectsUnverifiableCommit:
+    """fold_back() must refuse to fold a commit_hash it cannot verify as
+    real, new work that exists inside the worktree — and must leave the
+    worktree completely intact when it refuses."""
+
+    def test_rejects_commit_not_present_anywhere(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov1", step_id="1.1", base_branch="main")
+        bogus = "f" * 40  # fabricated hash — not a real object anywhere
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=bogus)
+        assert handle.path.is_dir(), "Worktree must be retained after provenance failure"
+
+    def test_rejects_commit_equal_to_base_sha(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """A commit_hash that equals the worktree's own base_sha represents
+        no new work — the signature of a caller that read HEAD from the
+        parent repository instead of the worktree."""
+        handle = mgr.create(task_id="task-prov2", step_id="1.1", base_branch="main")
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=handle.base_sha)
+        assert handle.path.is_dir()
+
+    def test_rejects_commit_that_predates_base_sha(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """A commit_hash that is an ancestor of base_sha predates the
+        worktree entirely — also evidence of a parent-repository read."""
+        first_sha = _commit_file(tmp_git_repo, "a.txt", "1")
+        second_sha = _commit_file(tmp_git_repo, "b.txt", "2")
+        handle = mgr.create(task_id="task-prov3", step_id="1.1", base_branch="main")
+        assert handle.base_sha == second_sha
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=first_sha)
+        assert handle.path.is_dir()
+
+    def test_accepts_genuine_new_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Sanity check: a real, new commit inside the worktree still folds
+        cleanly — the guard must not reject legitimate work."""
+        handle = mgr.create(task_id="task-prov4", step_id="1.1", base_branch="main")
+        subprocess.run(
+            ["git", "switch", handle.branch], cwd=handle.path,
+            check=True, capture_output=True,
+        )
+        agent_sha = _commit_file(handle.path, "real.txt", "real work")
+
+        new_head = mgr.fold_back(handle, commit_hash=agent_sha, strategy="none")
+        assert new_head == agent_sha
+
+
+class TestVerifySafeToDiscard:
+    """_verify_safe_to_discard() is the fail-closed guard consulted before
+    a worktree is permanently deleted with no commit to fold."""
+
+    def test_rejects_unreported_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov5", step_id="1.1", base_branch="main")
+        subprocess.run(
+            ["git", "switch", handle.branch], cwd=handle.path,
+            check=True, capture_output=True,
+        )
+        _commit_file(handle.path, "surprise.txt", "unreported work")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "Worktree must be retained when a commit went unreported"
+
+    def test_rejects_dirty_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov6", step_id="1.1", base_branch="main")
+        (handle.path / "uncommitted.txt").write_text("wip", encoding="utf-8")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "Worktree must be retained when it has uncommitted changes"
+
+    def test_allows_genuinely_clean_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """No new commit, no dirty changes — must NOT raise (preserves the
+        existing no-op worktree cleanup path)."""
+        handle = mgr.create(task_id="task-prov7", step_id="1.1", base_branch="main")
+        mgr._verify_safe_to_discard(handle)  # must not raise
+
+    def test_noop_when_disabled(self, tmp_git_repo: Path) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo, enabled=False)
+        handle = mgr.create(task_id="task-prov8", step_id="1.1", base_branch="main")
+        mgr._verify_safe_to_discard(handle)  # dummy /dev/null handle — no-op
+
+    def test_noop_when_path_already_gone(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Nothing left to protect once the directory no longer exists."""
+        handle = mgr.create(task_id="task-prov9", step_id="1.1", base_branch="main")
+        mgr.cleanup(handle, on_failure=False)
+        assert not handle.path.exists()
+        mgr._verify_safe_to_discard(handle)  # must not raise
 
 
 # ---------------------------------------------------------------------------

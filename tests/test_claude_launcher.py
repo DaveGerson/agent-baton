@@ -1128,3 +1128,124 @@ class TestWaveOneThreeStateEnvInjection:
         assert env["BATON_DB_PATH"] == "/explicit/test/baton.db"  # preserved
         assert "BATON_TEAM_CONTEXT_ROOT" in env  # newly added
         assert env["BATON_TASK_ID"] == "t"
+
+
+# ===========================================================================
+# Regression: git inspection must target the launch's effective cwd
+# (cwd_override when set, else config.working_directory) — never the
+# parent repository's config.working_directory when a worktree is active.
+#
+# Defect: pre-launch/post-launch HEAD capture and diff/file discovery were
+# hardcoded to `self._config.working_directory`, ignoring `cwd_override`.
+# For a Wave 1.3 worktree-isolated dispatch this means a real commit made
+# inside the worktree was invisible to the launcher (parent HEAD never
+# moves), so `commit_hash`/`files_changed` came back empty even though the
+# agent committed — silently discarding the work once the caller (the
+# executor) cleaned up the "commit-less" worktree.
+# ===========================================================================
+
+def _patch_subprocess_sequence_capture_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: list[FakeProcess],
+) -> list[str | None]:
+    """Like _patch_subprocess_sequence, but also records the `cwd` kwarg
+    passed to each `asyncio.create_subprocess_exec` call, in call order."""
+    call_box = [0]
+    captured_cwds: list[str | None] = []
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        idx = call_box[0]
+        call_box[0] += 1
+        captured_cwds.append(kwargs.get("cwd"))
+        return processes[idx]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return captured_cwds
+
+
+class TestGitProbingUsesEffectiveCwd:
+    """All git inspection tied to a launch must use cwd_override (when set)
+    rather than the parent repo's config.working_directory."""
+
+    def test_pre_and_post_head_capture_use_cwd_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+
+        pre_commit_proc = FakeProcess(stdout=b"abc123\n", returncode=0)
+        main_proc = FakeProcess(stdout=_ok_json(), returncode=0)
+        post_commit_proc = FakeProcess(stdout=b"def456\n", returncode=0)
+        diff_proc = FakeProcess(stdout=b"src/foo.py\n", returncode=0)
+
+        captured_cwds = _patch_subprocess_sequence_capture_cwd(
+            monkeypatch,
+            [pre_commit_proc, main_proc, post_commit_proc, diff_proc],
+        )
+
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        launcher = _launcher(monkeypatch, config)
+        launcher._git_bin = "/usr/bin/git"
+
+        async def _run():
+            result = await launcher.launch(
+                "backend", "sonnet", "add feature", "1.3",
+                cwd_override=str(worktree_path),
+            )
+            assert result.commit_hash == "def456"
+            assert result.files_changed == ["src/foo.py"]
+
+        asyncio.run(_run())
+
+        assert len(captured_cwds) == 4
+        # call 0: pre-launch HEAD capture
+        assert captured_cwds[0] == str(worktree_path), (
+            "pre-launch HEAD capture must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[0]!r}"
+        )
+        # call 1: the claude subprocess itself
+        assert captured_cwds[1] == str(worktree_path)
+        # call 2: post-launch HEAD capture
+        assert captured_cwds[2] == str(worktree_path), (
+            "post-launch HEAD capture must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[2]!r}"
+        )
+        # call 3: diff/file discovery
+        assert captured_cwds[3] == str(worktree_path), (
+            "diff/file discovery must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[3]!r}"
+        )
+        # None of the git probes may target the parent repo.
+        assert str(parent_root) not in captured_cwds
+
+    def test_no_cwd_override_still_uses_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Ordinary in-place launches (no cwd_override) keep probing
+        config.working_directory — current behavior is preserved."""
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+
+        pre_commit_proc = FakeProcess(stdout=b"abc123\n", returncode=0)
+        main_proc = FakeProcess(stdout=_ok_json(), returncode=0)
+        post_commit_proc = FakeProcess(stdout=b"def456\n", returncode=0)
+        diff_proc = FakeProcess(stdout=b"src/foo.py\n", returncode=0)
+
+        captured_cwds = _patch_subprocess_sequence_capture_cwd(
+            monkeypatch,
+            [pre_commit_proc, main_proc, post_commit_proc, diff_proc],
+        )
+
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        launcher = _launcher(monkeypatch, config)
+        launcher._git_bin = "/usr/bin/git"
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "add feature", "1.3")
+            assert result.commit_hash == "def456"
+
+        asyncio.run(_run())
+
+        assert all(c == str(parent_root) for c in captured_cwds)

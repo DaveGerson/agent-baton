@@ -2979,6 +2979,7 @@ class ExecutionEngine:
                         WorktreeCleanupError,
                         WorktreeFoldError,
                         WorktreeHandle,
+                        WorktreeProvenanceError,
                     )
                     _handle = WorktreeHandle.from_dict(_handle_dict)
                     # Wire active trace for event emission
@@ -2994,6 +2995,32 @@ class ExecutionEngine:
                                 # consumers can reference the exact integrated
                                 # commit without re-running git.
                                 state.working_branch_head = new_head
+                            except WorktreeProvenanceError as prov_exc:
+                                # Fail closed: the reported commit could not be
+                                # verified as new work that actually exists in
+                                # this worktree (missing, or points at a commit
+                                # that predates the worktree — i.e. the parent
+                                # repository). Never fold or delete in this
+                                # state; the worktree stays in step_worktrees
+                                # for forensic recovery.
+                                _log.warning(
+                                    "Commit provenance check failed for step %s: %s",
+                                    step_id, prov_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-provenance-missing "
+                                            f"step={step_id} reason={prov_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = f"WorktreeProvenanceError: {prov_exc}"
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(prov_exc)
+                                )
                             except WorktreeFoldError as fold_exc:
                                 _log.warning(
                                     "Fold-back conflict for step %s: %s",
@@ -3035,22 +3062,52 @@ class ExecutionEngine:
                                 _step_worktrees.pop(step_id, None)
                                 state.step_worktrees = _step_worktrees
                         else:
-                            # No commit: clean up without fold.
-                            # bd-f2f7: retry with force=True on untracked-file
-                            # interference so the success path always reclaims
-                            # the worktree directory.
+                            # No commit reported: before permanently deleting
+                            # the worktree, independently re-verify (from the
+                            # worktree's own ground-truth git state — never
+                            # just trusting the "no commit" signal) that
+                            # nothing would be silently lost. This is the
+                            # fail-closed net for the case where the
+                            # commit_hash the launcher reported is wrong
+                            # (e.g. captured from the wrong directory).
                             try:
-                                self._worktree_mgr.cleanup(_handle, on_failure=False)
-                            except WorktreeCleanupError:
-                                try:
-                                    self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
-                                except WorktreeCleanupError as _force_exc:
-                                    _log.debug(
-                                        "Worktree force-cleanup failed for step %s (non-fatal): %s",
-                                        step_id, _force_exc,
+                                self._worktree_mgr._verify_safe_to_discard(_handle)
+                            except WorktreeProvenanceError as prov_exc:
+                                _log.warning(
+                                    "Refusing to discard worktree for step %s: %s",
+                                    step_id, prov_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-provenance-missing "
+                                            f"step={step_id} reason={prov_exc}"
+                                        ),
                                     )
-                            _step_worktrees.pop(step_id, None)
-                            state.step_worktrees = _step_worktrees
+                                result.status = "failed"
+                                result.error = f"WorktreeProvenanceError: {prov_exc}"
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(prov_exc)
+                                )
+                            else:
+                                # Clean up without fold.
+                                # bd-f2f7: retry with force=True on untracked-file
+                                # interference so the success path always reclaims
+                                # the worktree directory.
+                                try:
+                                    self._worktree_mgr.cleanup(_handle, on_failure=False)
+                                except WorktreeCleanupError:
+                                    try:
+                                        self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                    except WorktreeCleanupError as _force_exc:
+                                        _log.debug(
+                                            "Worktree force-cleanup failed for step %s (non-fatal): %s",
+                                            step_id, _force_exc,
+                                        )
+                                _step_worktrees.pop(step_id, None)
+                                state.step_worktrees = _step_worktrees
                     elif status == "failed":
                         # Retain worktree for forensics / Wave 5.1 takeover
                         self._worktree_mgr.cleanup(_handle, on_failure=True)
