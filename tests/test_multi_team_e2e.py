@@ -110,10 +110,71 @@ def _two_leader_plan_with_nested_team() -> MachinePlan:
     )
 
 
+class _FakeBeadStore:
+    """In-memory stand-in for ``BdBeadStore``.
+
+    Implements just the surface :class:`TeamBoard` /
+    :class:`BeadSelector` use (``write``, ``read``, ``close``, ``query``)
+    so this end-to-end test doesn't require the external ``bd`` binary to
+    be installed — tests must stay hermetic per ``tests/CLAUDE.md``. Mirrors
+    the established pattern in ``tests/test_team_tools.py``'s
+    ``_FakeBeadStore``.
+    """
+
+    def __init__(self) -> None:
+        self._beads: dict = {}
+
+    def write(self, bead) -> str:
+        self._beads[bead.bead_id] = bead
+        return bead.bead_id
+
+    def read(self, bead_id: str):
+        return self._beads.get(bead_id)
+
+    def close(self, bead_id: str, summary: str) -> None:
+        bead = self._beads.get(bead_id)
+        if bead is None:
+            return
+        bead.status = "closed"
+
+    def query(
+        self,
+        *,
+        task_id: str | None = None,
+        agent_name: str | None = None,
+        bead_type: str | None = None,
+        status: str | None = None,
+        tags: list | None = None,
+        limit: int = 100,
+    ) -> list:
+        out = []
+        for bead in self._beads.values():
+            if task_id is not None and bead.task_id != task_id:
+                continue
+            if agent_name is not None and bead.agent_name != agent_name:
+                continue
+            if bead_type is not None and bead.bead_type != bead_type:
+                continue
+            if status is not None and bead.status != status:
+                continue
+            if tags and not set(tags).issubset(set(bead.tags or [])):
+                continue
+            out.append(bead)
+        out.sort(key=lambda b: b.created_at, reverse=True)
+        return out[:limit]
+
+
 @pytest.fixture
 def engine(tmp_path: Path) -> ExecutionEngine:
     storage = SqliteStorage(tmp_path / "baton.db")
     eng = ExecutionEngine(team_context_root=tmp_path, storage=storage)
+    # Hermetic bead store — see _FakeBeadStore docstring. Without this,
+    # engine._bead_store stays None whenever the external `bd` binary is
+    # not on PATH (ExecutionEngine's make_bead_store() call degrades
+    # gracefully), which then makes every team_tools call that needs the
+    # bead store (e.g. team_send_message) raise TeamToolError instead of
+    # exercising the actual messaging/selection behavior under test.
+    eng._bead_store = _FakeBeadStore()  # type: ignore[attr-defined]
     eng.start(_two_leader_plan_with_nested_team())
     return eng
 

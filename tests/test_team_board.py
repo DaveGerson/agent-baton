@@ -4,7 +4,11 @@ Covers send/ack message flow, broadcast vs direct delivery, task
 append/claim/complete lifecycle, and the ``BeadSelector.select_for_team_member``
 integration path.
 
-ADR-13b WP-G: BeadStore (SQLite) removed; uses BdBeadStore via make_bead_store().
+ADR-13b WP-G: BeadStore (SQLite) removed; production code goes through
+BdBeadStore via make_bead_store(). These tests use an in-memory fake
+(``_FakeBeadStore``) so the suite stays hermetic per tests/CLAUDE.md and
+does not require the external ``bd`` binary to be installed on the host
+running the tests.
 """
 from __future__ import annotations
 
@@ -21,24 +25,21 @@ from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 @pytest.fixture
 def bead_store(tmp_path: Path):
-    """BdBeadStore backed by bd for testing TeamBoard messaging + tasks."""
-    from agent_baton.core.engine.bead_backend import make_bead_store
-    db_path = tmp_path / "baton.db"
-    db_path.touch()
-    return make_bead_store(db_path, repo_root=tmp_path)
+    """In-memory stand-in for ``BdBeadStore`` used for TeamBoard messaging
+    + tasks.
+
+    Tests must be hermetic per ``tests/CLAUDE.md`` (no dependency on the
+    external ``bd`` binary being installed on the host running the suite),
+    so this mirrors the established pattern in
+    ``tests/test_team_tools.py``'s ``_FakeBeadStore`` rather than going
+    through ``make_bead_store()`` / the real ``bd`` CLI.
+    """
+    return _FakeBeadStore()
 
 
 @pytest.fixture
 def board(bead_store) -> TeamBoard:
     return TeamBoard(bead_store)
-
-
-# ---------------------------------------------------------------------------
-# Hermetic in-memory bead store — for TeamBoard behavior that does not need
-# the real `bd`-backed store, so these tests run without the external `bd`
-# binary (per tests/CLAUDE.md's hermeticity requirement; mirrors the
-# established pattern in tests/test_team_tools.py's ``_FakeBeadStore``).
-# ---------------------------------------------------------------------------
 
 
 class _FakeBeadStore:
@@ -146,12 +147,15 @@ class TestSendMessage:
 
 
 class TestAckMessage:
-    # BEAD_WARNING: BdBeadStore.query() cannot retrieve closed beads when
-    # label/type filters are applied (bd list --label X omits closed issues).
-    # _acked_message_ids queries message_ack beads which have status=closed, so
-    # acks are never found and acked messages always reappear.  These tests are
-    # xfail until BdBeadStore.query() is updated to pass --status=all when no
-    # status is given.
+    # BEAD_WARNING (production, not exercised by this hermetic suite):
+    # BdBeadStore.query() cannot retrieve closed beads when label/type
+    # filters are applied (bd list --label X omits closed issues).
+    # _acked_message_ids queries message_ack beads which have status=closed,
+    # so against the real bd-backed store acks are never found and acked
+    # messages always reappear. bd_bead_store.py is out of this phase's
+    # allowed paths; fix tracked separately. These tests pass here because
+    # ``board``/``bead_store`` use the hermetic ``_FakeBeadStore``, whose
+    # ``query()`` does not have that bug.
 
     def test_ack_suppresses_re_delivery(self, board: TeamBoard) -> None:
         msg_id = board.send_message(
