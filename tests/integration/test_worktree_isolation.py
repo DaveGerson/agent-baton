@@ -993,25 +993,18 @@ class TestRecordStepResultRetriesCleanupWithForce:
 # -> ``WorktreeManager.cleanup()`` chain.  No ``git rev-parse`` or
 # ``git diff`` call anywhere below is mocked.
 #
-# NOTE on fold strategy (discovered while writing this regression, tracked
-# separately -- fixing it is out of scope for this step's test-only
-# allowed_paths): ``WorktreeManager.create()`` leaves the worktree checked
-# out on its own branch (``git switch -c``).  Git refuses
-# ``git fetch <worktree-path> branch:branch`` into a ref that is checked out
-# ANYWHERE in the repository ("refusing to fetch into branch ... checked
-# out"), so the "rebase" strategy -- the hardcoded default
-# ``record_step_result()`` uses for every real fold-back -- and "merge" can
-# never succeed while the worktree is still alive, which it always is at
-# fold-back time (cleanup only runs AFTER a successful fold).  The "none"
-# (fast-forward) strategy sidesteps this entirely: worktree and parent share
-# one object database, so no fetch is needed, just a ref move -- this is why
-# every other real-git ``WorktreeManager`` test in this suite already uses
-# it (see ``TestWorktreeFoldBackClean``).  The positive test below drives the
-# real ``record_step_result()`` path end to end and overrides only the fold
-# *strategy selection* (never any individual git call, and never
-# ``git rev-parse``/``git diff``) to route around that independent,
-# already-present defect so the assertions exercise genuine, unmocked git
-# commands throughout.
+# NOTE on fold strategy (history): when this regression was first written,
+# ``fold_back()`` defaulted to the "rebase" strategy, whose fetch step git
+# always refuses for a live worktree ("refusing to fetch into branch ...
+# checked out" -- the worktree's branch stays checked out for its entire
+# lifetime), so the test had to pin strategy="none" to route around it.
+# Phase 1 1.3 (commit "fix default fold strategy always failing for real
+# worktree commits") changed the default to "merge", which merges the
+# commit by SHA (worktrees of one repository share one object database, so
+# no fetch is needed) into the branch checked out in the canonical repo.
+# The positive test below therefore now drives ``record_step_result()``
+# end to end with the REAL production default -- no fold override, no git
+# call mocked anywhere.
 
 
 def _write_fake_claude_committing_in_cwd(
@@ -1113,18 +1106,9 @@ class TestRealGitEndToEndWorktreeCommit:
         assert result.files_changed == ["agent_work.txt"]
 
         # Drive the executor through record_step_result() + fold-back with
-        # the launcher's own (real, unmocked) commit_hash/files_changed.
-        # See the module-level NOTE above for why the fold *strategy* is
-        # pinned to fast-forward here -- no git call is mocked.
-        real_fold_back = engine._worktree_mgr.fold_back
-
-        def _fold_back_fast_forward(handle, *, commit_hash="", strategy="rebase"):
-            return real_fold_back(handle, commit_hash=commit_hash, strategy="none")
-
-        monkeypatch.setattr(
-            engine._worktree_mgr, "fold_back", _fold_back_fast_forward
-        )
-
+        # the launcher's own (real, unmocked) commit_hash/files_changed and
+        # the REAL production-default fold strategy (merge) -- nothing in
+        # the fold path is overridden or mocked.
         engine.record_step_result(
             step_id="1.1",
             agent_name="backend-engineer",
@@ -1145,7 +1129,10 @@ class TestRealGitEndToEndWorktreeCommit:
             f"{step_result.status!r} error={step_result.error!r}"
         )
 
-        # The parent receives EXACTLY that commit (fast-forwarded main).
+        # The parent branch receives EXACTLY that commit: the default
+        # (merge) strategy lands it via a --no-ff merge, so the agent's
+        # commit must now be an ancestor of main and main must have moved
+        # past base_sha.
         parent_head = subprocess.run(
             ["git", "rev-parse", "main"],
             cwd=tmp_git_repo,
@@ -1153,9 +1140,19 @@ class TestRealGitEndToEndWorktreeCommit:
             text=True,
             check=True,
         ).stdout.strip()
-        assert parent_head == result.commit_hash, (
-            "parent branch must be fast-forwarded to exactly the worktree's "
-            f"commit; got {parent_head!r} expected {result.commit_hash!r}"
+        assert parent_head != base_sha, "parent branch must have advanced"
+        is_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", result.commit_hash, parent_head],
+            cwd=tmp_git_repo,
+            capture_output=True,
+        )
+        assert is_ancestor.returncode == 0, (
+            "the worktree's commit must be folded into (reachable from) the "
+            f"parent branch; main={parent_head!r} commit={result.commit_hash!r}"
+        )
+        # The executor persists the folded tip for downstream consumers.
+        assert getattr(state_final, "working_branch_head", "") == parent_head, (
+            "working_branch_head must equal the parent tip after fold"
         )
         show = subprocess.run(
             ["git", "show", f"{parent_head}:agent_work.txt"],
