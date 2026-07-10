@@ -629,6 +629,129 @@ class TestTeamReadPull:
 
 
 # ---------------------------------------------------------------------------
+# Bead-store unavailability — fail closed with a typed error, not an
+# opaque AttributeError (phase 4 4.2 regression coverage).
+# ---------------------------------------------------------------------------
+
+
+class TestBeadStoreUnavailable:
+    """``engine._bead_store is None`` (e.g. the ``bd`` binary is missing)
+    must raise a clean :class:`TeamToolError` — never an ``AttributeError``
+    from deep inside :class:`TeamBoard`."""
+
+    def test_team_list_tasks_raises_team_tool_error(
+        self, engine: ExecutionEngine
+    ) -> None:
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="bead store is unavailable"):
+            team_list(engine, task_id="task-tools", team_id="team-1.1")
+
+    def test_team_list_teams_resource_unaffected(
+        self, engine: ExecutionEngine
+    ) -> None:
+        # resource="teams" never touches the bead store (TeamRegistry-only).
+        engine._bead_store = None  # type: ignore[attr-defined]
+        result = team_list(
+            engine, task_id="task-tools", team_id="team-1.1", resource="teams",
+        )
+        assert result == []
+
+    def test_team_claim_raises_team_tool_error(
+        self, engine: ExecutionEngine
+    ) -> None:
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="bead store is unavailable"):
+            team_claim(
+                engine, task_id="task-tools", team_id="team-1.1",
+                task_bead_id="bd-missing", member_id="1.1.b",
+            )
+
+    def test_team_update_raises_team_tool_error(
+        self, engine: ExecutionEngine
+    ) -> None:
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="bead store is unavailable"):
+            team_update(
+                engine, task_id="task-tools", team_id="team-1.1",
+                member_id="1.1.a", title="t",
+            )
+
+    def test_team_send_raises_team_tool_error(
+        self, engine: ExecutionEngine
+    ) -> None:
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="bead store is unavailable"):
+            team_send(
+                engine, task_id="task-tools",
+                from_team="team-1.1", from_member="1.1.a",
+                to_team="team-1.2", subject="s", body="b",
+            )
+
+    def test_team_read_raises_team_tool_error(
+        self, engine: ExecutionEngine
+    ) -> None:
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="bead store is unavailable"):
+            team_read(engine, task_id="task-tools", team_id="team-1.1", member_id="1.1.a")
+
+
+# ---------------------------------------------------------------------------
+# Audit logging — every canonical tool call emits an always-on structured
+# log line naming tool/task_id/member_id/outcome, independent of whether
+# the call reached a bead write (docs/internal/team-runtime-contract.md
+# §7.1; phase 4 4.2 closes the gap left by 4.1's architecture doc).
+# ---------------------------------------------------------------------------
+
+
+class TestAuditLogging:
+    def test_successful_call_logs_success_outcome(
+        self, engine: ExecutionEngine, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level("INFO", logger="agent_baton.core.engine.team_tools")
+        team_send(
+            engine, task_id="task-tools",
+            from_team="team-1.1", from_member="1.1.a",
+            to_team="team-1.2", subject="s", body="b",
+        )
+        records = [r for r in caplog.records if "team_send" in r.message]
+        assert records, "expected an audit log line for team_send"
+        assert "outcome=success" in records[-1].message
+        assert "task_id=task-tools" in records[-1].message
+        assert "member_id=1.1.a" in records[-1].message
+
+    def test_failed_call_logs_failure_outcome(
+        self, engine: ExecutionEngine, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level("INFO", logger="agent_baton.core.engine.team_tools")
+        with pytest.raises(TeamToolError):
+            team_claim(
+                engine, task_id="task-tools", team_id="team-missing",
+                task_bead_id="bd-x", member_id="1.1.a",
+            )
+        records = [r for r in caplog.records if "team_claim" in r.message]
+        assert records, "expected an audit log line for the failed team_claim call"
+        assert "outcome=failed" in records[-1].message
+
+    def test_authorization_failure_is_still_audited(
+        self, engine: ExecutionEngine, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A rejected call never reaches a bead write, but must still be
+        # observable via the audit log (doc §7.1's explicit rationale).
+        # team_dispatch's own role check raises TeamToolError (its
+        # documented, non-TeamAuthorizationError guard — see the
+        # module docstring on team_dispatch).
+        caplog.set_level("INFO", logger="agent_baton.core.engine.team_tools")
+        with pytest.raises(TeamToolError, match="role='lead'"):
+            team_dispatch(
+                engine, task_id="task-tools", parent_team_id="team-1.2",
+                caller_member_id="1.2.b", members=[],
+            )
+        records = [r for r in caplog.records if "team_dispatch" in r.message]
+        assert records, "expected an audit log line for the rejected team_dispatch call"
+        assert "outcome=failed" in records[-1].message
+
+
+# ---------------------------------------------------------------------------
 # TeamBoardConflictError — low-level optimistic concurrency in TeamBoard
 # ---------------------------------------------------------------------------
 

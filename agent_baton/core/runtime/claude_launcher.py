@@ -333,6 +333,18 @@ _DEFAULT_ENV_PASSTHROUGH: list[str] = [
     "BATON_DB_PATH",
     "BATON_TASK_ID",
     "BATON_TEAM_CONTEXT_ROOT",
+    # Phase 4 4.2 (team runtime contract): base-level passthrough for
+    # BATON_TEAM_MEMBER_ID so a caller-set value survives if present in the
+    # parent os.environ. launch() below always OVERWRITES this with the
+    # per-call step_id when non-empty (see the "team runtime contract" note
+    # in launch()'s docstring) — that per-call value is authoritative
+    # because, for a dispatched team member, `step_id IS member.member_id`
+    # by construction (ExecutionEngine._team_dispatch_action). Deriving it
+    # from the per-call argument (rather than relying solely on os.environ)
+    # avoids a race between concurrently-dispatched team members sharing
+    # one process's environment (StepScheduler.dispatch_batch launches
+    # all of a wave's steps concurrently via asyncio.gather).
+    "BATON_TEAM_MEMBER_ID",
 ]
 
 
@@ -744,6 +756,19 @@ class ClaudeCodeLauncher:
             task_id: Optional task identifier propagated to the subprocess as
                 ``BATON_TASK_ID`` when ``cwd_override`` is set, so the
                 subagent's bead/state writes target the correct task.
+
+        Team runtime contract (Phase 4 4.2, docs/internal/team-runtime-
+        contract.md §9.1): when *step_id* is non-empty, it is injected into
+        the subprocess as ``BATON_TEAM_MEMBER_ID`` — for a team member's
+        dispatch, ``step_id`` IS the member's ``member_id`` by construction
+        (see ``ExecutionEngine._team_dispatch_action``, which sets
+        ``ExecutionAction.step_id=member.member_id`` for each flattened team
+        member). This lets a dispatched member's ``baton team <verb>`` calls
+        omit ``--member-id`` and still resolve the caller's own identity.
+        For a non-team (solo) step, ``step_id`` is the plan step's own id
+        (e.g. ``"4.2"``) — the env var is still set, but harmlessly unused,
+        since no such member is registered in any team and a team-tool call
+        against it fails closed with a clear "member not found" error.
         """
         start = time.monotonic()
         # The launch's effective working directory: cwd_override takes
@@ -803,6 +828,13 @@ class ClaudeCodeLauncher:
         # discovery doesn't latch onto the worktree-local empty baton.db.
         if cwd_override:
             self._inject_parent_state_env(env, task_id=task_id)
+        # Phase 4 4.2 (team runtime contract): authoritative, race-free
+        # BATON_TEAM_MEMBER_ID injection — see the "Team runtime contract"
+        # note on this method's docstring for why this overwrites (rather
+        # than merely falling back to) whatever _build_env()'s passthrough
+        # of the parent os.environ produced.
+        if step_id:
+            env["BATON_TEAM_MEMBER_ID"] = step_id
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
         cwd = effective_cwd

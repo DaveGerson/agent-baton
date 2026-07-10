@@ -159,6 +159,61 @@ def _require_registry(engine: "ExecutionEngine") -> "TeamRegistry":
     return reg
 
 
+def _require_bead_store(engine: "ExecutionEngine"):
+    """Return ``engine._bead_store``, raising a clean :class:`TeamToolError`
+    when it is unavailable.
+
+    Without this guard, an engine whose bead store failed to construct
+    (e.g. the ``bd`` binary is missing — see ``ExecutionEngine.__init__``'s
+    best-effort ``try/except`` around ``make_bead_store``) leaves
+    ``engine._bead_store`` as ``None``.  Every canonical/legacy tool that
+    talks to :class:`~agent_baton.core.engine.team_board.TeamBoard`
+    constructs it as ``TeamBoard(engine._bead_store)`` — passing ``None``
+    would raise an opaque ``AttributeError`` deep inside ``TeamBoard``
+    instead of the documented, typed failure. This is exactly the
+    "Underlying store unavailable" row of
+    docs/internal/team-runtime-contract.md §7.3 (mapped to CLI exit code
+    5, distinct from a plain usage error) — the message text below is
+    matched by that mapping.
+    """
+    store = getattr(engine, "_bead_store", None)
+    if store is None:
+        raise TeamToolError(
+            "Team board bead store is unavailable — team tools require a "
+            "configured bead backend (the 'bd' binary; see "
+            "BATON_BD_BACKEND/BATON_BD_BIN)."
+        )
+    return store
+
+
+def _audit(
+    tool_name: str,
+    *,
+    task_id: str,
+    member_id: str,
+    outcome: str,
+    detail: str = "",
+) -> None:
+    """Emit a structured, always-on audit log line for a canonical tool call.
+
+    Independent of whether the call resulted in a bead write — an
+    authorization failure never reaches a bead write but should still be
+    observable (docs/internal/team-runtime-contract.md §7.1). This
+    strengthens, but does not replace, the append-only bead trail every
+    successful write already produces.
+    """
+    if detail:
+        _log.info(
+            "team_tool tool=%s task_id=%s member_id=%s outcome=%s detail=%s",
+            tool_name, task_id, member_id, outcome, detail,
+        )
+    else:
+        _log.info(
+            "team_tool tool=%s task_id=%s member_id=%s outcome=%s",
+            tool_name, task_id, member_id, outcome,
+        )
+
+
 def _require_team(
     registry: "TeamRegistry", task_id: str, team_id: str,
 ) -> None:
@@ -241,7 +296,7 @@ def team_send_message(
         _require_member(engine, task_id, to_member)
 
     from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
+    board = TeamBoard(_require_bead_store(engine))
     return board.send_message(
         task_id=task_id,
         from_team=from_team, from_member=from_member,
@@ -266,7 +321,7 @@ def team_add_task(
     _require_member(engine, task_id, author_member_id)
 
     from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
+    board = TeamBoard(_require_bead_store(engine))
     return board.append_task(
         task_id=task_id, team_id=team_id,
         author_member_id=author_member_id,
@@ -287,7 +342,7 @@ def team_claim_task(
     _require_member(engine, task_id, member_id)
 
     from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
+    board = TeamBoard(_require_bead_store(engine))
     board.claim_task(
         task_id=task_id, task_bead_id=task_bead_id, member_id=member_id,
     )
@@ -304,7 +359,7 @@ def team_complete_task(
     _require_registry(engine)
 
     from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
+    board = TeamBoard(_require_bead_store(engine))
     board.complete_task(
         task_id=task_id, task_bead_id=task_bead_id, outcome=outcome,
     )
@@ -398,45 +453,56 @@ def team_list(
         TeamAuthorizationError: *member_id* given and its role is not
             authorized for ``team_list``.
     """
-    reg = _require_registry(engine)
-    _require_team(reg, task_id, team_id)
-    if member_id is not None:
-        _require_member(engine, task_id, member_id)
-        authorize_team_tool(
-            engine, task_id=task_id, member_id=member_id, tool_name="team_list",
-        )
+    try:
+        reg = _require_registry(engine)
+        _require_team(reg, task_id, team_id)
+        if member_id is not None:
+            _require_member(engine, task_id, member_id)
+            authorize_team_tool(
+                engine, task_id=task_id, member_id=member_id, tool_name="team_list",
+            )
 
-    if resource == "teams":
-        return [t.to_dict() for t in reg.child_teams(task_id, team_id)]
-    if resource != "tasks":
-        raise TeamToolError(
-            f"team_list: unsupported resource={resource!r}; "
-            "expected 'tasks' or 'teams'."
-        )
-    if status not in (None, "open", "claimed", "done"):
-        raise TeamToolError(
-            f"team_list: unsupported status={status!r}; "
-            "expected 'open', 'claimed', 'done', or None."
-        )
+        if resource == "teams":
+            result = [t.to_dict() for t in reg.child_teams(task_id, team_id)]
+            _audit("team_list", task_id=task_id, member_id=member_id or "",
+                   outcome="success", detail=f"resource=teams count={len(result)}")
+            return result
+        if resource != "tasks":
+            raise TeamToolError(
+                f"team_list: unsupported resource={resource!r}; "
+                "expected 'tasks' or 'teams'."
+            )
+        if status not in (None, "open", "claimed", "done"):
+            raise TeamToolError(
+                f"team_list: unsupported status={status!r}; "
+                "expected 'open', 'claimed', 'done', or None."
+            )
 
-    from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
+        from agent_baton.core.engine.team_board import TeamBoard
+        board = TeamBoard(_require_bead_store(engine))
 
-    if status == "done":
-        tasks = board.done_tasks_for_team(task_id=task_id, team_id=team_id, limit=limit)
-    else:
-        tasks = board.open_tasks_for_team(
-            task_id=task_id, team_id=team_id, member_id=member_id, limit=limit,
-        )
-        if status == "open":
-            tasks = [t for t in tasks if not any(
-                tag.startswith("claimed_by=") for tag in t.tags
-            )]
-        elif status == "claimed":
-            tasks = [t for t in tasks if any(
-                tag.startswith("claimed_by=") for tag in t.tags
-            )]
-    return [_task_bead_to_dict(t) for t in tasks]
+        if status == "done":
+            tasks = board.done_tasks_for_team(task_id=task_id, team_id=team_id, limit=limit)
+        else:
+            tasks = board.open_tasks_for_team(
+                task_id=task_id, team_id=team_id, member_id=member_id, limit=limit,
+            )
+            if status == "open":
+                tasks = [t for t in tasks if not any(
+                    tag.startswith("claimed_by=") for tag in t.tags
+                )]
+            elif status == "claimed":
+                tasks = [t for t in tasks if any(
+                    tag.startswith("claimed_by=") for tag in t.tags
+                )]
+    except TeamToolError as exc:
+        _audit("team_list", task_id=task_id, member_id=member_id or "",
+               outcome="failed", detail=str(exc))
+        raise
+    result = [_task_bead_to_dict(t) for t in tasks]
+    _audit("team_list", task_id=task_id, member_id=member_id or "",
+           outcome="success", detail=f"resource=tasks count={len(result)}")
+    return result
 
 
 def team_claim(
@@ -464,22 +530,29 @@ def team_claim(
         TeamConcurrencyError: task already claimed by someone else and
             ``allow_reassign=False``.
     """
-    reg = _require_registry(engine)
-    _require_team(reg, task_id, team_id)
-    _require_member(engine, task_id, member_id)
-    authorize_team_tool(
-        engine, task_id=task_id, member_id=member_id, tool_name="team_claim",
-    )
-
-    from agent_baton.core.engine.team_board import TeamBoard, TeamBoardConflictError
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
     try:
-        board.claim_task(
-            task_id=task_id, task_bead_id=task_bead_id, member_id=member_id,
-            expected_status=None if allow_reassign else "open",
+        reg = _require_registry(engine)
+        _require_team(reg, task_id, team_id)
+        _require_member(engine, task_id, member_id)
+        authorize_team_tool(
+            engine, task_id=task_id, member_id=member_id, tool_name="team_claim",
         )
-    except TeamBoardConflictError as exc:
-        raise TeamConcurrencyError(str(exc)) from exc
+
+        from agent_baton.core.engine.team_board import TeamBoard, TeamBoardConflictError
+        board = TeamBoard(_require_bead_store(engine))
+        try:
+            board.claim_task(
+                task_id=task_id, task_bead_id=task_bead_id, member_id=member_id,
+                expected_status=None if allow_reassign else "open",
+            )
+        except TeamBoardConflictError as exc:
+            raise TeamConcurrencyError(str(exc)) from exc
+    except TeamToolError as exc:
+        _audit("team_claim", task_id=task_id, member_id=member_id,
+               outcome="failed", detail=str(exc))
+        raise
+    _audit("team_claim", task_id=task_id, member_id=member_id,
+           outcome="success", detail=f"task_bead_id={task_bead_id}")
     return {"task_bead_id": task_bead_id, "claimed_by": member_id}
 
 
@@ -520,46 +593,53 @@ def team_update(
             create mode, or an unsupported transition in update mode.
         TeamAuthorizationError: role not authorized for ``team_update``.
     """
-    reg = _require_registry(engine)
-    _require_team(reg, task_id, team_id)
-    _require_member(engine, task_id, member_id)
-    authorize_team_tool(
-        engine, task_id=task_id, member_id=member_id, tool_name="team_update",
-    )
-
-    from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
-
-    if task_bead_id is None:
-        if not title:
-            raise TeamToolError(
-                "team_update: 'title' is required to create a task "
-                "(task_bead_id is None)."
-            )
-        new_id = board.append_task(
-            task_id=task_id, team_id=team_id, author_member_id=member_id,
-            title=title, detail=detail,
-            parent_task_bead_id=parent_task_bead_id,
-            idempotency_key=idempotency_key,
+    try:
+        reg = _require_registry(engine)
+        _require_team(reg, task_id, team_id)
+        _require_member(engine, task_id, member_id)
+        authorize_team_tool(
+            engine, task_id=task_id, member_id=member_id, tool_name="team_update",
         )
-        return {"task_bead_id": new_id, "status": "open"}
 
-    if status == "complete":
-        if not outcome:
-            raise TeamToolError(
-                "team_update: 'outcome' is required to complete a task "
-                f"(task_bead_id={task_bead_id!r})."
+        from agent_baton.core.engine.team_board import TeamBoard
+        board = TeamBoard(_require_bead_store(engine))
+
+        if task_bead_id is None:
+            if not title:
+                raise TeamToolError(
+                    "team_update: 'title' is required to create a task "
+                    "(task_bead_id is None)."
+                )
+            new_id = board.append_task(
+                task_id=task_id, team_id=team_id, author_member_id=member_id,
+                title=title, detail=detail,
+                parent_task_bead_id=parent_task_bead_id,
+                idempotency_key=idempotency_key,
             )
-        board.complete_task(
-            task_id=task_id, task_bead_id=task_bead_id, outcome=outcome,
-        )
-        return {"task_bead_id": task_bead_id, "status": "done"}
-
-    raise TeamToolError(
-        f"team_update: unsupported transition (task_bead_id set, "
-        f"status={status!r}); only status='complete' is supported when "
-        "task_bead_id is given."
-    )
+            result = {"task_bead_id": new_id, "status": "open"}
+        elif status == "complete":
+            if not outcome:
+                raise TeamToolError(
+                    "team_update: 'outcome' is required to complete a task "
+                    f"(task_bead_id={task_bead_id!r})."
+                )
+            board.complete_task(
+                task_id=task_id, task_bead_id=task_bead_id, outcome=outcome,
+            )
+            result = {"task_bead_id": task_bead_id, "status": "done"}
+        else:
+            raise TeamToolError(
+                f"team_update: unsupported transition (task_bead_id set, "
+                f"status={status!r}); only status='complete' is supported when "
+                "task_bead_id is given."
+            )
+    except TeamToolError as exc:
+        _audit("team_update", task_id=task_id, member_id=member_id,
+               outcome="failed", detail=str(exc))
+        raise
+    _audit("team_update", task_id=task_id, member_id=member_id,
+           outcome="success", detail=f"task_bead_id={result['task_bead_id']} status={result['status']}")
+    return result
 
 
 def team_send(
@@ -582,17 +662,24 @@ def team_send(
         TeamAuthorizationError: *from_member*'s role is not authorized
             for ``team_send``.
     """
-    _require_registry(engine)
-    _require_member(engine, task_id, from_member)
-    authorize_team_tool(
-        engine, task_id=task_id, member_id=from_member, tool_name="team_send",
-    )
-    bead_id = team_send_message(
-        engine, task_id=task_id,
-        from_team=from_team, from_member=from_member,
-        to_team=to_team, to_member=to_member,
-        subject=subject, body=body,
-    )
+    try:
+        _require_registry(engine)
+        _require_member(engine, task_id, from_member)
+        authorize_team_tool(
+            engine, task_id=task_id, member_id=from_member, tool_name="team_send",
+        )
+        bead_id = team_send_message(
+            engine, task_id=task_id,
+            from_team=from_team, from_member=from_member,
+            to_team=to_team, to_member=to_member,
+            subject=subject, body=body,
+        )
+    except TeamToolError as exc:
+        _audit("team_send", task_id=task_id, member_id=from_member,
+               outcome="failed", detail=str(exc))
+        raise
+    _audit("team_send", task_id=task_id, member_id=from_member,
+           outcome="success", detail=f"message_bead_id={bead_id} to_team={to_team}")
     return {"message_bead_id": bead_id}
 
 
@@ -618,25 +705,32 @@ def team_read(
         TeamToolError: unknown *team_id*/*member_id*.
         TeamAuthorizationError: role not authorized for ``team_read``.
     """
-    reg = _require_registry(engine)
-    _require_team(reg, task_id, team_id)
-    _require_member(engine, task_id, member_id)
-    authorize_team_tool(
-        engine, task_id=task_id, member_id=member_id, tool_name="team_read",
-    )
+    try:
+        reg = _require_registry(engine)
+        _require_team(reg, task_id, team_id)
+        _require_member(engine, task_id, member_id)
+        authorize_team_tool(
+            engine, task_id=task_id, member_id=member_id, tool_name="team_read",
+        )
 
-    from agent_baton.core.engine.team_board import TeamBoard
-    board = TeamBoard(engine._bead_store)  # type: ignore[attr-defined]
-    messages = board.unread_messages_for_member(
-        task_id=task_id, team_id=team_id, member_id=member_id, limit=limit,
-    )
-    out = [_message_bead_to_dict(m) for m in messages]
-    if ack:
-        for m in messages:
-            board.ack_message(
-                task_id=task_id, message_bead_id=m.bead_id,
-                recipient_member_id=member_id,
-            )
+        from agent_baton.core.engine.team_board import TeamBoard
+        board = TeamBoard(_require_bead_store(engine))
+        messages = board.unread_messages_for_member(
+            task_id=task_id, team_id=team_id, member_id=member_id, limit=limit,
+        )
+        out = [_message_bead_to_dict(m) for m in messages]
+        if ack:
+            for m in messages:
+                board.ack_message(
+                    task_id=task_id, message_bead_id=m.bead_id,
+                    recipient_member_id=member_id,
+                )
+    except TeamToolError as exc:
+        _audit("team_read", task_id=task_id, member_id=member_id,
+               outcome="failed", detail=str(exc))
+        raise
+    _audit("team_read", task_id=task_id, member_id=member_id,
+           outcome="success", detail=f"count={len(out)} ack={ack}")
     return out
 
 
@@ -667,78 +761,85 @@ def team_dispatch(
 
     Returns the new child ``team_id``.
     """
-    reg = _require_registry(engine)
-    _require_team(reg, task_id, parent_team_id)
-    _require_member(engine, task_id, caller_member_id)
+    try:
+        reg = _require_registry(engine)
+        _require_team(reg, task_id, parent_team_id)
+        _require_member(engine, task_id, caller_member_id)
 
-    caller_role = _member_role(engine, task_id, caller_member_id)
-    if caller_role != "lead":
-        raise TeamToolError(
-            f"team_dispatch is available only to role='lead' members; "
-            f"caller {caller_member_id!r} has role={caller_role!r}."
-        )
+        caller_role = _member_role(engine, task_id, caller_member_id)
+        if caller_role != "lead":
+            raise TeamToolError(
+                f"team_dispatch is available only to role='lead' members; "
+                f"caller {caller_member_id!r} has role={caller_role!r}."
+            )
 
-    # Attach the sub_team to the lead's TeamMember.
-    from agent_baton.models.execution import SynthesisSpec, TeamMember
+        # Attach the sub_team to the lead's TeamMember.
+        from agent_baton.models.execution import SynthesisSpec, TeamMember
 
-    state = engine._load_execution()  # type: ignore[attr-defined]
-    if state is None:
-        raise TeamToolError(f"No active execution for task {task_id!r}.")
+        state = engine._load_execution()  # type: ignore[attr-defined]
+        if state is None:
+            raise TeamToolError(f"No active execution for task {task_id!r}.")
 
-    caller_member = None
-    parent_step = None
-    for phase in state.plan.phases:
-        for step in phase.steps:
-            if not step.team:
-                continue
-            for m in engine._flatten_team_members(step.team):  # type: ignore[attr-defined]
-                if m.member_id == caller_member_id:
-                    caller_member = m
-                    parent_step = step
+        caller_member = None
+        parent_step = None
+        for phase in state.plan.phases:
+            for step in phase.steps:
+                if not step.team:
+                    continue
+                for m in engine._flatten_team_members(step.team):  # type: ignore[attr-defined]
+                    if m.member_id == caller_member_id:
+                        caller_member = m
+                        parent_step = step
+                        break
+                if caller_member is not None:
                     break
             if caller_member is not None:
                 break
-        if caller_member is not None:
-            break
 
-    if caller_member is None or parent_step is None:
-        raise TeamToolError(
-            f"Unable to locate {caller_member_id!r} in plan for task {task_id!r}."
+        if caller_member is None or parent_step is None:
+            raise TeamToolError(
+                f"Unable to locate {caller_member_id!r} in plan for task {task_id!r}."
+            )
+
+        # Compose the new sub-team member list, generating member_ids under the
+        # caller's own id when the input dict omits them.
+        new_members: list[TeamMember] = []
+        for idx, spec in enumerate(members):
+            member_id = spec.get("member_id") or f"{caller_member_id}.{chr(97 + idx)}"
+            new_members.append(TeamMember(
+                member_id=member_id,
+                agent_name=spec["agent_name"],
+                role=spec.get("role", "implementer"),
+                task_description=spec.get("task_description", ""),
+                model=spec.get("model", "sonnet"),
+                depends_on=list(spec.get("depends_on", [])),
+                deliverables=list(spec.get("deliverables", [])),
+            ))
+        caller_member.sub_team.extend(new_members)
+
+        if synthesis is not None:
+            caller_member.synthesis = SynthesisSpec.from_dict(synthesis)
+        elif caller_member.synthesis is None:
+            caller_member.synthesis = SynthesisSpec()
+
+        # Register the child team.
+        child_team_id = f"{parent_step.step_id}::{caller_member_id}"
+        reg.create_team(
+            task_id=task_id,
+            team_id=child_team_id,
+            step_id=caller_member_id,
+            leader_agent=caller_member.agent_name,
+            leader_member_id=caller_member_id,
+            parent_team_id=parent_team_id,
         )
 
-    # Compose the new sub-team member list, generating member_ids under the
-    # caller's own id when the input dict omits them.
-    new_members: list[TeamMember] = []
-    for idx, spec in enumerate(members):
-        member_id = spec.get("member_id") or f"{caller_member_id}.{chr(97 + idx)}"
-        new_members.append(TeamMember(
-            member_id=member_id,
-            agent_name=spec["agent_name"],
-            role=spec.get("role", "implementer"),
-            task_description=spec.get("task_description", ""),
-            model=spec.get("model", "sonnet"),
-            depends_on=list(spec.get("depends_on", [])),
-            deliverables=list(spec.get("deliverables", [])),
-        ))
-    caller_member.sub_team.extend(new_members)
-
-    if synthesis is not None:
-        caller_member.synthesis = SynthesisSpec.from_dict(synthesis)
-    elif caller_member.synthesis is None:
-        caller_member.synthesis = SynthesisSpec()
-
-    # Register the child team.
-    child_team_id = f"{parent_step.step_id}::{caller_member_id}"
-    reg.create_team(
-        task_id=task_id,
-        team_id=child_team_id,
-        step_id=caller_member_id,
-        leader_agent=caller_member.agent_name,
-        leader_member_id=caller_member_id,
-        parent_team_id=parent_team_id,
-    )
-
-    # Persist state so the next next_actions() call rebuilds the dispatch
-    # wave with the new sub-team.
-    engine._save_execution(state)  # type: ignore[attr-defined]
+        # Persist state so the next next_actions() call rebuilds the dispatch
+        # wave with the new sub-team.
+        engine._save_execution(state)  # type: ignore[attr-defined]
+    except TeamToolError as exc:
+        _audit("team_dispatch", task_id=task_id, member_id=caller_member_id,
+               outcome="failed", detail=str(exc))
+        raise
+    _audit("team_dispatch", task_id=task_id, member_id=caller_member_id,
+           outcome="success", detail=f"child_team_id={child_team_id}")
     return child_team_id
