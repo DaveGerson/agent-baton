@@ -164,6 +164,7 @@ from agent_baton.models.execution import (
     PlanStep,
     StepResult,
     SynthesisSpec,
+    SynthesisState,
     TeamStepResult,
 )
 from agent_baton.models.events import Event
@@ -2164,6 +2165,18 @@ class ExecutionEngine:
         actions: list[ExecutionAction] = []
         for step, is_in_flight_team in dispatchable_steps:
             if step.team:
+                if is_in_flight_team:
+                    # Phase 4, 4.3: an in-flight team step that has finished
+                    # collecting member results and is ready for
+                    # agent_synthesis dispatch takes priority over
+                    # re-evaluating _team_dispatch_action (which would just
+                    # return WAIT once every member is occupied).  Exactly-
+                    # once and a no-op for non-agent_synthesis steps — see
+                    # _pending_synthesis_dispatch.
+                    synth_action = self._pending_synthesis_dispatch(step, state)
+                    if synth_action is not None:
+                        actions.append(synth_action)
+                        continue
                 team_action = self._team_dispatch_action(
                     step, state, wave_isolation=wave_isolation,
                 )
@@ -2695,6 +2708,35 @@ class ExecutionEngine:
             (i for i, r in enumerate(state.step_results) if r.step_id == step_id),
             None,
         )
+        existing_result = (
+            state.step_results[existing_idx] if existing_idx is not None else None
+        )
+
+        # ── Team-synthesis carry-forward (agent_synthesis dispatch) ────────
+        # A team step's ``agent_synthesis`` merge strategy dispatches the
+        # synthesis agent AGAINST THE SAME step_id as the parent team step
+        # (see _pending_synthesis_dispatch) so its own dispatch/record round
+        # trip flows through this exact method -- the same scope/commit/
+        # evidence verification pipeline ordinary steps already go through
+        # -- rather than a synthetic id that would need its own scope-
+        # resolution special-casing.  Without this carry-forward, the
+        # unconditional replace above would silently discard the team's
+        # member_results and in-flight synthesis_state the moment the
+        # synthesis agent is marked dispatched.  Guarded on the existing
+        # row actually carrying team/synthesis data so ordinary (non-team)
+        # steps -- ``record_step_result``'s overwhelming common case --
+        # take zero extra branches.
+        if existing_result is not None and (
+            existing_result.member_results or existing_result.synthesis_state
+        ):
+            result.member_results = existing_result.member_results
+            result.synthesis_state = existing_result.synthesis_state
+            result.synthesis_dispatched = existing_result.synthesis_dispatched
+            if existing_result.deviations:
+                result.deviations = list(existing_result.deviations) + list(
+                    result.deviations
+                )
+
         if existing_idx is not None:
             state.step_results[existing_idx] = result
         else:
@@ -3494,6 +3536,27 @@ class ExecutionEngine:
                         "Worktree lifecycle op failed for step %s (non-fatal): %s",
                         step_id, _wt_exc,
                     )
+
+        # ── Team-synthesis completion (agent_synthesis dispatch) ───────────
+        # When this StepResult carried forward member_results above AND its
+        # synthesis_state is still SYNTHESIZING (i.e. the synthesis agent's
+        # own dispatch is what just reported a terminal outcome, not a
+        # "dispatched" re-affirmation from mark_dispatched), derive the
+        # final SynthesisState from whatever the scope/commit/evidence
+        # verification above landed on -- it may have already flipped
+        # result.status to "failed" on an out-of-scope diff, which the
+        # VERIFYING -> SYNTHESIZED|FAILED edge must honour rather than
+        # trusting the agent's self-reported status.
+        if (
+            result.member_results
+            and result.synthesis_state == SynthesisState.SYNTHESIZING.value
+            and result.status in ("complete", "failed")
+        ):
+            result.synthesis_state = (
+                SynthesisState.SYNTHESIZED.value
+                if result.status == "complete"
+                else SynthesisState.FAILED.value
+            )
 
         self._save_execution(state)
 
@@ -5795,6 +5858,8 @@ class ExecutionEngine:
                     f"Team member(s) failed: {', '.join(sorted(failed_ids))}"
                 )
                 parent.completed_at = _utcnow()
+                if spec and spec.strategy == "agent_synthesis":
+                    parent.synthesis_state = SynthesisState.FAILED.value
             elif completed_ids >= all_member_ids:
                 spec = plan_step.synthesis
                 conflict = self._detect_team_conflict(
@@ -5805,6 +5870,7 @@ class ExecutionEngine:
                 # for human review instead of auto-completing.
                 if conflict and spec and spec.conflict_handling == "escalate":
                     parent.status = "dispatched"  # keep step open
+                    parent.synthesis_state = SynthesisState.ESCALATED.value
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
                     )
@@ -5832,27 +5898,52 @@ class ExecutionEngine:
                         self._save_execution(state)
                     return
 
-                # Apply synthesis strategy.
+                # Conflict detected and the plan says fail outright — this
+                # applies even when every member individually "succeeded";
+                # the conflict is between their outputs, not a member
+                # failure.  Terminal: mirrors the failed_ids branch above.
+                if conflict and spec and spec.conflict_handling == "fail":
+                    parent.status = "failed"
+                    parent.error = (
+                        f"Conflict detected: {conflict.resolution_detail}"
+                    )
+                    parent.completed_at = _utcnow()
+                    if spec.strategy == "agent_synthesis":
+                        parent.synthesis_state = SynthesisState.FAILED.value
+                    self._save_execution(state)
+                    return
+
+                # Apply synthesis strategy (auto_merge default, or no
+                # conflict detected).  concatenate/merge_files complete the
+                # step synchronously (unchanged, backward-compatible
+                # behavior).  agent_synthesis instead transitions
+                # parent.synthesis_state to SYNTHESIZING and leaves
+                # parent.status == "dispatched" — the actual synthesis
+                # agent dispatch is built by _pending_synthesis_dispatch
+                # (consulted from next_action/next_actions) and its result
+                # is recorded via the ordinary record_step_result call
+                # against this SAME step_id.
                 self._apply_synthesis(plan_step, parent)
-                parent.completed_at = _utcnow()
-                # A2.b: parent step complete → emit teammate_idle per member
-                # so consumers (UI, future Claude Code hook bridge) see the
-                # team has come to rest.
-                _mailbox = self._team_mailbox(step_id)
-                if _mailbox is not None:
-                    try:
-                        for mr in parent.member_results:
-                            _mailbox.append(
-                                "teammate_idle",
-                                from_member=mr.member_id,
-                                subject=f"{mr.agent_name} idle",
-                                payload={"final_status": mr.status},
+                if parent.status != "dispatched":
+                    parent.completed_at = _utcnow()
+                    # A2.b: parent step complete → emit teammate_idle per
+                    # member so consumers (UI, future Claude Code hook
+                    # bridge) see the team has come to rest.
+                    _mailbox = self._team_mailbox(step_id)
+                    if _mailbox is not None:
+                        try:
+                            for mr in parent.member_results:
+                                _mailbox.append(
+                                    "teammate_idle",
+                                    from_member=mr.member_id,
+                                    subject=f"{mr.agent_name} idle",
+                                    payload={"final_status": mr.status},
+                                )
+                        except Exception as _mb_exc:  # noqa: BLE001
+                            logger.debug(
+                                "Mailbox teammate_idle emission failed (non-fatal): %s",
+                                _mb_exc,
                             )
-                    except Exception as _mb_exc:  # noqa: BLE001
-                        logger.debug(
-                            "Mailbox teammate_idle emission failed (non-fatal): %s",
-                            _mb_exc,
-                        )
 
         # A2.b: emit task_completed / task_failed for the member just recorded.
         _mailbox = self._team_mailbox(step_id)
@@ -5955,16 +6046,26 @@ class ExecutionEngine:
     ) -> None:
         """Apply the configured synthesis strategy to team member results.
 
-        Updates ``parent.outcome`` and ``parent.files_changed`` in place.
-
         Strategies:
         - ``concatenate`` (default): Join outcomes with ``"; "``, collect
-          all files_changed.
+          all files_changed.  Completes ``parent`` synchronously — behavior
+          unchanged from before agent_synthesis dispatch was wired up.
         - ``merge_files``: Same as concatenate but deduplicate files_changed.
-        - ``agent_synthesis``: Same as concatenate for now — the synthesis
-          agent dispatch is deferred to Phase 3.3 (INTERACT action type)
-          which requires invariant changes.  This branch sets a marker in
-          ``parent.deviations`` indicating synthesis was requested.
+          Also completes synchronously, unchanged.
+        - ``agent_synthesis``: Does NOT complete ``parent``.  Transitions
+          ``parent.synthesis_state`` to :data:`SynthesisState.SYNTHESIZING`
+          and leaves ``parent.status`` as ``"dispatched"`` — the caller
+          (``record_team_member_result``) must check
+          ``parent.status != "dispatched"`` before stamping
+          ``completed_at``.  The actual synthesis agent dispatch is built
+          by :meth:`_pending_synthesis_dispatch` (consulted by
+          ``next_action``/``next_actions``) and its result is recorded via
+          the ordinary :meth:`record_step_result` call against the SAME
+          ``step_id`` as this team step, routing the synthesis agent's
+          output through the identical scope/commit/evidence verification
+          pipeline non-team steps already go through (see the
+          member_results/synthesis_state carry-forward at the top of
+          ``record_step_result``).
         """
         spec = plan_step.synthesis
         strategy = spec.strategy if spec else "concatenate"
@@ -5986,18 +6087,15 @@ class ExecutionEngine:
                     seen.add(f)
                     deduped.append(f)
             parent.files_changed = deduped
+            parent.outcome = "; ".join(outcomes)
+            parent.status = "complete"
         elif strategy == "agent_synthesis":
-            # Mark for future synthesis agent dispatch.
-            parent.deviations.append(
-                f"synthesis_requested: agent={spec.synthesis_agent if spec else 'code-reviewer'}"
-            )
-            parent.files_changed = all_files
+            parent.synthesis_state = SynthesisState.SYNTHESIZING.value
         else:
             # concatenate (default)
             parent.files_changed = all_files
-
-        parent.outcome = "; ".join(outcomes)
-        parent.status = "complete"
+            parent.outcome = "; ".join(outcomes)
+            parent.status = "complete"
 
     def _detect_team_conflict(
         self,
@@ -6059,6 +6157,166 @@ class ExecutionEngine:
             evidence=evidence,
             severity="medium",
             resolution="unresolved",
+        )
+
+    # ── agent_synthesis dispatch (Phase 4, 4.3) ─────────────────────────────
+    # See docs/internal/team-runtime-contract.md Section 8.  These three
+    # methods turn a team step whose parent StepResult is sitting in
+    # SynthesisState.SYNTHESIZING (set by _apply_synthesis) into a real,
+    # persisted, exactly-once DISPATCH action for spec.synthesis_agent.
+    # Consulted from both the serial (_apply_resolver_decision's WAIT arm)
+    # and parallel (next_actions) dispatch paths so the CLI-driven
+    # orchestrator loop and the async TaskWorker daemon both pick it up.
+
+    def _pending_synthesis_dispatch(
+        self, step: PlanStep, state: ExecutionState,
+    ) -> ExecutionAction | None:
+        """Return the synthesis-agent DISPATCH action for *step*, if one is due.
+
+        Returns ``None`` when *step* is not an ``agent_synthesis`` team step,
+        has no parent ``StepResult`` yet (members still in flight), is not
+        currently ready for synthesis, or has already had its synthesis
+        agent dispatched (``synthesis_dispatched`` guards exactly-once
+        dispatch and survives restart because it is persisted on the
+        ``StepResult``).
+
+        Also handles resuming an ``ESCALATED`` synthesis (a human approved
+        past the conflict-escalation APPROVAL gate): once execution status
+        has moved off ``"approval_pending"`` again, an ESCALATED synthesis
+        transitions back to SYNTHESIZING and is dispatched — the
+        ``ESCALATED -> SYNTHESIZING`` resume edge from
+        ``SYNTHESIS_STATE_TRANSITIONS``.
+        """
+        if not step.team or step.synthesis is None:
+            return None
+        spec = step.synthesis
+        if spec.strategy != "agent_synthesis":
+            return None
+
+        parent = state.get_step_result(step.step_id)
+        if parent is None or parent.synthesis_dispatched:
+            return None
+
+        if parent.synthesis_state == SynthesisState.ESCALATED.value:
+            if state.status == "approval_pending":
+                # Still waiting on the human decision — nothing to dispatch.
+                return None
+            # Approval resolved and execution resumed: proceed to synthesis,
+            # informed by whatever the members reported (the synthesis
+            # prompt includes the detected conflict either way).
+            parent.synthesis_state = SynthesisState.SYNTHESIZING.value
+        elif parent.synthesis_state != SynthesisState.SYNTHESIZING.value:
+            return None
+
+        conflict = self._detect_team_conflict(step, parent.member_results)
+        action = self._synthesis_dispatch_action(step, parent, spec, conflict)
+        parent.synthesis_dispatched = True
+        self._save_execution(state)
+        return action
+
+    def _synthesis_dispatch_action(
+        self,
+        step: PlanStep,
+        parent: StepResult,
+        spec: SynthesisSpec,
+        conflict: ConflictRecord | None,
+    ) -> ExecutionAction:
+        """Build the DISPATCH action for *spec*'s synthesis agent.
+
+        ``step_id`` is deliberately the SAME id as the parent team step
+        (not a synthetic child id) — this is what makes the eventual
+        ``baton execute record --step <step_id> ...`` call route through
+        the ordinary (non-team-member) ``record_step_result`` CLI path,
+        which in turn runs the full scope/commit/evidence verification
+        pipeline unmodified.  See the CLI's ``STEP_ID_RE``/
+        ``TEAM_MEMBER_ID_RE`` split in
+        ``agent_baton/cli/commands/execution/_validators.py`` — any id
+        shaped like ``"N.N.xxxx"`` is routed to the team-member path
+        instead, which is why this reuses the plain ``"N.N"`` id rather
+        than minting a suffixed one.
+        """
+        agent_name = spec.synthesis_agent or "code-reviewer"
+        prompt = self._synthesis_prompt_text(step, parent, spec, conflict)
+        return ExecutionAction(
+            action_type=ActionType.DISPATCH,
+            message=(
+                f"Synthesis agent '{agent_name}' for team step "
+                f"{step.step_id} ({len(parent.member_results)} member "
+                f"result(s) to merge)."
+            ),
+            agent_name=agent_name,
+            agent_model="sonnet",
+            delegation_prompt=prompt,
+            step_id=step.step_id,
+            step_type=step.step_type,
+        )
+
+    def _synthesis_prompt_text(
+        self,
+        step: PlanStep,
+        parent: StepResult,
+        spec: SynthesisSpec,
+        conflict: ConflictRecord | None,
+    ) -> str:
+        """Build the synthesis agent's delegation prompt.
+
+        Includes structured member outcomes, files changed, detected
+        conflicts, and provenance (member_id/agent_name/status) so the
+        synthesis agent has everything it needs to merge without
+        re-reading each member's raw transcript.  When
+        ``spec.synthesis_prompt`` is set, ``{member_outcomes}`` is
+        substituted with the structured block (or the block is appended
+        when the template has no placeholder); otherwise a sensible
+        default template is used — matching :class:`SynthesisSpec`'s
+        documented contract.
+        """
+        lines: list[str] = ["## Member outcomes"]
+        for mr in parent.member_results:
+            lines.append(f"- [{mr.member_id}] {mr.agent_name} ({mr.status}): {mr.outcome}")
+            if mr.files_changed:
+                lines.append(f"  files: {', '.join(mr.files_changed)}")
+
+        all_files = sorted({f for mr in parent.member_results for f in mr.files_changed})
+        lines.append("")
+        lines.append("## Files changed across members")
+        lines.append(", ".join(all_files) if all_files else "(none reported)")
+
+        lines.append("")
+        lines.append("## Conflicts detected")
+        if conflict is not None:
+            lines.append(
+                f"conflict_id={conflict.conflict_id} severity={conflict.severity}: "
+                + (conflict.resolution_detail or "Overlapping file changes between members.")
+            )
+            for agent, files in conflict.evidence.items():
+                lines.append(f"  - {agent}: {files}")
+        else:
+            lines.append("(none detected)")
+
+        lines.append("")
+        lines.append("## Provenance")
+        for mr in parent.member_results:
+            lines.append(
+                f"- member_id={mr.member_id} agent_name={mr.agent_name} status={mr.status}"
+            )
+
+        member_outcomes_block = "\n".join(lines)
+
+        template = spec.synthesis_prompt
+        if template:
+            if "{member_outcomes}" in template:
+                return template.replace("{member_outcomes}", member_outcomes_block)
+            return f"{template}\n\n{member_outcomes_block}"
+
+        return (
+            f"You are the synthesis agent for team step {step.step_id} "
+            f"({step.task_description}).  Merge the following team member "
+            "outputs into one coherent, verified result. "
+            f"conflict_handling={spec.conflict_handling!r} — resolve any "
+            "conflicts (auto_merge: reconcile the overlapping changes "
+            "yourself) and report the final merged outcome, the complete "
+            "list of files changed, and the commit hash for your merged "
+            f"work.\n\n{member_outcomes_block}"
         )
 
     def _check_token_budget(self, state: ExecutionState) -> str | None:
@@ -7287,6 +7545,23 @@ class ExecutionEngine:
             timeout_action = self._check_timeout(state)
             if timeout_action is not None:
                 return timeout_action
+            # Phase 4, 4.3: a team step sitting in SynthesisState.SYNTHESIZING
+            # (all members reported, agent_synthesis strategy, no dispatch
+            # issued yet) is exactly the kind of "in-flight step" the WAIT
+            # decision above is reporting on — the resolver (out of scope
+            # here, see resolver.py's import-boundary note) has no notion of
+            # synthesis dispatch, so the engine must intercept WAIT and
+            # dispatch the synthesis agent itself before falling through to
+            # a plain WAIT.  _pending_synthesis_dispatch is exactly-once
+            # (guarded by StepResult.synthesis_dispatched) and a no-op for
+            # every non-agent_synthesis step, so this scan is cheap and safe
+            # to run on every WAIT.
+            phase_obj = state.current_phase_obj
+            if phase_obj is not None:
+                for _wait_step in phase_obj.steps:
+                    _synth_action = self._pending_synthesis_dispatch(_wait_step, state)
+                    if _synth_action is not None:
+                        return _synth_action
             return ExecutionAction(
                 action_type=ActionType.WAIT,
                 message=decision.message,

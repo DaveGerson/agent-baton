@@ -318,9 +318,15 @@ class TestSynthesisStrategies:
         # First occurrence order preserved; no extra entries
         assert len(set(result.files_changed)) == len(result.files_changed)
 
-    def test_agent_synthesis_strategy_adds_deviation_marker(
+    def test_agent_synthesis_strategy_enters_synthesizing_state(
         self, tmp_path: Path
     ) -> None:
+        # agent_synthesis no longer completes synchronously (placeholder
+        # behavior, Phase 3) -- it transitions to SynthesisState.SYNTHESIZING
+        # and leaves the step "dispatched" until the synthesis agent's own
+        # result is recorded (Phase 4, 4.3).
+        from agent_baton.models.execution import SynthesisState
+
         result = self._run_both_members(
             tmp_path,
             synthesis=SynthesisSpec(
@@ -330,33 +336,59 @@ class TestSynthesisStrategies:
             files_a=["service.py"],
             files_b=["component.tsx"],
         )
-        assert any("synthesis_requested" in d for d in result.deviations)
+        assert result.status == "dispatched"
+        assert result.synthesis_state == SynthesisState.SYNTHESIZING.value
 
-    def test_agent_synthesis_deviation_names_synthesis_agent(
+    def test_agent_synthesis_dispatch_names_synthesis_agent(
         self, tmp_path: Path
     ) -> None:
-        result = self._run_both_members(
-            tmp_path,
-            synthesis=SynthesisSpec(
-                strategy="agent_synthesis",
-                synthesis_agent="architect",
-            ),
-            files_a=[],
-            files_b=[],
-        )
-        assert any("architect" in d for d in result.deviations)
+        from agent_baton.models.execution import ActionType
 
-    def test_agent_synthesis_strategy_collects_files(
+        engine = _make_engine(tmp_path)
+        engine.start(_team_plan(SynthesisSpec(
+            strategy="agent_synthesis", synthesis_agent="architect",
+        )))
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete", outcome="done",
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "frontend-engineer", status="complete", outcome="done",
+        )
+        action = engine.next_action()
+        assert action.action_type == ActionType.DISPATCH
+        assert action.agent_name == "architect"
+        assert action.step_id == "1.1"
+
+    def test_agent_synthesis_strategy_collects_files_after_dispatch_completes(
         self, tmp_path: Path
     ) -> None:
-        result = self._run_both_members(
-            tmp_path,
-            synthesis=SynthesisSpec(strategy="agent_synthesis"),
-            files_a=["backend.py"],
-            files_b=["frontend.tsx"],
+        # files_changed is only finalized once the synthesis agent's own
+        # result is recorded via record_step_result (same step_id) -- NOT
+        # eagerly copied from the members at collection time.
+        engine = _make_engine(tmp_path)
+        engine.start(_team_plan(SynthesisSpec(strategy="agent_synthesis")))
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete",
+            outcome="done", files_changed=["backend.py"],
         )
-        assert "backend.py" in result.files_changed
-        assert "frontend.tsx" in result.files_changed
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "frontend-engineer", status="complete",
+            outcome="done", files_changed=["frontend.tsx"],
+        )
+        dispatch = engine.next_action()
+        engine.mark_dispatched(dispatch.step_id, dispatch.agent_name)
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="code-reviewer",
+            status="complete",
+            outcome="Merged backend and frontend changes.",
+            files_changed=["backend.py", "frontend.tsx", "merged.py"],
+            commit_hash="deadbeef",
+        )
+        result = engine._load_state().get_step_result("1.1")
+        assert result.status == "complete"
+        assert result.files_changed == ["backend.py", "frontend.tsx", "merged.py"]
+        assert result.commit_hash == "deadbeef"
 
     def test_no_synthesis_spec_falls_back_to_concatenate(
         self, tmp_path: Path
@@ -371,10 +403,18 @@ class TestSynthesisStrategies:
         assert result.files_changed.count("a.py") == 2
         assert result.status == "complete"
 
-    def test_completed_step_status_is_complete_for_all_strategies(
+    def test_completed_step_status_for_all_strategies(
         self, tmp_path: Path
     ) -> None:
-        for strategy in ("concatenate", "merge_files", "agent_synthesis"):
+        # concatenate/merge_files complete synchronously (unchanged,
+        # backward-compatible).  agent_synthesis stays "dispatched" until
+        # its own synthesis-agent dispatch is recorded (Phase 4, 4.3).
+        expected = {
+            "concatenate": "complete",
+            "merge_files": "complete",
+            "agent_synthesis": "dispatched",
+        }
+        for strategy, expected_status in expected.items():
             engine = _make_engine(tmp_path / strategy)
             engine.start(_team_plan(SynthesisSpec(strategy=strategy)))
             engine.record_team_member_result("1.1", "1.1.a", "backend-engineer",
@@ -382,7 +422,7 @@ class TestSynthesisStrategies:
             engine.record_team_member_result("1.1", "1.1.b", "frontend-engineer",
                                              status="complete", outcome="done")
             result = engine._load_state().get_step_result("1.1")
-            assert result.status == "complete", f"strategy={strategy}"
+            assert result.status == expected_status, f"strategy={strategy}"
 
 
 # ---------------------------------------------------------------------------

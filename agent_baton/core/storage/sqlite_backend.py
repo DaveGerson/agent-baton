@@ -292,9 +292,10 @@ class SqliteStorage:
                          duration_seconds, retries, error, completed_at,
                          deviations, step_type, updated_at,
                          input_tokens, cache_read_tokens, cache_creation_tokens,
-                         output_tokens, model_id, session_id, step_started_at)
+                         output_tokens, model_id, session_id, step_started_at,
+                         synthesis_state, synthesis_dispatched)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?)
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.task_id,
@@ -319,6 +320,8 @@ class SqliteStorage:
                         sr.model_id,
                         sr.session_id,
                         sr.step_started_at,
+                        sr.synthesis_state,
+                        1 if sr.synthesis_dispatched else 0,
                     ),
                 )
                 # team step results cascade from step_results, delete via FK
@@ -580,6 +583,8 @@ class SqliteStorage:
                     model_id=sr["model_id"] if "model_id" in sr_keys else "",
                     session_id=sr["session_id"] if "session_id" in sr_keys else "",
                     step_started_at=sr["step_started_at"] if "step_started_at" in sr_keys else "",
+                    synthesis_state=sr["synthesis_state"] if "synthesis_state" in sr_keys else "",
+                    synthesis_dispatched=bool(sr["synthesis_dispatched"]) if "synthesis_dispatched" in sr_keys else False,
                 )
             )
 
@@ -959,9 +964,10 @@ class SqliteStorage:
                      duration_seconds, retries, error, completed_at,
                      deviations, step_type, updated_at,
                      input_tokens, cache_read_tokens, cache_creation_tokens,
-                     output_tokens, model_id, session_id, step_started_at)
+                     output_tokens, model_id, session_id, step_started_at,
+                     synthesis_state, synthesis_dispatched)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -986,6 +992,8 @@ class SqliteStorage:
                     result.model_id,
                     result.session_id,
                     result.step_started_at,
+                    result.synthesis_state,
+                    1 if result.synthesis_dispatched else 0,
                 ),
             )
             # Replace team member results for this step

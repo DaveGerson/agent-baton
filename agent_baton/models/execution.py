@@ -1087,6 +1087,26 @@ class StepResult(ExecutionRecord):
             ``record_step_result``; persisted so they survive crash
             recovery.  Defaults to empty list for back-compat with
             existing ``baton.db`` rows that predate this field.
+        synthesis_state: :class:`SynthesisState` value (as a plain
+            string) tracking a team step's ``agent_synthesis`` merge
+            lifecycle.  Empty string means "not applicable" -- either
+            this is not a team step, or its ``synthesis.strategy`` is
+            not ``"agent_synthesis"`` (``concatenate``/``merge_files``
+            never touch this field, preserving their pre-existing
+            behavior byte-for-byte).  Persisted so a crash/restart mid
+            synthesis resumes from the correct state instead of
+            re-dispatching or silently completing.  See
+            ``docs/internal/team-runtime-contract.md`` Section 8.
+        synthesis_dispatched: True once the ``agent_synthesis`` DISPATCH
+            action has been emitted for this step.  Guards against
+            emitting a second synthesis dispatch on a subsequent
+            ``next_action``/``next_actions`` poll while the first is
+            still in flight -- the synthesis agent's own dispatch and
+            result are recorded against this SAME ``step_id`` (see
+            :meth:`ExecutionEngine.record_step_result`'s
+            member_results/synthesis_state carry-forward), so without
+            this flag every poll before the result lands would look
+            "ready to dispatch" again.
     """
 
     step_id: str
@@ -1116,6 +1136,8 @@ class StepResult(ExecutionRecord):
     updated_at: str = ""            # ISO 8601 UTC; set on every status mutation; used for bi-directional split-brain reconciliation
     outcome_spillover_path: str = ""  # relative path under execution dir to FULL outcome when truncated
     gate_additions: list[str] = Field(default_factory=list)  # agent-declared commands via GATE_ADDITION: signals
+    synthesis_state: str = ""       # SynthesisState value; "" = N/A (non-team or non-agent_synthesis step)
+    synthesis_dispatched: bool = False  # True once the agent_synthesis DISPATCH action has been emitted
 
     def to_dict(self) -> dict:
         # Override required to keep the empty-collection-omission semantics
@@ -1153,6 +1175,10 @@ class StepResult(ExecutionRecord):
             d["interaction_history"] = [t.to_dict() for t in self.interaction_history]
         if self.gate_additions:
             d["gate_additions"] = list(self.gate_additions)
+        if self.synthesis_state:
+            d["synthesis_state"] = self.synthesis_state
+        if self.synthesis_dispatched:
+            d["synthesis_dispatched"] = self.synthesis_dispatched
         return d
 
     # from_dict inherited from ExecutionRecord — TeamStepResult,
