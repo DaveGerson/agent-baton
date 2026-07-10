@@ -536,6 +536,50 @@ class TestSpawnPromptFidelity:
         assert "TeammateIdle" in text
 
 
+class TestReadinessDiagnosticsDeepNesting:
+    """nested_team_count must reflect EVERY level of nesting, not just the
+    top-level lead — a grandchild sub-team (lead -> sub-team member who is
+    itself a lead with their own sub-team) must be counted at both levels.
+    """
+
+    def _three_level_plan(self) -> MachinePlan:
+        grandchild = TeamMember(
+            member_id="1.1.a.b.c", agent_name="test-engineer",
+            role="implementer", task_description="write tests", model="sonnet",
+        )
+        middle_lead = TeamMember(
+            member_id="1.1.a.b", agent_name="backend-engineer",
+            role="lead", task_description="own the API slice", model="sonnet",
+            sub_team=[grandchild],
+        )
+        top_lead = TeamMember(
+            member_id="1.1.a", agent_name="architect",
+            role="lead", task_description="coordinate", model="opus",
+            sub_team=[middle_lead],
+        )
+        return MachinePlan(
+            task_id="t-deep-nest", task_summary="three level nesting",
+            phases=[PlanPhase(
+                phase_id=1, name="Build",
+                steps=[PlanStep(
+                    step_id="1.1", agent_name="team",
+                    task_description="deep nesting", team=[top_lead],
+                )],
+            )],
+        )
+
+    def test_nested_team_count_reflects_every_level(self, tmp_path: Path) -> None:
+        plan = self._three_level_plan()
+        diagnostics = build_team_readiness_diagnostics(
+            plan=plan, step=plan.phases[0].steps[0],
+            backend_name="worktree", team_context_root=tmp_path,
+        )
+        # Two members carry a non-empty sub_team: the top lead AND the
+        # middle lead — both levels of nesting are counted.
+        assert diagnostics.nested_team_count == 2
+        assert diagnostics.member_count == 3
+
+
 class TestProtocolConformance:
     """Both backends implement the runtime-checkable protocol."""
 

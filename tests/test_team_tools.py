@@ -853,3 +853,241 @@ class TestSynthesisStateMachine:
         # KeyError can never silently mean "anything goes".
         for state in SynthesisState:
             assert state in SYNTHESIS_STATE_TRANSITIONS
+
+
+# ---------------------------------------------------------------------------
+# Malformed / unauthorized calls — validation ORDER matters (team exists,
+# then member exists, then role authorized, then bead-store reached) so a
+# caller gets the most actionable error, not a generic failure.
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedAndUnauthorizedCalls:
+    def test_team_send_to_unregistered_member_raises(
+        self, engine: ExecutionEngine,
+    ) -> None:
+        with pytest.raises(TeamToolError, match="Member 'ghost'"):
+            team_send(
+                engine, task_id="task-tools",
+                from_team="team-1.1", from_member="1.1.a",
+                to_team="team-1.2", to_member="ghost",
+                subject="s", body="b",
+            )
+
+    def test_team_claim_on_unregistered_team_raises_before_bead_store_touch(
+        self, engine: ExecutionEngine,
+    ) -> None:
+        # Poison the bead store first: if the implementation reached it
+        # before the team-lookup, this would raise the wrong (bead-store
+        # unavailable) error instead of the more actionable "team not
+        # found" — proving _require_team runs first (doc §4's stated order).
+        engine._bead_store = None  # type: ignore[attr-defined]
+        with pytest.raises(TeamToolError, match="Team 'team-missing'"):
+            team_claim(
+                engine, task_id="task-tools", team_id="team-missing",
+                task_bead_id="bd-x", member_id="1.1.a",
+            )
+
+    def test_team_dispatch_to_unregistered_parent_team_raises_before_role_check(
+        self, engine: ExecutionEngine,
+    ) -> None:
+        # 1.1.b is an implementer, which would also fail the role check —
+        # but the missing-team check must fire FIRST.
+        with pytest.raises(TeamToolError, match="Team 'team-ghost'"):
+            team_dispatch(
+                engine, task_id="task-tools", parent_team_id="team-ghost",
+                caller_member_id="1.1.b", members=[],
+            )
+
+    def test_team_update_malformed_status_value_rejected(
+        self, engine: ExecutionEngine,
+    ) -> None:
+        created = team_update(
+            engine, task_id="task-tools", team_id="team-1.1",
+            member_id="1.1.a", title="t",
+        )
+        with pytest.raises(TeamToolError, match="unsupported transition"):
+            team_update(
+                engine, task_id="task-tools", team_id="team-1.1",
+                member_id="1.1.a", task_bead_id=created["task_bead_id"],
+                status="in_progress",  # not a supported transition value
+            )
+
+    def test_team_list_malformed_status_value_rejected(
+        self, engine: ExecutionEngine,
+    ) -> None:
+        with pytest.raises(TeamToolError, match="unsupported status"):
+            team_list(
+                engine, task_id="task-tools", team_id="team-1.1",
+                status="in-review",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Restart persistence — claim/update/send/read must survive a brand-new
+# ExecutionEngine construction against the SAME underlying storage, exactly
+# as a real `baton team <verb>` CLI invocation does on every call (a fresh
+# process, no shared Python object identity). Mirrors the established
+# pattern in tests/cli/test_team_cmd_runtime.py: a bead store keyed by
+# db_path stands in for the real (equally persistent) `bd`-backed store so
+# these tests stay hermetic (no `bd` binary required in this sandbox).
+# ---------------------------------------------------------------------------
+
+_RESTART_FAKE_STORES: dict[str, _FakeBeadStore] = {}
+
+
+def _restart_bead_store(db_path: Path) -> _FakeBeadStore:
+    return _RESTART_FAKE_STORES.setdefault(str(db_path), _FakeBeadStore())
+
+
+def _new_engine_same_db(tmp_path: Path, *, task_id: str = "task-tools") -> ExecutionEngine:
+    """Construct a brand-new ExecutionEngine against the SAME tmp_path db —
+    simulating a restart / a fresh `baton team` CLI process invocation."""
+    from agent_baton.core.storage.sqlite_backend import SqliteStorage
+    db_path = tmp_path / "baton.db"
+    storage = SqliteStorage(db_path)
+    eng = ExecutionEngine(team_context_root=tmp_path, task_id=task_id, storage=storage)
+    eng._bead_store = _restart_bead_store(db_path)  # type: ignore[attr-defined]
+    return eng
+
+
+class TestRestartPersistence:
+    @pytest.fixture(autouse=True)
+    def _clear_fake_stores(self):
+        _RESTART_FAKE_STORES.clear()
+        yield
+        _RESTART_FAKE_STORES.clear()
+
+    def test_claim_survives_new_engine_construction(self, tmp_path: Path) -> None:
+        engine1 = _new_engine_same_db(tmp_path)
+        engine1.start(_two_team_plan())
+        engine1.next_actions()
+        created = team_update(
+            engine1, task_id="task-tools", team_id="team-1.1",
+            member_id="1.1.a", title="restart me",
+        )
+
+        # Brand-new engine, same persisted db — simulates a fresh process.
+        engine2 = _new_engine_same_db(tmp_path)
+        claimed = team_claim(
+            engine2, task_id="task-tools", team_id="team-1.1",
+            task_bead_id=created["task_bead_id"], member_id="1.1.b",
+        )
+        assert claimed["claimed_by"] == "1.1.b"
+
+        engine3 = _new_engine_same_db(tmp_path)
+        listed = team_list(
+            engine3, task_id="task-tools", team_id="team-1.1", status="claimed",
+        )
+        assert listed[0]["task_bead_id"] == created["task_bead_id"]
+        assert listed[0]["claimed_by"] == "1.1.b"
+
+        # A conflicting claim attempt from yet another restart still sees
+        # the concurrency conflict — the optimistic-concurrency state
+        # persisted, not just the raw task list.
+        engine4 = _new_engine_same_db(tmp_path)
+        with pytest.raises(TeamConcurrencyError):
+            team_claim(
+                engine4, task_id="task-tools", team_id="team-1.1",
+                task_bead_id=created["task_bead_id"], member_id="1.1.a",
+            )
+
+    def test_update_complete_survives_new_engine_construction(
+        self, tmp_path: Path,
+    ) -> None:
+        engine1 = _new_engine_same_db(tmp_path)
+        engine1.start(_two_team_plan())
+        engine1.next_actions()
+        created = team_update(
+            engine1, task_id="task-tools", team_id="team-1.1",
+            member_id="1.1.a", title="t",
+        )
+
+        engine2 = _new_engine_same_db(tmp_path)
+        completed = team_update(
+            engine2, task_id="task-tools", team_id="team-1.1",
+            member_id="1.1.a", task_bead_id=created["task_bead_id"],
+            status="complete", outcome="shipped",
+        )
+        assert completed["status"] == "done"
+
+        engine3 = _new_engine_same_db(tmp_path)
+        done = team_list(
+            engine3, task_id="task-tools", team_id="team-1.1", status="done",
+        )
+        assert [t["task_bead_id"] for t in done] == [created["task_bead_id"]]
+
+    def test_send_then_read_across_restart_acks_and_does_not_redeliver(
+        self, tmp_path: Path,
+    ) -> None:
+        engine1 = _new_engine_same_db(tmp_path)
+        engine1.start(_two_team_plan())
+        engine1.next_actions()
+        sent = team_send(
+            engine1, task_id="task-tools",
+            from_team="team-1.1", from_member="1.1.a",
+            to_team="team-1.2", to_member="1.2.a",
+            subject="s", body="b",
+        )
+        assert sent["message_bead_id"]
+
+        engine2 = _new_engine_same_db(tmp_path)
+        first = team_read(
+            engine2, task_id="task-tools", team_id="team-1.2", member_id="1.2.a",
+        )
+        assert len(first) == 1
+
+        # Yet another restart confirms the ack from engine2's read persisted
+        # — the message is not redelivered.
+        engine3 = _new_engine_same_db(tmp_path)
+        second = team_read(
+            engine3, task_id="task-tools", team_id="team-1.2", member_id="1.2.a",
+        )
+        assert second == []
+
+
+# ---------------------------------------------------------------------------
+# Advertised-tools invariant — docs/internal/team-runtime-contract.md §2.3.
+# `team_dispatch` IS authorized in-process (authorized_team_tools("lead"))
+# but has NO CLI verb (§2.2/§9.1) — so the CLI's own verb registry and the
+# shipped team-lead.md prompt must agree with that split and never drift.
+# ---------------------------------------------------------------------------
+
+
+class TestAdvertisedToolsMatchCliSurface:
+    def test_cli_exposes_exactly_the_five_non_dispatch_verbs(self) -> None:
+        import agent_baton.cli.commands.team_cmd as team_cmd
+        assert set(team_cmd._RUNTIME_HANDLERS) == {
+            "list", "claim", "update", "send", "read",
+        }
+
+    def test_cli_verb_set_is_subset_of_every_role_authorization(self) -> None:
+        import agent_baton.cli.commands.team_cmd as team_cmd
+        cli_tool_names = {f"team_{v}" for v in team_cmd._RUNTIME_HANDLERS}
+        for role in ("lead", "implementer", "reviewer", "some-custom-role"):
+            assert cli_tool_names <= authorized_team_tools(role)
+
+    def test_cli_never_exposes_team_dispatch(self) -> None:
+        import agent_baton.cli.commands.team_cmd as team_cmd
+        assert "dispatch" not in team_cmd._RUNTIME_HANDLERS
+
+    def _team_lead_prompt(self) -> str:
+        path = Path(__file__).resolve().parents[1] / "agents" / "team-lead.md"
+        return path.read_text(encoding="utf-8")
+
+    def test_team_lead_prompt_disclaims_team_dispatch_unavailability(self) -> None:
+        """agents/team-lead.md must not advertise team_dispatch as callable
+        — it must explicitly say no callable path exists, so a dispatched
+        lead never narrates a fictitious tool call (the exact prompt-fiction
+        failure mode this whole contract exists to prevent)."""
+        text = self._team_lead_prompt()
+        assert "no callable tool for `team_dispatch`" in text
+        assert "narrate or simulate a `team_dispatch" in text
+
+    def test_team_lead_prompt_documents_exactly_the_cli_exposed_verbs(self) -> None:
+        import agent_baton.cli.commands.team_cmd as team_cmd
+        text = self._team_lead_prompt()
+        for verb in team_cmd._RUNTIME_HANDLERS:
+            assert f"baton team {verb}" in text
+        # And it never claims to call team_dispatch as a live command.
+        assert "baton team dispatch" not in text

@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 
 from agent_baton.core.engine.bead_selector import BeadSelector
-from agent_baton.core.engine.team_board import TeamBoard
+from agent_baton.core.engine.team_board import TeamBoard, TeamBoardConflictError
+from agent_baton.models.bead import Bead
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+from agent_baton.utils.time import utcnow_zulu as _utcnow
 
 
 @pytest.fixture
@@ -29,6 +31,64 @@ def bead_store(tmp_path: Path):
 @pytest.fixture
 def board(bead_store) -> TeamBoard:
     return TeamBoard(bead_store)
+
+
+# ---------------------------------------------------------------------------
+# Hermetic in-memory bead store — for TeamBoard behavior that does not need
+# the real `bd`-backed store, so these tests run without the external `bd`
+# binary (per tests/CLAUDE.md's hermeticity requirement; mirrors the
+# established pattern in tests/test_team_tools.py's ``_FakeBeadStore``).
+# ---------------------------------------------------------------------------
+
+
+class _FakeBeadStore:
+    def __init__(self) -> None:
+        self._beads: dict[str, Bead] = {}
+
+    def write(self, bead: Bead) -> str:
+        self._beads[bead.bead_id] = bead
+        return bead.bead_id
+
+    def read(self, bead_id: str) -> Bead | None:
+        return self._beads.get(bead_id)
+
+    def close(self, bead_id: str, summary: str) -> None:
+        bead = self._beads.get(bead_id)
+        if bead is None:
+            return
+        bead.status = "closed"
+        bead.closed_at = _utcnow()
+
+    def query(
+        self,
+        *,
+        task_id: str | None = None,
+        agent_name: str | None = None,
+        bead_type: str | None = None,
+        status: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[Bead]:
+        out: list[Bead] = []
+        for bead in self._beads.values():
+            if task_id is not None and bead.task_id != task_id:
+                continue
+            if agent_name is not None and bead.agent_name != agent_name:
+                continue
+            if bead_type is not None and bead.bead_type != bead_type:
+                continue
+            if status is not None and bead.status != status:
+                continue
+            if tags and not set(tags).issubset(set(bead.tags or [])):
+                continue
+            out.append(bead)
+        out.sort(key=lambda b: b.created_at, reverse=True)
+        return out[:limit]
+
+
+@pytest.fixture
+def fake_board() -> TeamBoard:
+    return TeamBoard(_FakeBeadStore())
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +344,102 @@ class TestSelectForTeamMember:
             bead_store, plan.phases[0].steps[0], plan,
         )
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Idempotent task creation, malformed claim targets — hermetic (_FakeBeadStore)
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentTaskCreate:
+    def test_repeated_create_with_same_key_returns_original_bead_id(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        first = fake_board.append_task(
+            task_id="task-board", team_id="team-a",
+            author_member_id="a.lead", title="t", idempotency_key="retry-1",
+        )
+        second = fake_board.append_task(
+            task_id="task-board", team_id="team-a",
+            author_member_id="a.lead", title="t (retried wording)",
+            idempotency_key="retry-1",
+        )
+        assert first == second
+        # Only one task actually persisted.
+        tasks = fake_board.open_tasks_for_team(task_id="task-board", team_id="team-a")
+        assert len(tasks) == 1
+
+    def test_idempotency_key_scoped_to_team(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        """The same idempotency_key under a DIFFERENT team_id creates a
+        distinct task — scoping is (team_id, idempotency_key), not the key
+        alone. Titles differ too so the (deterministic, content-hashed)
+        bead id can't coincidentally collide and mask the scoping bug."""
+        a_id = fake_board.append_task(
+            task_id="task-board", team_id="team-a",
+            author_member_id="a.lead", title="team a's task",
+            idempotency_key="shared-key",
+        )
+        b_id = fake_board.append_task(
+            task_id="task-board", team_id="team-b",
+            author_member_id="b.lead", title="team b's task",
+            idempotency_key="shared-key",
+        )
+        assert a_id != b_id
+        assert len(fake_board.open_tasks_for_team(task_id="task-board", team_id="team-a")) == 1
+        assert len(fake_board.open_tasks_for_team(task_id="task-board", team_id="team-b")) == 1
+
+    def test_no_idempotency_key_always_creates_new_task(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        fake_board.append_task(
+            task_id="task-board", team_id="team-a",
+            author_member_id="a.lead", title="first task",
+        )
+        fake_board.append_task(
+            task_id="task-board", team_id="team-a",
+            author_member_id="a.lead", title="second task",
+        )
+        tasks = fake_board.open_tasks_for_team(task_id="task-board", team_id="team-a")
+        assert len(tasks) == 2
+
+
+class TestMalformedClaimTargets:
+    def test_claim_missing_bead_raises_conflict_error(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        with pytest.raises(TeamBoardConflictError):
+            fake_board.claim_task(
+                task_id="task-board", task_bead_id="bd-does-not-exist",
+                member_id="a.worker", expected_status="open",
+            )
+
+    def test_claim_non_task_bead_raises_conflict_error(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        """Claiming a message bead's id (not a task) must fail closed, not
+        silently tag the wrong bead type as claimed."""
+        msg_id = fake_board.send_message(
+            task_id="task-board",
+            from_team="team-a", from_member="a.lead",
+            to_team="team-b", to_member="b.worker",
+            subject="s", body="b",
+        )
+        with pytest.raises(TeamBoardConflictError):
+            fake_board.claim_task(
+                task_id="task-board", task_bead_id=msg_id,
+                member_id="a.worker", expected_status="open",
+            )
+
+    def test_complete_missing_bead_does_not_raise(
+        self, fake_board: TeamBoard,
+    ) -> None:
+        """complete_task delegates to BeadStore.close(), which is a safe
+        no-op on a missing id — asserting this stays true so a malformed
+        task_bead_id from a caller degrades quietly rather than crashing
+        the dispatch loop."""
+        fake_board.complete_task(
+            task_id="task-board", task_bead_id="bd-does-not-exist",
+            outcome="n/a",
+        )

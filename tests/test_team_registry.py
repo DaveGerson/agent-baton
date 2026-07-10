@@ -174,6 +174,151 @@ class TestTeamStatus:
         assert team.status == "complete"
 
 
+class TestSetStatusIfConcurrency:
+    """Direct registry-level compare-and-swap coverage (§6.3 of the
+    runtime-contract doc). The synthesis state machine relies on this for
+    "two concurrent synthesis drivers can't both win a transition."
+    """
+
+    def test_matching_expected_status_transitions_and_returns_true(
+        self, registry: TeamRegistry, tmp_path: Path,
+    ) -> None:
+        _seed_execution(tmp_path / "baton.db", "t1")
+        registry.create_team(
+            task_id="t1", team_id="team-1.1", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        assert registry.set_status_if(
+            "t1", "team-1.1", expected_status="active", status="complete",
+        ) is True
+        assert registry.get_team("t1", "team-1.1").status == "complete"
+
+    def test_mismatched_expected_status_is_noop_returns_false(
+        self, registry: TeamRegistry, tmp_path: Path,
+    ) -> None:
+        _seed_execution(tmp_path / "baton.db", "t1")
+        registry.create_team(
+            task_id="t1", team_id="team-1.1", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        assert registry.set_status_if(
+            "t1", "team-1.1", expected_status="complete", status="failed",
+        ) is False
+        assert registry.get_team("t1", "team-1.1").status == "active"
+
+    def test_two_racing_transitions_only_the_first_wins(
+        self, registry: TeamRegistry, tmp_path: Path,
+    ) -> None:
+        """Simulates two concurrent synthesis drivers both trying to move
+        the SAME team from 'active' to 'complete' — exactly one call must
+        report success; the second sees the already-flipped status and
+        no-ops rather than double-applying the transition."""
+        _seed_execution(tmp_path / "baton.db", "t1")
+        registry.create_team(
+            task_id="t1", team_id="team-1.1", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        first = registry.set_status_if(
+            "t1", "team-1.1", expected_status="active", status="complete",
+        )
+        second = registry.set_status_if(
+            "t1", "team-1.1", expected_status="active", status="complete",
+        )
+        assert first is True
+        assert second is False
+        assert registry.get_team("t1", "team-1.1").status == "complete"
+
+    def test_missing_team_row_returns_false(
+        self, registry: TeamRegistry, tmp_path: Path,
+    ) -> None:
+        _seed_execution(tmp_path / "baton.db", "t1")
+        assert registry.set_status_if(
+            "t1", "team-missing", expected_status="active", status="complete",
+        ) is False
+
+
+class TestRestartPersistence:
+    """A brand-new TeamRegistry instance against the SAME db path must see
+    everything a prior instance wrote — the durability guarantee a real
+    process restart (or a separate `baton team` CLI invocation) relies on.
+    """
+
+    def test_team_and_status_survive_new_registry_instance(
+        self, tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "baton.db"
+        _seed_execution(db_path, "t1")
+        reg1 = TeamRegistry(db_path)
+        reg1.create_team(
+            task_id="t1", team_id="team-1.1", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        reg1.set_status_if(
+            "t1", "team-1.1", expected_status="active", status="complete",
+        )
+
+        # Simulate a restart: a fresh TeamRegistry object, same db file.
+        reg2 = TeamRegistry(db_path)
+        team = reg2.get_team("t1", "team-1.1")
+        assert team is not None
+        assert team.status == "complete"
+
+    def test_nested_child_team_survives_new_registry_instance(
+        self, tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "baton.db"
+        _seed_execution(db_path, "t1")
+        reg1 = TeamRegistry(db_path)
+        reg1.create_team(
+            task_id="t1", team_id="team-parent", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        reg1.create_team(
+            task_id="t1", team_id="team-child", step_id="1.1.a",
+            leader_agent="backend-engineer", leader_member_id="1.1.a.b",
+            parent_team_id="team-parent",
+        )
+
+        reg2 = TeamRegistry(db_path)
+        children = reg2.child_teams("t1", "team-parent")
+        assert [c.team_id for c in children] == ["team-child"]
+
+
+class TestGrandchildNesting:
+    """Multi-level nesting: child_teams() returns only the IMMEDIATE
+    children of the id it's given, one level at a time — a grandchild is
+    reachable only by walking child_teams() again on the child's own id,
+    never surfaced directly under the grandparent."""
+
+    def test_child_teams_returns_only_one_level(
+        self, registry: TeamRegistry, tmp_path: Path,
+    ) -> None:
+        _seed_execution(tmp_path / "baton.db", "t1")
+        registry.create_team(
+            task_id="t1", team_id="team-grandparent", step_id="1.1",
+            leader_agent="architect", leader_member_id="1.1.a",
+        )
+        registry.create_team(
+            task_id="t1", team_id="team-parent", step_id="1.1.a",
+            leader_agent="backend-engineer", leader_member_id="1.1.a.b",
+            parent_team_id="team-grandparent",
+        )
+        registry.create_team(
+            task_id="t1", team_id="team-grandchild", step_id="1.1.a.b",
+            leader_agent="test-engineer", leader_member_id="1.1.a.b.c",
+            parent_team_id="team-parent",
+        )
+
+        grandparent_children = registry.child_teams("t1", "team-grandparent")
+        assert [c.team_id for c in grandparent_children] == ["team-parent"]
+
+        parent_children = registry.child_teams("t1", "team-parent")
+        assert [c.team_id for c in parent_children] == ["team-grandchild"]
+
+        # The grandchild never appears directly under the grandparent.
+        assert "team-grandchild" not in {c.team_id for c in grandparent_children}
+
+
 class TestTeamSerialization:
     def test_to_dict_from_dict_roundtrip(self) -> None:
         """Dataclass serializer symmetry."""

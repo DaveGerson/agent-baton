@@ -18,6 +18,7 @@ from agent_baton.models.execution import (
     PlanPhase,
     PlanStep,
     StepResult,
+    SynthesisSpec,
     TeamMember,
     TeamStepResult,
 )
@@ -651,3 +652,291 @@ class TestTeamDispatchPrompt:
         # Member B's prompt should reference its dependency on 1.1.a.
         assert action.action_type == ActionType.DISPATCH
         assert "1.1.a" in action.delegation_prompt
+
+
+# ---------------------------------------------------------------------------
+# TestConflictHandlingPolicies
+#
+# test_phase3_team_maturation.py already covers "auto_merge completes
+# normally" and "escalate pauses on conflict" for the DEFAULT synthesis
+# strategy. The gaps this class fills: (1) `conflict_handling="fail"`
+# combined with a NON-agent_synthesis strategy (concatenate/merge_files) —
+# untested anywhere else in the suite; (2) a member FAILURE co-occurring
+# with a file-overlap conflict under "fail" — the branch at the top of
+# executor.record_team_member_result's failed_ids handling that enriches
+# the failure error with conflict detail, which no existing test reaches.
+# ---------------------------------------------------------------------------
+
+
+class TestConflictHandlingPolicies:
+
+    def _two_member_conflicting_step(
+        self, *, strategy: str = "merge_files", conflict_handling: str = "auto_merge",
+    ) -> PlanStep:
+        return _step(
+            step_id="1.1",
+            team=[
+                _member("1.1.a", agent_name="backend-engineer", role="implementer"),
+                _member("1.1.b", agent_name="test-engineer", role="implementer"),
+            ],
+            synthesis=SynthesisSpec(
+                strategy=strategy, conflict_handling=conflict_handling,
+            ),
+        )
+
+    def test_fail_policy_terminates_step_on_conflict_even_when_all_succeed(
+        self, tmp_path: Path,
+    ) -> None:
+        """conflict_handling='fail' with a non-agent_synthesis strategy:
+        both members individually SUCCEED but touch the same file — the
+        step must still fail, because the conflict is between their
+        outputs, not a member outcome."""
+        step = self._two_member_conflicting_step(
+            strategy="merge_files", conflict_handling="fail",
+        )
+        plan = _plan(phases=[_phase(steps=[step])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete",
+            outcome="impl A", files_changed=["shared.py"],
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="complete",
+            outcome="impl B", files_changed=["shared.py"],
+        )
+
+        state = engine._load_state()
+        result = state.get_step_result("1.1")
+        assert result is not None
+        assert result.status == "failed"
+        assert "Conflict detected" in result.error
+        assert result.completed_at
+
+    def test_fail_policy_without_overlap_completes_normally(
+        self, tmp_path: Path,
+    ) -> None:
+        """Sanity: 'fail' only terminates on an ACTUAL conflict — disjoint
+        files_changed must still complete the step."""
+        step = self._two_member_conflicting_step(
+            strategy="merge_files", conflict_handling="fail",
+        )
+        plan = _plan(phases=[_phase(steps=[step])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete",
+            outcome="impl A", files_changed=["a.py"],
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="complete",
+            outcome="impl B", files_changed=["b.py"],
+        )
+
+        state = engine._load_state()
+        result = state.get_step_result("1.1")
+        assert result is not None
+        assert result.status == "complete"
+
+    def test_fail_policy_member_failure_plus_conflict_enriches_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """The failed_ids branch: one member already FAILED, and among the
+        recorded results there is also a file-overlap conflict. The
+        parent's error must be annotated with the conflict detail (not
+        just the generic 'Team member(s) failed' message) — this is the
+        one branch of record_team_member_result's conflict_handling=='fail'
+        handling that pre-dates a member failure rather than following a
+        clean success."""
+        step = self._two_member_conflicting_step(
+            strategy="merge_files", conflict_handling="fail",
+        )
+        plan = _plan(phases=[_phase(steps=[step])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete",
+            outcome="impl A", files_changed=["shared.py"],
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="failed",
+            outcome="compile error", files_changed=["shared.py"],
+        )
+
+        state = engine._load_state()
+        result = state.get_step_result("1.1")
+        assert result is not None
+        assert result.status == "failed"
+        assert "Conflict detected" in result.error
+
+    def test_escalate_policy_pauses_for_non_agent_synthesis_strategy(
+        self, tmp_path: Path,
+    ) -> None:
+        """Pins CURRENT behavior for 'escalate' + a non-agent_synthesis
+        strategy across an approval round-trip: the step correctly pauses
+        for human review on conflict (matches test_phase3_team_maturation's
+        coverage), but — because the ESCALATED -> SYNTHESIZING resume wired
+        in Phase 4 4.3 (_pending_synthesis_dispatch) only re-engages for
+        strategy='agent_synthesis' — approving the escalation does NOT
+        auto-resume concatenate/merge_files synthesis: the step remains
+        'dispatched'/synthesis_state='escalated' and next_action() reports
+        WAIT rather than completing. This is a real gap (executor.py is
+        outside this test-authoring step's allowed_paths, so it cannot be
+        fixed here) — pinned explicitly so a future fix has a red test to
+        turn green, and so this behavior can't silently regress further.
+        """
+        step = self._two_member_conflicting_step(
+            strategy="merge_files", conflict_handling="escalate",
+        )
+        plan = _plan(phases=[_phase(steps=[step])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete",
+            outcome="impl A", files_changed=["shared.py"],
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="complete",
+            outcome="impl B", files_changed=["shared.py"],
+        )
+
+        state = engine._load_state()
+        assert state.status == "approval_pending"
+        result = state.get_step_result("1.1")
+        assert result.status == "dispatched"
+        assert result.synthesis_state == "escalated"
+
+        engine.record_approval_result(phase_id=0, result="approve")
+
+        state = engine._load_state()
+        result = state.get_step_result("1.1")
+        # Current (gap) behavior — see docstring. Update this assertion
+        # alongside the executor.py fix that resumes non-agent_synthesis
+        # strategies out of ESCALATED.
+        assert result.status == "dispatched"
+        assert result.synthesis_state == "escalated"
+        action = engine.next_action()
+        assert action.action_type == ActionType.WAIT
+
+
+# ---------------------------------------------------------------------------
+# TestMalformedRecordCalls — record_team_member_result with data that does
+# not correspond cleanly to the plan's team roster.
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedRecordCalls:
+
+    def test_unknown_member_id_does_not_block_real_completion(
+        self, tmp_path: Path,
+    ) -> None:
+        """A malformed/unauthorized record for a member_id that isn't in
+        the plan's team is stored (the engine does not validate membership
+        at this layer — see docs/internal/team-runtime-contract.md's note
+        that ``team_tools._require_member`` is the validating layer, not
+        the executor's own record path) but must not prevent the real
+        members from completing the step normally."""
+        engine = TestTeamCompletion._start_team_engine(tmp_path)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.ghost", "unknown-agent",
+            status="complete", outcome="not a real member",
+        )
+        state = engine._load_state()
+        # The bogus record is stored...
+        assert any(
+            m.member_id == "1.1.ghost"
+            for m in state.get_step_result("1.1").member_results
+        )
+        # ...but the parent step is still waiting on the REAL two members.
+        assert state.get_step_result("1.1").status == "dispatched"
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete", outcome="a",
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="complete", outcome="b",
+        )
+        state = engine._load_state()
+        assert state.get_step_result("1.1").status == "complete"
+
+    def test_duplicate_record_for_same_member_does_not_crash(
+        self, tmp_path: Path,
+    ) -> None:
+        """A member retried after an ambiguous failure (e.g. a Bash-tool
+        timeout on the recording call) may report twice — the engine must
+        not crash, and completion must still be correctly gated on the
+        real roster."""
+        engine = TestTeamCompletion._start_team_engine(tmp_path)
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete", outcome="first",
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "backend-engineer", status="complete", outcome="retry",
+        )
+        state = engine._load_state()
+        assert state.get_step_result("1.1").status == "dispatched"
+
+        engine.record_team_member_result(
+            "1.1", "1.1.b", "test-engineer", status="complete", outcome="b",
+        )
+        state = engine._load_state()
+        assert state.get_step_result("1.1").status == "complete"
+
+
+# ---------------------------------------------------------------------------
+# TestDryRunTeamActionPayload — retains the dry-run assertion that token
+# estimates and team action payloads are complete when a team dispatch's
+# DISPATCH action (primary + parallel_actions) is fed through the dry-run
+# launcher, exactly as the orchestrator's dry-run mode would.
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunTeamActionPayload:
+
+    def test_team_dispatch_actions_produce_complete_dry_run_launches(
+        self, tmp_path: Path,
+    ) -> None:
+        import asyncio
+        from agent_baton.core.engine.dry_run_launcher import TracingDryRunLauncher
+
+        plan = _plan(phases=[_phase(steps=[_two_member_step()])])
+        action = _engine(tmp_path).start(plan)
+        all_actions = [action, *action.parallel_actions]
+        assert len(all_actions) == 2  # both team members present in this wave
+
+        launcher = TracingDryRunLauncher()
+
+        async def _drive() -> None:
+            for a in all_actions:
+                await launcher.launch(
+                    agent_name=a.agent_name,
+                    model=a.agent_model or "sonnet",
+                    prompt=a.delegation_prompt,
+                    step_id=a.step_id,
+                )
+
+        asyncio.run(_drive())
+
+        assert len(launcher.launches) == 2
+        by_step = {entry["step_id"]: entry for entry in launcher.launches}
+        assert set(by_step) == {"1.1.a", "1.1.b"}
+        for step_id, entry in by_step.items():
+            # Every payload field the dry-run report writer depends on must
+            # be present and non-degenerate — a missing/zero token estimate
+            # or an empty agent_name would silently corrupt a dry-run report.
+            assert entry["agent_name"], step_id
+            assert entry["model"], step_id
+            assert entry["prompt_chars"] > 0, step_id
+            assert entry["estimated_tokens"] >= 1, step_id
+            assert entry["launched_at"], step_id
+        # Team dispatch prompts carry real content, not placeholders — the
+        # token estimate is a genuine function of that content.
+        assert by_step["1.1.a"]["prompt_chars"] != by_step["1.1.b"]["prompt_chars"] or (
+            by_step["1.1.a"]["agent_name"] != by_step["1.1.b"]["agent_name"]
+        )
