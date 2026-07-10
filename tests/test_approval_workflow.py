@@ -567,3 +567,95 @@ class TestGetApprovalLog:
         assert r.status_code == 200
         body = r.json()
         assert body["entries"] == []
+
+
+# ===========================================================================
+# approval_log (PMO role-based review trail) vs. DecisionManager
+# (gate/approval queue used by daemon TaskWorker + interactive runner)
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md
+# §3 ("Authoritative owners") and §8 (state-transition test matrix, "Compat:
+# two decision systems"). The PMO approval_log is a human-review audit trail
+# layered on top of a card; DecisionManager is the file-based inbox the
+# execution engine actually blocks on for gate/approval actions. They are
+# two independent systems that both key off task_id and must not collide.
+# ===========================================================================
+
+
+class TestApprovalLogVsDecisionManagerIndependence:
+    def test_request_review_does_not_require_a_decision_manager_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """POST .../request-review succeeds even when no DecisionManager
+        request exists for the task (and even when the card cannot be
+        resolved by the scanner) — approval_log is not routed through
+        DecisionManager at all."""
+        store = _make_tmp_store(tmp_path)
+        central = _FakeCentralStore()
+        client = _make_app(tmp_path, store, central)
+
+        # No DecisionRequest has been written anywhere for this task_id.
+        from agent_baton.core.runtime.decisions import DecisionManager
+
+        dm = DecisionManager(decisions_dir=tmp_path / "decisions")
+        assert dm.pending() == []
+
+        r = client.post(
+            "/api/v1/pmo/cards/shared-task-001/request-review",
+            json={"notes": "independent of DecisionManager"},
+        )
+        assert r.status_code == 201
+
+        # Still no DecisionManager request was created as a side effect.
+        assert dm.pending() == []
+
+    def test_approval_log_and_decision_manager_coexist_for_the_same_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Writing a DecisionManager gate-approval request and a PMO
+        approval_log entry for the SAME task_id must not collide — each
+        system is independently keyed by task_id and neither reads or
+        mutates the other's storage."""
+        from agent_baton.core.runtime.decisions import DecisionManager
+        from agent_baton.models.decision import DecisionRequest
+
+        task_id = "shared-task-002"
+
+        # DecisionManager side: a pending gate-approval request.
+        dm = DecisionManager(decisions_dir=tmp_path / "decisions")
+        req = DecisionRequest.create(
+            task_id=task_id,
+            decision_type="gate_approval",
+            summary="Gate for phase 1 requires approval",
+        )
+        dm.request(req)
+        assert len(dm.pending()) == 1
+
+        # PMO side: an independent role-based review-request log entry for
+        # the same task_id.
+        store = _make_tmp_store(tmp_path)
+        central = _FakeCentralStore()
+        client = _make_app(tmp_path, store, central)
+        r = client.post(
+            f"/api/v1/pmo/cards/{task_id}/request-review",
+            json={"notes": "human sign-off, independent of the gate queue"},
+        )
+        assert r.status_code == 201
+
+        # Both records exist, independently, for the same task_id.
+        assert len(dm.pending()) == 1
+        rows = central.query(
+            "SELECT * FROM approval_log WHERE task_id = ?",
+            (task_id,),
+        )
+        assert len(rows) == 1
+
+        # Resolving the DecisionManager request does not touch approval_log,
+        # and reading approval_log does not touch DecisionManager.
+        dm.resolve(req.request_id, chosen_option="approve")
+        assert dm.pending() == []
+        rows_after = central.query(
+            "SELECT * FROM approval_log WHERE task_id = ?",
+            (task_id,),
+        )
+        assert len(rows_after) == 1

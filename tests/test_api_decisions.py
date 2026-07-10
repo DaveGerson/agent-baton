@@ -397,3 +397,70 @@ class TestResolveDecision:
             json={},
         )
         assert r.status_code == 422
+
+
+# ===========================================================================
+# Decision resolve — idempotency of side effects
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md §4
+# ("idempotency semantics", DecisionManager.resolve() row) and §8
+# (state-transition test matrix, stage 6 "Record decision"). The rejected
+# second call must be a true no-op: it must not re-publish
+# human_decision_resolved (downstream consumers — the async worker's poll
+# loop, SSE, webhooks — must see the resolution exactly once).
+# ===========================================================================
+
+
+class TestDecisionResolveIdempotency:
+    def test_double_resolve_emits_the_resolved_event_exactly_once(
+        self, tmp_root: Path
+    ) -> None:
+        from agent_baton.core.events.bus import EventBus
+
+        bus = EventBus()
+        app = create_app(team_context_root=tmp_root, bus=bus)
+        client = TestClient(app)
+        dm = DecisionManager(decisions_dir=tmp_root / "decisions", bus=bus)
+        req = _create_decision(dm)
+
+        resolved_events: list[dict] = []
+        bus.subscribe(
+            "human.decision_resolved",
+            lambda event: resolved_events.append(event.payload),
+        )
+
+        first = client.post(
+            f"/api/v1/decisions/{req.request_id}/resolve",
+            json={"option": "approve"},
+        )
+        second = client.post(
+            f"/api/v1/decisions/{req.request_id}/resolve",
+            json={"option": "reject"},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 400
+        assert len(resolved_events) == 1
+        # The winning resolution (the first call) is the one recorded.
+        assert resolved_events[0]["chosen_option"] == "approve"
+
+    def test_double_resolve_does_not_change_the_persisted_resolution(
+        self, tmp_root: Path
+    ) -> None:
+        app = create_app(team_context_root=tmp_root)
+        client = TestClient(app)
+        dm = DecisionManager(decisions_dir=tmp_root / "decisions")
+        req = _create_decision(dm)
+
+        client.post(
+            f"/api/v1/decisions/{req.request_id}/resolve",
+            json={"option": "approve"},
+        )
+        client.post(
+            f"/api/v1/decisions/{req.request_id}/resolve",
+            json={"option": "reject"},
+        )
+
+        resolution = dm.get_resolution(req.request_id)
+        assert resolution is not None
+        assert resolution["chosen_option"] == "approve"

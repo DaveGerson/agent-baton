@@ -517,6 +517,111 @@ class TestWorkerDecisionIntegration:
 
 
 # ===========================================================================
+# Shared execution lifecycle contract
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md:
+#   §6 (pause-and-resume contract) and §8 (state-transition test matrix,
+#   stage 5 "Pause" and stage 8 "Complete" cross-surface equivalence).
+# These pin down the CURRENT contract, including the documented gap that
+# process-level pause does not (yet) have an engine-owned status value.
+# ===========================================================================
+
+class TestSharedLifecycleContract:
+    def test_pause_does_not_mutate_persisted_status(self, tmp_path: Path) -> None:
+        """SIGSTOP/SIGCONT via WorkerSupervisor.pause_worker/resume_worker
+        operate purely at the OS process level today — per contract §6 they
+        must not change ExecutionState.status (there is no engine-owned
+        'paused' transition yet; durability comes only from the fact that
+        state was already saved at the last completed engine call)."""
+        import subprocess
+        import time
+
+        task_id = "pause-contract-task"
+
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        engine.start(_plan(task_id=task_id))
+        status_before = engine.status().get("status")
+        assert status_before == "running"
+
+        # A real, unrelated long-lived subprocess stands in for the daemon
+        # worker process so real SIGSTOP/SIGCONT can be sent without
+        # touching the test process itself.
+        proc = subprocess.Popen(["sleep", "5"])
+        try:
+            pid_dir = tmp_path / "executions" / task_id
+            pid_dir.mkdir(parents=True, exist_ok=True)
+            (pid_dir / "worker.pid").write_text(str(proc.pid))
+
+            s = WorkerSupervisor(team_context_root=tmp_path, task_id=task_id)
+            paused_pid = s.pause_worker(task_id)
+            assert paused_pid == proc.pid
+
+            if sys.platform.startswith("linux"):
+                for _ in range(20):
+                    state_line = next(
+                        line for line in Path(f"/proc/{proc.pid}/status").read_text().splitlines()
+                        if line.startswith("State:")
+                    )
+                    if state_line.split()[1] == "T":
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("worker process never entered SIGSTOP state 'T'")
+
+            # The persisted execution status is untouched by the OS-level pause.
+            assert engine.status().get("status") == status_before == "running"
+
+            resumed_pid = s.resume_worker(task_id)
+            assert resumed_pid == proc.pid
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+        # And still untouched after resume.
+        assert engine.status().get("status") == "running"
+
+    def test_worker_and_direct_engine_calls_reach_equivalent_terminal_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Driving the same plan (a) directly via ExecutionEngine calls (the
+        shape every CLI action-loop command performs one at a time) and
+        (b) via the async TaskWorker (the shape the daemon and BatonRunner
+        use) must persist an equivalent terminal ExecutionState — same
+        status, same set of completed step ids — because both surfaces are
+        required to drive the same ExecutionDriver methods (contract §3)."""
+        plan = _plan(phases=[
+            _phase(phase_id=0, steps=[_step("1.1"), _step("1.2", agent="tester")]),
+        ])
+
+        # (a) CLI-action-loop shape: one direct engine call per stage.
+        direct_engine = ExecutionEngine(team_context_root=tmp_path / "direct")
+        action = direct_engine.start(plan)
+        assert action.action_type.value == "dispatch"
+        direct_engine.mark_dispatched("1.1", "backend")
+        direct_engine.record_step_result("1.1", "backend", status="complete")
+        direct_engine.mark_dispatched("1.2", "tester")
+        direct_engine.record_step_result("1.2", "tester", status="complete")
+        final_action = direct_engine.next_action()
+        assert final_action.action_type.value == "complete"
+        direct_engine.complete()
+        direct_state = direct_engine._load_execution()
+        assert direct_state is not None
+
+        # (b) Daemon/TaskWorker shape: async loop drives the same plan.
+        worker_engine = ExecutionEngine(team_context_root=tmp_path / "worker")
+        worker_engine.start(plan)
+        worker = TaskWorker(engine=worker_engine, launcher=DryRunLauncher())
+        asyncio.run(worker.run())
+        worker_state = worker_engine._load_execution()
+        assert worker_state is not None
+
+        assert direct_state.status == worker_state.status == "complete"
+        direct_complete_ids = {r.step_id for r in direct_state.step_results if r.status == "complete"}
+        worker_complete_ids = {r.step_id for r in worker_state.step_results if r.status == "complete"}
+        assert direct_complete_ids == worker_complete_ids == {"1.1", "1.2"}
+
+
+# ===========================================================================
 # TaskWorker — shutdown_event
 # ===========================================================================
 
