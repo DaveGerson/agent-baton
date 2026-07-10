@@ -217,6 +217,147 @@ class TestVerifyStep:
         assert v.passed is True
         assert v.inconclusive is False
 
+    # -----------------------------------------------------------------
+    # Threat model (Phase 3 "Make scope contracts authoritative", 3.3):
+    # this verifier is the READ-ONLY, independent second check named in
+    # the step contract ("independent post-diff verification"). These
+    # tests prove it fails CLOSED under adversarial/unusual inputs -- it
+    # can never be edited to fix a source-level bug here (out of this
+    # step's allowed_paths), so the goal is to demonstrate no bypass
+    # exists, not to add new enforcement.
+    # -----------------------------------------------------------------
+
+    def test_absolute_path_outside_repo_fails_closed(self, git_repo: Path):
+        """A self-reported files_changed entry can never legitimately be
+        absolute, but a forged/malformed one must still be treated as
+        out-of-scope rather than silently matching (or crashing)."""
+        step = _step(allowed_paths=["agent_baton/core/audit/"])
+        result = _result(files=["/etc/passwd"])
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        assert v.passed is False
+        assert "/etc/passwd" in v.files_outside_scope
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN, UNFIXED BYPASS (Phase 3 'Make scope contracts "
+            "authoritative', step 3.3 security review): "
+            "DispatchVerifier._is_under() uses PurePosixPath.relative_to(), "
+            "which is purely lexical and never collapses '..' segments. A "
+            "self-reported files_changed entry containing '..' (e.g. "
+            "'agent_baton/core/audit/../../../etc/passwd') lexically starts "
+            "with the allowed prefix's parts, so relative_to() succeeds and "
+            "the file is reported IN SCOPE even though the real, resolved "
+            "path escapes the allowed directory entirely. This is a "
+            "genuine bypass of the post-diff independent verifier for a "
+            "forged/malformed files_changed entry. The fix belongs in "
+            "agent_baton/core/audit/dispatch_verifier.py (_is_under / "
+            "_path_matches_any should normalize with os.path.normpath or "
+            "PurePosixPath(...).parts scanning for '..' before the "
+            "relative_to() check, mirroring "
+            "agent_baton.core.engine.planning.scope_contract."
+            "normalize_scope_path's traversal rejection), which is OUTSIDE "
+            "this step's allowed_paths (only this test file is in scope) "
+            "-- see the 'concerns' section of the 3.3 step report. Left "
+            "as a strict xfail (not skipped/deleted) so the regression is "
+            "tracked and this test starts FAILING THE BUILD (a welcome "
+            "surprise) the moment the fix lands."
+        ),
+    )
+    def test_dot_dot_traversal_path_fails_closed(self, git_repo: Path):
+        step = _step(allowed_paths=["agent_baton/core/audit/"])
+        result = _result(files=["agent_baton/core/audit/../../../etc/passwd"])
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        assert v.passed is False
+
+    def test_git_diff_fallback_filename_with_space_is_not_mangled(self, git_repo: Path):
+        """git diff-tree --name-only (unlike git status --porcelain) does
+        not C-quote a plain space -- a single path per line has no
+        competing field to disambiguate -- but this pins that assumption
+        against a real git invocation so a future git/platform quirk is
+        caught rather than silently producing a false negative."""
+        target = git_repo / "agent_baton" / "core" / "audit" / "spaced name.py"
+        target.write_text("# new\n")
+        subprocess.run(["git", "-C", str(git_repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(git_repo), "commit", "-q", "-m", "spaced fixture"],
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "-C", str(git_repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        step = _step(allowed_paths=["agent_baton/core/audit/"])
+        result = _result(files=[], commit_hash=sha)
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        assert v.passed is True
+        assert v.inconclusive is False
+
+    def test_git_diff_fallback_out_of_scope_file_with_space_is_flagged(self, git_repo: Path):
+        target = git_repo / "docs"
+        target.mkdir()
+        (target / "leaked notes.md").write_text("secret\n")
+        subprocess.run(["git", "-C", str(git_repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(git_repo), "commit", "-q", "-m", "out of scope spaced"],
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "-C", str(git_repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        step = _step(allowed_paths=["agent_baton/core/audit/"])
+        result = _result(files=[], commit_hash=sha)
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        assert v.passed is False
+        assert any("leaked notes.md" in f for f in v.files_outside_scope)
+
+    def test_rename_via_commit_reports_new_path_not_old(self, git_repo: Path):
+        subprocess.run(
+            [
+                "git", "-C", str(git_repo), "mv",
+                "agent_baton/core/audit/marker.py",
+                "agent_baton/core/audit/renamed_marker.py",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(git_repo), "commit", "-q", "-m", "rename marker"],
+            check=True,
+        )
+        sha = subprocess.run(
+            ["git", "-C", str(git_repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        step = _step(allowed_paths=["agent_baton/core/audit/"])
+        result = _result(files=[], commit_hash=sha)
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        # Both old and new names are under the allowed prefix here, so this
+        # is a scope-clean rename; the point is that it resolves cleanly
+        # (no crash, no bogus "old -> new" single-entry artifact) via
+        # git diff-tree's plain one-name-per-line output.
+        assert v.passed is True
+        assert v.inconclusive is False
+
+    def test_empty_allowed_paths_declares_no_sandbox_for_any_file(self, git_repo: Path):
+        """Documented, intentional behavior (see module docstring): an
+        empty allowed_paths means the step declared no sandbox at all, so
+        nothing -- however sensitive-looking the path -- can be "outside
+        scope". This is a blocklist-only scope contract's read-only
+        analogue: DispatchVerifier has no independent blocked_paths
+        concept, so operators relying on it for a deny-list step type
+        must pair it with the diff-derived verifier in
+        ``agent_baton.core.engine.manager_scope_signal``, not rely on
+        this verifier alone."""
+        step = _step(allowed_paths=[])
+        result = _result(files=["secrets/prod.env"])
+        v = DispatchVerifier().verify_step(step, result, git_repo)
+        assert v.passed is True
+        assert v.files_outside_scope == []
+
 
 # ---------------------------------------------------------------------------
 # Audit-task aggregation tests

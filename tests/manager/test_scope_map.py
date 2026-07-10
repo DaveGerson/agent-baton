@@ -430,6 +430,169 @@ def test_contradictory_scope_raises_even_without_strict() -> None:
         ScopeMapBuilder(config).build(charter, plan, strict=False)
 
 
+# ---------------------------------------------------------------------------
+# Threat model (Phase 3 "Make scope contracts authoritative", 3.3)
+# ---------------------------------------------------------------------------
+
+
+def test_contradiction_across_sibling_steps_in_same_workstream_raises() -> None:
+    """Blocked-over-allowed precedence must hold even when the collision
+    only exists AFTER aggregating two different steps in the same phase
+    -- one step's allowed_paths colliding with a SIBLING step's
+    blocked_paths, not its own. ``diagnose_step_scope`` is invoked per
+    step against the WORKSTREAM's resolved allowed_paths (see
+    ``ScopeMapBuilder._record_diagnostics``), so this must be caught even
+    though step 1.1 alone (allowed vs its own, empty, blocked_paths)
+    looks clean in isolation."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="backend-engineer",
+                    task_description="Build the reporting endpoint.",
+                    deliverables=["reporting endpoint"],
+                    allowed_paths=["app/reporting/service.py"],
+                ),
+                PlanStep(
+                    step_id="1.2",
+                    agent_name="backend-engineer",
+                    task_description="Sibling step declares the shared area off-limits.",
+                    deliverables=["router wiring"],
+                    blocked_paths=["app/reporting/service.py"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+    config = ManagerConfig()
+    charter = ProjectCharterBuilder(config).build(plan, plan.task_summary, Path("/nonexistent"))
+
+    with pytest.raises(ScopeContractError, match="write_scope_contradictory"):
+        ScopeMapBuilder(config).build(charter, plan, strict=False)
+
+
+def test_explicit_generated_path_in_allowed_paths_is_honored_verbatim() -> None:
+    """The generated-file policy (``is_generated_path`` / ``GENERATED_PATH_
+    MARKERS``) only ever excludes build/tooling output from *inferred*
+    evidence tiers (deliverables/context-files text-mining); an operator's
+    EXPLICIT ``allowed_paths`` entry is never second-guessed, including a
+    generated directory like ``dist/`` -- see ``derive_allowed_paths``'s
+    "explicit" tier docstring."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Release build",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="devops-engineer",
+                    task_description="Publish the release bundle.",
+                    deliverables=["release bundle"],
+                    allowed_paths=["dist/bundle.js"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+    scope_map, _charter = _build_scope_map(plan)
+    assert scope_map.workstreams[0].allowed_paths == ["dist/bundle.js"]
+
+
+def test_inferred_evidence_never_derives_a_generated_path() -> None:
+    """The flip side: when a step has NO explicit allowed_paths and must
+    fall through to inferred evidence, a generated-looking deliverable
+    string must never be silently promoted to write scope."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Build",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="devops-engineer",
+                    task_description="Produce the build output.",
+                    deliverables=["dist/bundle.js"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+    scope_map, _charter = _build_scope_map(plan)
+    assert scope_map.workstreams[0].allowed_paths == []
+
+
+def test_blocked_subpath_nested_under_allowed_path_is_flagged_not_silently_carved_out() -> None:
+    """Threat-model note (not a bypass -- documents current, fail-closed
+    behavior): ``paths_overlap`` is bidirectional (either side may be the
+    more specific one -- see its docstring), so
+    ``allowed_paths=["app"]`` + ``blocked_paths=["app/node_modules"]``
+    (an operator's attempt at "anything in app/ except node_modules/")
+    is currently flagged the exact same way as a genuine contradiction
+    (``allowed_paths=["app/x"]`` fully inside ``blocked_paths=["app"]``)
+    -- it raises rather than silently accepting a partial carve-out. This
+    is the SAFE direction (an ambiguous contract is rejected outright,
+    never silently narrowed in a way that could surprise an operator who
+    expected the exclusion to apply); it means this codebase does not
+    currently support "allow a directory except one subdirectory" as a
+    single scope contract -- callers must enumerate siblings explicitly
+    instead. Pinned here so a future relaxation of this rule is a
+    deliberate decision, not an accidental regression."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Implementation",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="backend-engineer",
+                    task_description="Build the service.",
+                    deliverables=["service"],
+                    allowed_paths=["app"],
+                    blocked_paths=["app/node_modules"],
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+    config = ManagerConfig()
+    charter = ProjectCharterBuilder(config).build(plan, plan.task_summary, Path("/nonexistent"))
+
+    with pytest.raises(ScopeContractError, match="write_scope_contradictory"):
+        ScopeMapBuilder(config).build(charter, plan, strict=False)
+
+
+def test_empty_scope_map_for_all_read_only_phase_is_not_backfilled() -> None:
+    """Threat: 'empty scope'. A workstream made entirely of read-only
+    (reviewing/consulting) steps must be left with an EMPTY
+    allowed_paths -- never silently backfilled with the workstream's
+    likely_paths, a sibling workstream's scope, or the whole repo. An
+    empty allowed_paths here is the valid representation of "this
+    workstream does not write", which downstream
+    ``ClaudeCodeLauncher.configure_step_scope`` (write_capable=False for
+    these step types) also relies on."""
+    phases = [
+        PlanPhase(
+            phase_id=1,
+            name="Design review",
+            steps=[
+                PlanStep(
+                    step_id="1.1",
+                    agent_name="security-reviewer",
+                    task_description="Review the proposed design for security issues.",
+                    deliverables=["security review notes"],
+                    step_type="reviewing",
+                ),
+            ],
+        ),
+    ]
+    plan = _make_plan(phases=phases)
+    scope_map, _charter = _build_scope_map(plan)
+    assert scope_map.workstreams[0].allowed_paths == []
+
+
 def _make_ambiguous_plan(task_id: str = "task-scope-ambiguous") -> MachinePlan:
     """A single write-capable step with no path-shaped evidence anywhere
     -- no allowed_paths, no path-shaped deliverables/context files, and a

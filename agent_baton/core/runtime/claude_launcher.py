@@ -224,6 +224,27 @@ def _build_bash_path_guard(scope: _ResolvedPathScope) -> str | None:
     (``re.escape``, not a naive ``.``/``*`` string replace), and
     blocked-path precedence has already been resolved upstream in
     :func:`_resolve_path_scope`.
+
+    Symlink-escape resistance (Phase 3 "Make scope contracts
+    authoritative", 3.3 threat model): :func:`_resolve_path_scope` /
+    :func:`_filesystem_safe` only reject an ``allowed_paths`` entry that
+    is *already* a symlink escaping the repo at launch time -- they say
+    nothing about a symlink an agent *creates* mid-session (e.g.
+    ``allowed_paths=["app"]``, then a first Write creates
+    ``app/link -> /etc``, and a second Write targets
+    ``app/link/passwd``). A guard that only string-matches
+    ``$CLAUDE_TOOL_INPUT_FILE_PATH`` against the allowed/blocked regex
+    would let that second write through: the literal path string starts
+    with ``app/``, even though the real destination the write resolves to
+    is outside the repository entirely. The guard below first canonicalizes
+    ``$FILE`` with ``readlink -f`` (falling back to ``realpath -m``, then
+    to the raw path when neither tool is present) relative to the
+    subprocess's own working directory -- which is always the repo/worktree
+    root :func:`_resolve_path_scope` normalized *scope* against -- so the
+    allowed/blocked regex below is evaluated against the write's REAL,
+    symlink-resolved destination, not the string an agent supplied. A
+    resolved path that escapes the working directory entirely is always
+    blocked, regardless of *scope*.
     """
     if not scope.allowed and not scope.blocked:
         return None
@@ -241,7 +262,26 @@ def _build_bash_path_guard(scope: _ResolvedPathScope) -> str | None:
             'echo "BLOCKED: write to scope contract blocked_paths: $FILE" >&2; exit 2; fi'
         )
     inner = "; ".join(parts)
-    return f'bash -c \'FILE="$CLAUDE_TOOL_INPUT_FILE_PATH"; {inner}; exit 0\''
+    # Canonicalize $FILE (resolving any symlink -- pre-existing OR created
+    # earlier in the same session) against the subprocess cwd (the repo /
+    # worktree root) before running the allowed/blocked checks above, and
+    # reject anything whose real destination escapes that root outright.
+    resolve = (
+        'ROOT="$(pwd -P)"; '
+        'case "$FILE" in /*) RAW="$FILE" ;; *) RAW="$ROOT/$FILE" ;; esac; '
+        'RESOLVED="$(readlink -f -- "$RAW" 2>/dev/null'
+        ' || realpath -m -- "$RAW" 2>/dev/null || echo "$RAW")"; '
+        'case "$RESOLVED" in '
+        '"$ROOT"/*) FILE="${RESOLVED#"$ROOT"/}" ;; '
+        '"$ROOT") FILE="." ;; '
+        '*) echo "BLOCKED: write escapes repository root via symlink or '
+        'absolute path: $CLAUDE_TOOL_INPUT_FILE_PATH -> $RESOLVED" >&2; exit 2 ;; '
+        'esac'
+    )
+    return (
+        "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; "
+        f"{resolve}; {inner}; exit 0'"
+    )
 
 
 def _build_scope_enforcement_args(scope: _ResolvedPathScope) -> list[str]:

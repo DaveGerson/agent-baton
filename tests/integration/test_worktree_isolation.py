@@ -1537,3 +1537,239 @@ class TestUnexpectedDiscardCheckExceptionFailsClosed:
         assert "1.1" in getattr(state_final, "step_worktrees", {}), (
             "step_worktrees must retain the handle for forensic recovery"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 "Make scope contracts authoritative", step 3.3 — security review:
+# scope-boundary threat model regressions.
+# ---------------------------------------------------------------------------
+
+
+class TestScopeGuardResistsMidSessionSymlinkEscape:
+    """Threat: an agent whose declared ``allowed_paths`` sandbox it to,
+    say, ``app/``, creates a symlink inside that sandbox pointing outside
+    the repository (``app/link -> /etc``), then targets a SECOND write
+    through that symlink (``app/link/passwd``). The write's literal path
+    string still starts with ``app/`` -- a guard that only string-matches
+    ``$CLAUDE_TOOL_INPUT_FILE_PATH`` against the allowed/blocked regex
+    would let it through even though the real destination is outside the
+    repository entirely.
+
+    ``ClaudeCodeLauncher._build_bash_path_guard`` closes this by
+    canonicalizing (``readlink -f``) the write's real destination against
+    the subprocess's own working directory before running the
+    allowed/blocked regex, and rejecting outright anything that resolves
+    outside that root. These tests drive the guard as a real bash
+    subprocess (not a mock) so they exercise the exact command string a
+    dispatched agent's ``PreToolUse`` hook would run.
+    """
+
+    @staticmethod
+    def _run_guard(guard_cmd: str, *, cwd: Path, file_path: str) -> subprocess.CompletedProcess:
+        import os as _os
+
+        inner = guard_cmd.split("bash -c '", 1)[1][:-1]
+        env = dict(_os.environ)
+        env["CLAUDE_TOOL_INPUT_FILE_PATH"] = file_path
+        return subprocess.run(
+            ["bash", "-c", inner], cwd=str(cwd), env=env,
+            capture_output=True, text=True,
+        )
+
+    def test_write_through_symlink_escaping_repo_root_is_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        outside = tmp_path.parent / f"outside-{tmp_path.name}"
+        outside.mkdir()
+        (tmp_path / "app" / "escape_hatch").symlink_to(outside, target_is_directory=True)
+
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(
+            guard, cwd=tmp_path, file_path="app/escape_hatch/malicious.txt"
+        )
+        assert result.returncode == 2, (
+            "a write through a symlink planted inside the allowed sandbox "
+            "must be blocked once it is resolved to its real, outside-the-"
+            f"repo destination; guard stderr: {result.stderr}"
+        )
+        assert "BLOCKED" in result.stderr
+
+    def test_legitimate_write_inside_allowed_path_still_passes(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(guard, cwd=tmp_path, file_path="app/service.py")
+        assert result.returncode == 0, result.stderr
+
+    def test_new_nested_file_under_allowed_path_still_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """A write to a not-yet-existing nested path (the common case: an
+        agent creating a brand new file/directory) must not be rejected
+        by the symlink-resolution step -- ``readlink -f`` resolves a
+        nonexistent trailing component without erroring."""
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(
+            guard, cwd=tmp_path, file_path="app/brand/new/module.py"
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_absolute_path_escaping_root_is_blocked(self, tmp_path: Path) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(guard, cwd=tmp_path, file_path="/etc/passwd")
+        assert result.returncode == 2
+
+
+class TestResolveScopeExpansionPartialFailureIsAtomic:
+    """Threat: "partial approval failure" -- a human approves a scope
+    expansion, but the sidecar write sequence
+    (``apply_scope_amendment``) fails partway through (disk full,
+    permission error, concurrent deletion of the decisions directory,
+    etc). The authoritative in-memory plan (``PlanStep.allowed_paths``)
+    and the durable ``ExecutionState`` (worktree registry, failed
+    ``StepResult``) must never reflect a widened scope the sidecars/
+    decision log don't also durably agree on -- see
+    ``agent_baton.core.manager.scope_amendment``'s module docstring for
+    the ordering contract this test pins.
+    """
+
+    def test_sidecar_write_failure_leaves_plan_and_worktree_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.e2e.test_manager_mode_execution_dry_run import (
+            _engine_with_fake_beads,
+            _paths,
+            _routing_plan,
+        )
+
+        task_id = "task-partial-approve"
+        worktree_dir = tmp_path / "wt"
+        worktree_dir.mkdir()
+        repo = str(worktree_dir)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (worktree_dir / "app").mkdir()
+        (worktree_dir / "app" / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        (worktree_dir / "infra").mkdir()
+        (worktree_dir / "infra" / "deploy.yml").write_text("deploy: true\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "sneak in infra change"], cwd=repo, check=True)
+
+        plan = _routing_plan(task_id)
+        plan.phases[0].steps[0].allowed_paths = ["app"]
+        ctx_dir = tmp_path / ".claude" / "team-context"
+
+        engine, _ = _engine_with_fake_beads(ctx_dir, task_id, monkeypatch)
+        engine._worktree_mgr = MagicMock()
+        engine._worktree_mgr._bead_store = None
+        engine.start(plan)
+
+        state = engine._load_state()
+        from agent_baton.core.engine.worktree_manager import WorktreeHandle
+        state.step_worktrees["1.1"] = WorktreeHandle(
+            task_id=task_id, step_id="1.1", path=Path(repo),
+            branch=f"worktree/{task_id}/1.1", base_branch="main",
+            base_sha=base_sha, created_at="2026-07-10T00:00:00Z",
+            parent_repo=Path(repo),
+        ).to_dict()
+        engine._save_execution(state)
+
+        engine.record_step_result(
+            step_id="1.1", agent_name="backend-engineer",
+            status="complete", outcome="All good.",
+        )
+
+        paths = _paths(tmp_path, task_id)
+        log_entries = [
+            json.loads(line)
+            for line in paths.decision_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        decision_id = next(
+            e["decision_id"] for e in log_entries if e["decision_type"] == "scope_expansion"
+        )
+
+        # Simulate a mid-sequence sidecar write failure (e.g. disk full,
+        # permission error) inside apply_scope_amendment's atomic-write
+        # helper.
+        import agent_baton.core.manager.scope_amendment as scope_amendment_mod
+
+        def _flaky_atomic_write(path, text):
+            raise OSError("simulated disk-full mid-amendment")
+
+        monkeypatch.setattr(scope_amendment_mod, "_atomic_write_text", _flaky_atomic_write)
+
+        result = engine.resolve_scope_expansion(decision_id, "approve")
+
+        assert result["applied"] is False, (
+            "a sidecar write failure must be surfaced as a failed "
+            "amendment, never silently treated as success"
+        )
+        assert "error" in result
+
+        state_after = engine._load_state()
+        step = state_after.plan.phases[0].steps[0]
+        assert step.allowed_paths == ["app"], (
+            "the authoritative in-memory plan must NOT reflect a widened "
+            "scope when the sidecar write sequence backing that widening "
+            "failed partway through"
+        )
+        # The failed StepResult and the retained worktree pointer are left
+        # exactly as the original violation left them -- fully recoverable,
+        # not silently cleared as if approval had gone through.
+        failed_result = state_after.get_step_result("1.1")
+        assert failed_result is not None
+        assert failed_result.status == "failed"
+        assert "1.1" in state_after.step_worktrees
+
+        # The decision itself must remain resolvable (not silently marked
+        # resolved by the failed attempt) so an operator can retry.
+        decision_after = scope_amendment_mod.load_decision(paths, decision_id)
+        assert decision_after is not None
+        assert not decision_after.resolved_at, (
+            "a decision must not be marked resolved when the amendment "
+            "it names failed to apply"
+        )

@@ -203,8 +203,30 @@ def independent_worktree_diff(handle: "dict | None", *, timeout: float = 15.0) -
             f"(path={path!r}, base_sha={base_sha!r})"
         )
 
+    # NOTE (Phase 3 "Make scope contracts authoritative", 3.3 threat model:
+    # "unusual git status quoting"): every git invocation below uses the
+    # NUL-delimited ``-z`` form, never the newline-delimited default.
+    # ``git status --porcelain`` (and, for names containing a literal
+    # newline or double-quote, ``git diff --name-only``) C-quotes any path
+    # containing a space or other "unusual" byte -- e.g. ``foo bar.py``
+    # is printed as ``"foo bar.py"`` -- because the default porcelain
+    # format uses spaces as field separators and needs an unambiguous
+    # path. A naive ``line[3:]``/``splitlines()`` parse keeps those
+    # literal quote characters as part of the "path" string, which then
+    # fails to normalize-match the *real* file's ``allowed_paths``/
+    # ``blocked_paths`` entries in :func:`derive_scope_expansion_from_diff`.
+    # For an allow-list contract that fails closed (the mangled path
+    # doesn't match anything, so it's reported "outside allowed_paths");
+    # for a **blocked-paths-only** contract (no ``allowed_paths`` to fall
+    # back on) it fails OPEN instead -- the mangled path also doesn't
+    # match any ``blocked_paths`` entry, so a change that really did land
+    # inside a blocked directory is silently reported as clean. ``-z``
+    # asks git for raw, NUL-terminated paths with no quoting/escaping at
+    # all, eliminating the ambiguity (and the field-separator problem)
+    # entirely -- see ``git-status(1)``/``git-diff(1)`` "Porcelain Format
+    # Version 1" -z note.
     diff_proc = subprocess.run(
-        ["git", "diff", "--name-only", base_sha, "HEAD"],
+        ["git", "diff", "--name-only", "-z", base_sha, "HEAD"],
         cwd=path,
         capture_output=True,
         text=True,
@@ -215,23 +237,37 @@ def independent_worktree_diff(handle: "dict | None", *, timeout: float = 15.0) -
             f"independent_worktree_diff: 'git diff' failed in {path}: "
             f"{diff_proc.stderr.strip() or diff_proc.stdout.strip()}"
         )
-    changed = [f for f in diff_proc.stdout.splitlines() if f]
+    changed = [f for f in diff_proc.stdout.split("\x00") if f]
 
     status_proc = subprocess.run(
-        ["git", "status", "--porcelain"],
+        ["git", "status", "--porcelain", "-z"],
         cwd=path,
         capture_output=True,
         text=True,
         timeout=timeout,
     )
     if status_proc.returncode == 0:
-        for line in status_proc.stdout.splitlines():
-            if len(line) <= 3:
+        # In -z mode, git status emits one NUL-terminated "XY PATH" record
+        # per entry -- EXCEPT for a rename/copy (X or Y == 'R'/'C'), whose
+        # record is followed by a *second*, separate NUL-terminated field
+        # holding ORIG_PATH. We only want the current (post-rename) path,
+        # so the ORIG_PATH field is consumed and discarded, never treated
+        # as its own changed-file entry (that would report the file as
+        # both its old AND new name).
+        fields = status_proc.stdout.split("\x00")
+        i = 0
+        while i < len(fields):
+            field = fields[i]
+            i += 1
+            if len(field) <= 3:
+                # Blank trailing field from the terminal NUL, or a
+                # malformed/too-short record -- skip rather than guess.
                 continue
-            entry = line[3:].strip()
-            # Rename entries look like "old -> new"; the new path is what
-            # actually exists after the change.
-            entry = entry.split(" -> ")[-1].strip()
+            code = field[:2]
+            entry = field[3:]
+            if ("R" in code or "C" in code) and i < len(fields):
+                # Consume (and discard) the ORIG_PATH field that follows.
+                i += 1
             if entry and entry not in changed:
                 changed.append(entry)
 
