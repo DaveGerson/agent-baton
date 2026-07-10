@@ -400,6 +400,165 @@ class TestResolveDecision:
 
 
 # ===========================================================================
+# POST /api/v1/decisions/{request_id}/resolve — atomic apply + resume
+#
+# Regression coverage for: "When the API records a response, atomically
+# resume that same task with idempotency guards."  Resolving a decision
+# whose request_id follows the deterministic scheme
+# (task_id::kind::parts...) must apply the decision straight to the
+# execution engine and launch a headless resume, not just flip the
+# DecisionManager's on-disk status and publish an event nobody may be
+# listening to.
+# ===========================================================================
+
+
+class TestResolveDecisionAppliesAndResumes:
+    def _build_two_phase_execution_awaiting_approval(self, tmp_root: Path):
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+
+        plan = MachinePlan(
+            task_id="resume-task-1",
+            task_summary="test resume",
+            phases=[
+                PlanPhase(
+                    phase_id=1, name="P1", approval_required=True,
+                    steps=[PlanStep(step_id="1.1", agent_name="backend", task_description="x")],
+                ),
+                PlanPhase(
+                    phase_id=2, name="P2",
+                    steps=[PlanStep(step_id="2.1", agent_name="backend", task_description="y")],
+                ),
+            ],
+        )
+        engine = ExecutionEngine(team_context_root=tmp_root, task_id=plan.task_id)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend", status="complete")
+        # next_action() is what actually evaluates the completed phase's
+        # approval_required flag and transitions status -> approval_pending.
+        action = engine.next_action()
+        assert action.action_type.value == "approval", action.action_type
+        return plan
+
+    def test_deterministic_approval_id_applies_to_engine_and_triggers_resume(
+        self,
+        client: TestClient,
+        decision_manager: DecisionManager,
+        tmp_root: Path,
+        monkeypatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.core.runtime.decisions import deterministic_decision_id
+        from agent_baton.models.decision import DecisionRequest
+
+        plan = self._build_two_phase_execution_awaiting_approval(tmp_root)
+
+        request_id = deterministic_decision_id(plan.task_id, "approval", 1)
+        decision_manager.request(DecisionRequest(
+            request_id=request_id, task_id=plan.task_id,
+            decision_type="phase_approval", summary="approve please",
+            options=["approve", "reject"],
+        ))
+
+        popen_calls: list = []
+
+        def _fake_popen(cmd, **kwargs):
+            popen_calls.append({"cmd": cmd, "kwargs": kwargs})
+            return MagicMock(pid=12345)
+
+        monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+        r = client.post(
+            f"/api/v1/decisions/{request_id}/resolve",
+            json={"option": "approve"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["resolved"] is True
+        assert body["execution_resumed"] is True, body
+
+        # The approval must actually have been applied to the engine.
+        status = ExecutionEngine(team_context_root=tmp_root, task_id=plan.task_id).status()
+        assert status["status"] != "approval_pending"
+
+        resume_calls = [c for c in popen_calls if any("agent_baton" in str(a) for a in c["cmd"])]
+        assert resume_calls, "expected a headless resume subprocess to be spawned"
+        spawned_cmd = resume_calls[0]["cmd"]
+        assert "--task-id" in spawned_cmd
+        assert plan.task_id in spawned_cmd
+        assert "execute" in spawned_cmd and "run" in spawned_cmd
+
+    def test_resume_is_not_spawned_twice_when_worker_already_alive(
+        self,
+        client: TestClient,
+        decision_manager: DecisionManager,
+        tmp_root: Path,
+        monkeypatch,
+    ) -> None:
+        """Idempotency guard: a live worker.pid must prevent a duplicate
+        headless resume subprocess from being spawned."""
+        import os
+        from unittest.mock import MagicMock
+
+        from agent_baton.core.runtime.decisions import deterministic_decision_id
+        from agent_baton.models.decision import DecisionRequest
+
+        plan = self._build_two_phase_execution_awaiting_approval(tmp_root)
+
+        # Simulate a live worker for this task: a worker.pid pointing at
+        # our own process (guaranteed to be "alive" for os.kill(pid, 0)).
+        exec_dir = tmp_root / "executions" / plan.task_id
+        exec_dir.mkdir(parents=True, exist_ok=True)
+        (exec_dir / "worker.pid").write_text(str(os.getpid()))
+
+        request_id = deterministic_decision_id(plan.task_id, "approval", 1)
+        decision_manager.request(DecisionRequest(
+            request_id=request_id, task_id=plan.task_id,
+            decision_type="phase_approval", summary="approve please",
+            options=["approve", "reject"],
+        ))
+
+        spawn_calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *a, **k: spawn_calls.append((a, k)) or MagicMock(pid=1),
+        )
+
+        r = client.post(
+            f"/api/v1/decisions/{request_id}/resolve",
+            json={"option": "approve"},
+        )
+        assert r.status_code == 200
+        assert r.json()["execution_resumed"] is True
+        resume_spawns = [
+            call for call in spawn_calls
+            if any("agent_baton" in str(arg) for arg in call[0][0])
+        ]
+        assert resume_spawns == [], (
+            "must not spawn a second headless resume process for an "
+            "already-alive worker"
+        )
+
+    def test_legacy_random_id_still_resolves_without_apply_or_resume(
+        self, client: TestClient, decision_manager: DecisionManager,
+    ) -> None:
+        """A pre-existing random-UUID DecisionRequest (not the deterministic
+        scheme) must still resolve successfully -- parse_decision_id()
+        returning None is a graceful skip, not an error."""
+        req = _create_decision(decision_manager, decision_type="gate_escalation")
+        r = client.post(
+            f"/api/v1/decisions/{req.request_id}/resolve",
+            json={"option": "retry"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["resolved"] is True
+        assert body["execution_resumed"] is False
+
+
+# ===========================================================================
 # Decision resolve — idempotency of side effects
 #
 # Characterization tests for docs/internal/execution-runtime-contract.md §4

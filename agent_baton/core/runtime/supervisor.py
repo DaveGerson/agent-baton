@@ -36,6 +36,7 @@ from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.runtime.context import ExecutionContext
+from agent_baton.core.runtime.decisions import DecisionManager
 from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.signals import SignalHandler
 from agent_baton.core.runtime.worker import TaskWorker
@@ -161,12 +162,27 @@ class WorkerSupervisor:
         if token_budget > 0:
             engine._token_budget = token_budget
 
+        # Persistent, disk-backed DecisionManager -- always injected so a
+        # human-required GATE/APPROVAL/FEEDBACK/INTERACT is routed to a
+        # durable pending decision instead of TaskWorker's "no decision
+        # manager configured" auto-approve fallback triggering merely
+        # because the daemon forgot to wire one up.  Rooted at
+        # ``team_context_root/decisions`` -- the same location
+        # ``api/deps.py`` binds the shared singleton to for ``--serve``
+        # mode, so the REST decisions API sees the same requests.
+        decision_manager = DecisionManager(
+            decisions_dir=self._root / "decisions",
+            bus=ctx.bus,
+            safe_read_root=self._root,
+        )
+
         worker = TaskWorker(
             engine=engine,
             launcher=launcher,
             bus=ctx.bus,
             max_parallel=effective_parallel,
             max_steps=max_steps or None,
+            decision_manager=decision_manager,
         )
 
         summary = ""

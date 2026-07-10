@@ -36,6 +36,12 @@ from agent_baton.api.deps import get_bus, get_central_store, get_forge_session, 
 from agent_baton.api.planner_errors import plan_quality_error_detail
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.engine.planning.stages.validation import PlanQualityError
+from agent_baton.core.runtime.decisions import (
+    DecisionManager,
+    apply_decision_resolution,
+    parse_decision_id,
+    resume_task_headless,
+)
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     BatchResolveRequest,
@@ -51,6 +57,7 @@ from agent_baton.api.models.requests import (
     RegenerateRequest,
     RegisterProjectRequest,
     RequestReviewRequest,
+    ResolveDecisionRequest,
     RetryStepRequest,
     SkipStepRequest,
 )
@@ -62,6 +69,7 @@ from agent_baton.api.models.responses import (
     ApprovalLogResponse,
     ChangelistResponse,
     CreatePrResponse,
+    DecisionListResponse,
     ExecuteCardResponse,
     ExecutionControlResponse,
     ExternalItemResponse,
@@ -79,6 +87,7 @@ from agent_baton.api.models.responses import (
     PmoProjectResponse,
     PmoSignalResponse,
     ProgramHealthResponse,
+    ResolveResponse,
 )
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.scanner import PmoScanner
@@ -1540,6 +1549,171 @@ async def skip_step(
         step_id=req.step_id,
         message=req.reason or "Skipped by operator via PMO UI.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Paused-task decision inbox (per-card)
+#
+# Headless execution launched by POST /pmo/execute/{card_id} pauses on an
+# APPROVAL, FEEDBACK, or INTERACT action by recording a durable pending
+# decision (see cli/commands/execution/execute.py::_run_loop) rather than
+# exiting as a failed/completed job.  These two endpoints are the PMO-scoped
+# counterpart of the generic /decisions API (api/routes/decisions.py):
+# generic /decisions is bound to a single team_context_root at server
+# startup, which does not work for a multi-project PMO board where each
+# card can belong to a different project root.  These endpoints resolve
+# the card's own project root per-request instead, exactly like
+# /pmo/gates/pending and /pmo/gates/{task_id}/approve already do for
+# APPROVAL-only decisions.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/pmo/execute/{card_id}/decisions",
+    response_model=DecisionListResponse,
+    summary="List pending human decisions for a card's paused execution",
+    tags=["pmo"],
+)
+async def list_card_decisions(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> DecisionListResponse:
+    """Return every decision request recorded for *card_id*.
+
+    GET /api/v1/pmo/execute/{card_id}/decisions
+
+    Reads the card's own project ``decisions`` directory -- the same one a
+    headless ``baton execute run`` subprocess launched for this card writes
+    to when it pauses on an APPROVAL, FEEDBACK, or INTERACT action.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (to resolve the project path).
+
+    Returns:
+        A ``DecisionListResponse`` with every decision (pending and
+        resolved) belonging to this card, most-recent first.
+
+    Raises:
+        HTTPException 404: If the card or its project cannot be resolved.
+    """
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+    dm = DecisionManager(decisions_dir=context_root / "decisions", safe_read_root=context_root)
+    items = [r for r in dm.list_all() if r.task_id == card_id]
+    return DecisionListResponse.from_dataclass_list(items)
+
+
+@router.post(
+    "/pmo/execute/{card_id}/decisions/{request_id}/resolve",
+    response_model=ResolveResponse,
+    summary="Resolve a pending decision and resume the paused execution",
+    tags=["pmo"],
+)
+async def resolve_card_decision(
+    card_id: str,
+    request_id: str,
+    body: ResolveDecisionRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ResolveResponse:
+    """Resolve a pending decision for *card_id* and resume its execution.
+
+    POST /api/v1/pmo/execute/{card_id}/decisions/{request_id}/resolve
+
+    Mirrors ``POST /decisions/{request_id}/resolve`` (see
+    ``api/routes/decisions.py``) but scoped to a single card's own project
+    root, so it works for any card on the PMO board regardless of which
+    project it belongs to.  After persisting the resolution:
+
+    1. The decision is applied directly to the execution engine (idempotent
+       -- a no-op if a live daemon worker already applied the same
+       resolution concurrently).
+    2. The task is resumed exactly once via a headless ``baton execute
+       run --task-id`` subprocess, guarded by a liveness check on the
+       execution's ``worker.pid`` so a retried or duplicate resolve never
+       launches two processes racing on the same task.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        request_id: The decision request to resolve (URL path parameter).
+        body: Validated request body with the chosen option, optional
+            rationale, and optional resolved_by identity.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (to resolve the project path).
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        A ``ResolveResponse`` confirming the resolution; ``execution_resumed``
+        is ``True`` when a worker is now (or was already) actively driving
+        the task forward.
+
+    Raises:
+        HTTPException 400: If the decision has already been resolved.
+        HTTPException 404: If the card, project, or decision cannot be
+            found, or the decision does not belong to this card.
+        HTTPException 409: If a concurrent modification prevented the
+            resolution from being written.
+    """
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+    dm = DecisionManager(
+        decisions_dir=context_root / "decisions", bus=bus, safe_read_root=context_root,
+    )
+
+    existing = dm.get(request_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Decision '{request_id}' not found for card '{card_id}'.",
+        )
+    if existing.task_id != card_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Decision '{request_id}' does not belong to card '{card_id}'.",
+        )
+    if existing.status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Decision '{request_id}' cannot be resolved — "
+                f"current status is '{existing.status}'."
+            ),
+        )
+
+    resolved_by = body.resolved_by or "human"
+    success = dm.resolve(
+        request_id=request_id,
+        chosen_option=body.option,
+        rationale=body.rationale,
+        resolved_by=resolved_by,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Decision '{request_id}' could not be resolved (concurrent modification).",
+        )
+
+    execution_resumed = False
+    parsed = parse_decision_id(request_id)
+    if parsed is not None:
+        task_id, kind, parts = parsed
+        applied = apply_decision_resolution(
+            team_context_root=context_root,
+            task_id=task_id,
+            kind=kind,
+            parts=parts,
+            chosen_option=body.option,
+            rationale=body.rationale,
+            bus=bus,
+        )
+        if applied:
+            execution_resumed = resume_task_headless(
+                team_context_root=context_root, task_id=task_id,
+            )
+
+    return ResolveResponse(resolved=True, execution_resumed=execution_resumed)
 
 
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)

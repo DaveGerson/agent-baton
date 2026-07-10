@@ -8,7 +8,13 @@ import pytest
 
 from agent_baton.models.decision import DecisionRequest, DecisionResolution
 from agent_baton.core.events.bus import EventBus
-from agent_baton.core.runtime.decisions import DecisionManager
+from agent_baton.core.runtime.decisions import (
+    DecisionManager,
+    apply_decision_resolution,
+    deterministic_decision_id,
+    parse_decision_id,
+    resume_task_headless,
+)
 from agent_baton.models.events import Event
 
 
@@ -313,3 +319,166 @@ class TestDecisionLifecycle:
         topics = [e.topic for e in events]
         assert "human.decision_needed" in topics
         assert "human.decision_resolved" in topics
+
+
+# ===========================================================================
+# deterministic_decision_id / parse_decision_id
+#
+# Regression coverage for the "one shared lifecycle" contract: CLI, daemon,
+# and the REST API must converge on the same durable decision record for the
+# same logical human decision, and the REST API must be able to recover
+# (task_id, kind, parts) from a request_id alone (no structured field exists
+# on DecisionRequest for this).
+# ===========================================================================
+
+class TestDeterministicDecisionId:
+    def test_round_trips_task_kind_and_parts(self) -> None:
+        request_id = deterministic_decision_id("task-1", "approval", 3)
+        assert parse_decision_id(request_id) == ("task-1", "approval", ["3"])
+
+    def test_multiple_parts_round_trip(self) -> None:
+        request_id = deterministic_decision_id("task-1", "feedback", 2, "q1")
+        assert parse_decision_id(request_id) == ("task-1", "feedback", ["2", "q1"])
+
+    def test_no_parts_round_trips(self) -> None:
+        request_id = deterministic_decision_id("task-1", "interact")
+        assert parse_decision_id(request_id) == ("task-1", "interact", [])
+
+    def test_same_inputs_produce_the_same_id(self) -> None:
+        assert deterministic_decision_id("t", "gate", 1) == deterministic_decision_id("t", "gate", 1)
+
+    def test_different_phase_ids_produce_different_ids(self) -> None:
+        assert deterministic_decision_id("t", "gate", 1) != deterministic_decision_id("t", "gate", 2)
+
+    def test_legacy_random_uuid_id_is_not_parseable(self) -> None:
+        legacy = DecisionRequest.create("t1", "gate_approval", "review").request_id
+        assert parse_decision_id(legacy) is None
+
+    def test_empty_string_is_not_parseable(self) -> None:
+        assert parse_decision_id("") is None
+
+
+# ===========================================================================
+# apply_decision_resolution / resume_task_headless
+# ===========================================================================
+
+class TestApplyDecisionResolution:
+    def _plan(self, task_id: str):
+        from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+        return MachinePlan(
+            task_id=task_id, task_summary="test",
+            phases=[
+                PlanPhase(
+                    phase_id=1, name="P1", approval_required=True,
+                    steps=[PlanStep(step_id="1.1", agent_name="backend", task_description="x")],
+                ),
+                PlanPhase(
+                    phase_id=2, name="P2",
+                    steps=[PlanStep(step_id="2.1", agent_name="backend", task_description="y")],
+                ),
+            ],
+        )
+
+    def test_applies_approval_to_engine(self, tmp_path: Path) -> None:
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        plan = self._plan("apply-task-1")
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=plan.task_id)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend", status="complete")
+        assert engine.next_action().action_type.value == "approval"
+
+        applied = apply_decision_resolution(
+            team_context_root=tmp_path, task_id=plan.task_id, kind="approval",
+            parts=["1"], chosen_option="approve",
+        )
+        assert applied is True
+
+        status = ExecutionEngine(team_context_root=tmp_path, task_id=plan.task_id).status()
+        assert status["status"] != "approval_pending"
+
+    def test_unknown_kind_returns_false(self, tmp_path: Path) -> None:
+        plan = self._plan("apply-task-2")
+        from agent_baton.core.engine.executor import ExecutionEngine
+        ExecutionEngine(team_context_root=tmp_path, task_id=plan.task_id).start(plan)
+
+        applied = apply_decision_resolution(
+            team_context_root=tmp_path, task_id=plan.task_id, kind="not-a-real-kind",
+            parts=[], chosen_option="approve",
+        )
+        assert applied is False
+
+    def test_reapplying_an_already_applied_approval_is_a_no_op_not_an_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Idempotency: a second apply for a decision already applied (e.g.
+        by a live daemon worker) must return False, not raise."""
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        plan = self._plan("apply-task-3")
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=plan.task_id)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend", status="complete")
+        engine.next_action()
+        engine.record_approval_result(phase_id=1, result="approve")
+
+        # The phase is no longer awaiting approval -- a second attempt to
+        # apply the same decision must not raise.
+        applied_again = apply_decision_resolution(
+            team_context_root=tmp_path, task_id=plan.task_id, kind="approval",
+            parts=["1"], chosen_option="approve",
+        )
+        assert applied_again is False
+
+
+class TestResumeTaskHeadless:
+    def test_spawns_headless_runner_when_no_worker_pid(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(pid=1),
+        )
+        result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me")
+        assert result is True
+        assert len(calls) == 1
+        cmd, kwargs = calls[0]
+        assert "--task-id" in cmd and "resume-me" in cmd
+        assert kwargs.get("cwd") == str(tmp_path.parent.parent)
+
+    def test_does_not_spawn_when_worker_pid_is_alive(self, tmp_path: Path, monkeypatch) -> None:
+        import os
+        from unittest.mock import MagicMock
+
+        exec_dir = tmp_path / "executions" / "resume-me-2"
+        exec_dir.mkdir(parents=True)
+        (exec_dir / "worker.pid").write_text(str(os.getpid()))
+
+        calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(pid=1),
+        )
+        result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me-2")
+        assert result is True
+        assert calls == []
+
+    def test_spawns_when_worker_pid_is_stale(self, tmp_path: Path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
+
+        # A PID that is very unlikely to be alive.
+        exec_dir = tmp_path / "executions" / "resume-me-3"
+        exec_dir.mkdir(parents=True)
+        (exec_dir / "worker.pid").write_text("999999999")
+
+        calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(pid=1),
+        )
+        result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me-3")
+        assert result is True
+        assert len(calls) == 1
