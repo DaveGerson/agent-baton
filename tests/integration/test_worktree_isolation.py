@@ -10,10 +10,25 @@ New tests motivated by dogfood bugs observed this session:
   - test_no_parent_tree_contamination_under_concurrent_subagents (bd-36a6)
   - test_baton_db_isolation_under_worktree (bd-543e)
   - test_worktree_path_walks_up_to_parent_baton_db (bd-e1ae / feedback_schema_project_id.md)
+
+Phase 1 1.2 additions (regression coverage for the bd-1.1 silent-loss fix):
+  - TestRealGitEndToEndWorktreeCommit — drives ClaudeCodeLauncher (a
+    deterministic fake ``claude`` executable) against a real worktree, then
+    feeds the launcher's own commit_hash/files_changed through
+    ExecutionEngine.record_step_result() (real WorktreeManager, no mocks) and
+    asserts the parent repo receives exactly that commit and the worktree is
+    only cleaned up after a successful fold.  Does not mock ``git rev-parse``
+    or ``git diff`` anywhere in the chain.
+  - TestUnverifiableProvenanceFailsClosed — a "successful" step (subprocess
+    exit 0) that reports a commit_hash which cannot be verified as real work
+    inside its own worktree must fail closed: step status becomes "failed",
+    the worktree is retained on disk, and the parent branch never advances.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -24,8 +39,13 @@ import pytest
 from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.worktree_manager import (
+    WorktreeCleanupError,
     WorktreeHandle,
     WorktreeManager,
+)
+from agent_baton.core.runtime.claude_launcher import (
+    ClaudeCodeConfig,
+    ClaudeCodeLauncher,
 )
 from agent_baton.models.execution import (
     ActionType,
@@ -959,3 +979,299 @@ class TestRecordStepResultRetriesCleanupWithForce:
         state_final = engine._load_execution()
         assert state_final is not None
         assert "1.1" not in getattr(state_final, "step_worktrees", {})
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.2 — real-git end-to-end worktree regression (bd-1.1 fix coverage)
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the FULL chain: a real ``claude`` subprocess (a
+# deterministic fake executable) committing inside a REAL git worktree,
+# discovered by the real (unmocked) ``ClaudeCodeLauncher._git_rev_parse`` /
+# ``_git_diff_files`` calls, fed through the real
+# ``ExecutionEngine.record_step_result()`` -> ``WorktreeManager.fold_back()``
+# -> ``WorktreeManager.cleanup()`` chain.  No ``git rev-parse`` or
+# ``git diff`` call anywhere below is mocked.
+#
+# NOTE on fold strategy (discovered while writing this regression, tracked
+# separately -- fixing it is out of scope for this step's test-only
+# allowed_paths): ``WorktreeManager.create()`` leaves the worktree checked
+# out on its own branch (``git switch -c``).  Git refuses
+# ``git fetch <worktree-path> branch:branch`` into a ref that is checked out
+# ANYWHERE in the repository ("refusing to fetch into branch ... checked
+# out"), so the "rebase" strategy -- the hardcoded default
+# ``record_step_result()`` uses for every real fold-back -- and "merge" can
+# never succeed while the worktree is still alive, which it always is at
+# fold-back time (cleanup only runs AFTER a successful fold).  The "none"
+# (fast-forward) strategy sidesteps this entirely: worktree and parent share
+# one object database, so no fetch is needed, just a ref move -- this is why
+# every other real-git ``WorktreeManager`` test in this suite already uses
+# it (see ``TestWorktreeFoldBackClean``).  The positive test below drives the
+# real ``record_step_result()`` path end to end and overrides only the fold
+# *strategy selection* (never any individual git call, and never
+# ``git rev-parse``/``git diff``) to route around that independent,
+# already-present defect so the assertions exercise genuine, unmocked git
+# commands throughout.
+
+
+def _write_fake_claude_committing_in_cwd(
+    script_path: Path,
+    *,
+    filename: str = "agent_work.txt",
+    content: str = "hello from agent",
+) -> Path:
+    """Write a deterministic fake ``claude`` executable.
+
+    Ignores every CLI flag/prompt it is invoked with.  Commits *filename*
+    into whatever directory it is invoked from (its own process ``cwd`` --
+    the worktree, when launched with ``cwd_override``) and prints a
+    well-formed ``claude --output-format json`` success payload on stdout.
+    Deterministic: same filename/content/JSON every invocation.
+    """
+    script_path.write_text(
+        "#!/bin/sh\n"
+        "set -e\n"
+        f'echo "{content}" > {filename}\n'
+        f"git add {filename}\n"
+        "git commit -m 'agent commit inside worktree' --quiet\n"
+        "cat <<'JSONEOF'\n"
+        '{"is_error": false, "result": "committed agent_work.txt", '
+        '"duration_ms": 5, "usage": {"input_tokens": 3, "output_tokens": 2}}\n'
+        "JSONEOF\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+    return script_path
+
+
+class TestRealGitEndToEndWorktreeCommit:
+    """Real ``claude`` subprocess + real worktree + real fold-back + real
+    cleanup.  Regression for the bd-1.1 silent-loss path: before that fix,
+    ``ClaudeCodeLauncher`` probed the parent repo instead of
+    ``cwd_override`` for pre/post HEAD capture, so a real commit made
+    inside the worktree was invisible (``commit_hash``/``files_changed``
+    came back empty) and the executor's "no commit -> clean up" branch
+    silently deleted the worktree, discarding the agent's work.  This test
+    fails on that old code (the launcher would report no commit, so the
+    fold below never happens and the parent never receives
+    ``agent_work.txt``) and passes only when commit discovery, fold-back,
+    and cleanup all target the correct (worktree) repository.
+    """
+
+    def test_worktree_commit_discovered_folded_and_cleaned_up(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-real-git-e2e")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state_mid = engine._load_execution()
+        assert state_mid is not None
+        handle_dict = getattr(state_mid, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None, "worktree must be created on dispatch"
+        wt_path = Path(handle_dict["path"])
+        base_sha = handle_dict["base_sha"]
+        assert wt_path.is_dir()
+
+        # Deterministic fake `claude` executable that commits ONLY inside
+        # whatever directory it's invoked in (the worktree, via
+        # cwd_override) -- never the parent repository.
+        fake_claude = _write_fake_claude_committing_in_cwd(
+            tmp_path / "fake_claude.sh"
+        )
+        config = ClaudeCodeConfig(
+            claude_path=str(fake_claude), working_directory=tmp_git_repo
+        )
+        launcher = ClaudeCodeLauncher(config)
+
+        async def _run():
+            return await launcher.launch(
+                "backend-engineer",
+                "sonnet",
+                "implement the thing",
+                "1.1",
+                cwd_override=str(wt_path),
+                task_id="task-real-git-e2e",
+            )
+
+        result = asyncio.run(_run())
+
+        # Launcher-level assertions: real, unmocked git rev-parse (pre/post
+        # HEAD capture) + git diff (files_changed) targeting the worktree.
+        assert result.status == "complete"
+        assert result.commit_hash, "launcher must report the worktree's new commit"
+        assert result.commit_hash != base_sha, (
+            "launcher must not report the parent repo's unchanged HEAD as a "
+            "commit -- this is exactly the bd-1.1 silent-loss signature"
+        )
+        assert result.files_changed == ["agent_work.txt"]
+
+        # Drive the executor through record_step_result() + fold-back with
+        # the launcher's own (real, unmocked) commit_hash/files_changed.
+        # See the module-level NOTE above for why the fold *strategy* is
+        # pinned to fast-forward here -- no git call is mocked.
+        real_fold_back = engine._worktree_mgr.fold_back
+
+        def _fold_back_fast_forward(handle, *, commit_hash="", strategy="rebase"):
+            return real_fold_back(handle, commit_hash=commit_hash, strategy="none")
+
+        monkeypatch.setattr(
+            engine._worktree_mgr, "fold_back", _fold_back_fast_forward
+        )
+
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome=result.outcome,
+            commit_hash=result.commit_hash,
+            files_changed=result.files_changed,
+            duration_seconds=result.duration_seconds,
+            estimated_tokens=result.estimated_tokens,
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "complete", (
+            f"step must record complete after a genuine fold; got "
+            f"{step_result.status!r} error={step_result.error!r}"
+        )
+
+        # The parent receives EXACTLY that commit (fast-forwarded main).
+        parent_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head == result.commit_hash, (
+            "parent branch must be fast-forwarded to exactly the worktree's "
+            f"commit; got {parent_head!r} expected {result.commit_hash!r}"
+        )
+        show = subprocess.run(
+            ["git", "show", f"{parent_head}:agent_work.txt"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert show.returncode == 0, (
+            "agent_work.txt must be reachable from parent HEAD after fold-back"
+        )
+
+        # The worktree is cleaned up ONLY after successful fold-back +
+        # recovery -- never before, never on a discarded/failed fold.
+        assert not wt_path.exists(), (
+            "worktree directory must be removed after a successful fold"
+        )
+        assert "1.1" not in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must drop the handle once cleanup succeeds"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.2 — unverifiable-provenance retention regression
+# ---------------------------------------------------------------------------
+
+
+class TestUnverifiableProvenanceFailsClosed:
+    """A step whose subprocess succeeded (status="complete", exit 0) but
+    whose reported ``commit_hash`` cannot be verified as real, new work
+    inside its own worktree must fail closed via the real (unmocked)
+    ``WorktreeManager._assert_commit_provenance()`` guard: the step is
+    recorded as failed, the worktree is retained on disk (never folded,
+    never cleaned up), its handle stays in ``step_worktrees`` for recovery,
+    and the parent branch never advances.
+
+    This is the defense-in-depth guard from the bd-1.1 fix: even if some
+    future launcher bug (or a caller further up the stack) reports a
+    ``commit_hash`` for a "successful" run that does not actually exist as
+    new work in the worktree it claims to come from, the worktree lifecycle
+    must fail closed instead of silently folding/discarding.
+    """
+
+    def test_bogus_commit_hash_fails_closed_and_retains_worktree(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-unverifiable-prov")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state_mid = engine._load_execution()
+        assert state_mid is not None
+        handle_dict = getattr(state_mid, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        base_sha = handle_dict["base_sha"]
+        assert wt_path.is_dir()
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head_before == base_sha
+
+        # A "successful" step (subprocess exit 0, status="complete") that
+        # reports a commit_hash that is not a real object anywhere -- the
+        # signature of a launcher bug (e.g. wrong-directory HEAD capture) or
+        # any other caller reporting phantom provenance. No git call is
+        # mocked: the real _assert_commit_provenance() must reject this by
+        # actually inspecting the worktree.
+        bogus_commit = "f" * 40
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims to have committed",
+            commit_hash=bogus_commit,
+            files_changed=["phantom.txt"],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "a step reporting an unverifiable commit_hash must fail closed; "
+            f"got status={step_result.status!r}"
+        )
+        assert "WorktreeProvenanceError" in (step_result.error or ""), (
+            f"failure must be attributed to the provenance guard; got "
+            f"error={step_result.error!r}"
+        )
+
+        # Recoverable state retained: worktree never deleted, handle stays
+        # in step_worktrees for forensic recovery / takeover.
+        assert wt_path.is_dir(), "worktree must be retained for recovery"
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )
+
+        # The parent branch must NOT have advanced -- the phantom commit was
+        # never folded in.
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head_after == base_sha == parent_head_before, (
+            "parent branch must not advance when provenance is unverifiable"
+        )
