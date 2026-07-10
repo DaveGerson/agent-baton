@@ -190,14 +190,24 @@ def resume_task_headless(*, team_context_root: Path, task_id: str) -> bool:
     import subprocess
     import sys as _sys
 
-    pid_path = team_context_root / "executions" / task_id / "worker.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)  # probe -- raises if the process is gone
-            return True
-        except (ValueError, OSError):
-            pass  # stale PID file -- fall through and relaunch headless.
+    # Two PID locations to probe (see WorkerSupervisor.pid_path): the
+    # task-namespaced ``executions/<task_id>/worker.pid``, and the legacy
+    # ``<root>/daemon.pid`` written by ``baton daemon start`` without
+    # ``--task-id`` (including ``--serve`` mode, whose in-process worker
+    # polls this same decisions directory).  Missing the legacy file would
+    # spawn a second headless runner racing that live daemon worker.
+    pid_paths = (
+        team_context_root / "executions" / task_id / "worker.pid",
+        team_context_root / "daemon.pid",
+    )
+    for pid_path in pid_paths:
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text().strip())
+                os.kill(pid, 0)  # probe -- raises if the process is gone
+                return True
+            except (ValueError, OSError):
+                pass  # stale PID file -- keep probing / relaunch headless.
 
     project_root = team_context_root.parent.parent
     cmd = [

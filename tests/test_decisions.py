@@ -482,3 +482,42 @@ class TestResumeTaskHeadless:
         result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me-3")
         assert result is True
         assert len(calls) == 1
+
+    def test_does_not_spawn_when_legacy_daemon_pid_is_alive(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Regression (phase 2 review): ``baton daemon start`` without
+        ``--task-id`` (including ``--serve`` mode) writes its PID to the
+        legacy ``<root>/daemon.pid`` (see ``WorkerSupervisor.pid_path``),
+        not ``executions/<task_id>/worker.pid``.  Resolving a decision via
+        the REST API must not spawn a second headless runner racing that
+        live daemon worker."""
+        import os
+        from unittest.mock import MagicMock
+
+        (tmp_path / "daemon.pid").write_text(str(os.getpid()))
+
+        calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(pid=1),
+        )
+        result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me-4")
+        assert result is True
+        assert calls == []
+
+    def test_spawns_when_legacy_daemon_pid_is_stale(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        (tmp_path / "daemon.pid").write_text("999999999")
+
+        calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(pid=1),
+        )
+        result = resume_task_headless(team_context_root=tmp_path, task_id="resume-me-5")
+        assert result is True
+        assert len(calls) == 1
