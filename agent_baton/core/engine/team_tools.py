@@ -66,6 +66,21 @@ class TeamConcurrencyError(TeamToolError):
     """
 
 
+class TeamBackendUnavailableError(TeamToolError):
+    """Raised when the team backend itself is not usable — the
+    :class:`TeamRegistry` never initialized (no SQLite storage / schema
+    predates v15) or the bead store failed to construct (``bd`` binary
+    missing).
+
+    Distinct type (not just a message) so the CLI's exit-code mapping
+    (docs/internal/team-runtime-contract.md §7.3, exit ``5``) can branch on
+    the exception class rather than sniffing message text — message
+    sniffing misclassified plain usage errors whose user-supplied
+    ``team_id``/``member_id`` happened to contain the word "unavailable".
+    Subclasses :class:`TeamToolError` so base-class handlers keep working.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Canonical tool names + role-based authorization matrix
 # ---------------------------------------------------------------------------
@@ -152,7 +167,7 @@ def authorize_team_tool(
 def _require_registry(engine: "ExecutionEngine") -> "TeamRegistry":
     reg = getattr(engine, "_team_registry", None)
     if reg is None:
-        raise TeamToolError(
+        raise TeamBackendUnavailableError(
             "TeamRegistry is unavailable — team tools require a SQLite "
             "storage backend (schema v15)."
         )
@@ -173,12 +188,12 @@ def _require_bead_store(engine: "ExecutionEngine"):
     instead of the documented, typed failure. This is exactly the
     "Underlying store unavailable" row of
     docs/internal/team-runtime-contract.md §7.3 (mapped to CLI exit code
-    5, distinct from a plain usage error) — the message text below is
-    matched by that mapping.
+    5, distinct from a plain usage error) — the CLI branches on the
+    :class:`TeamBackendUnavailableError` type raised below.
     """
     store = getattr(engine, "_bead_store", None)
     if store is None:
-        raise TeamToolError(
+        raise TeamBackendUnavailableError(
             "Team board bead store is unavailable — team tools require a "
             "configured bead backend (the 'bd' binary; see "
             "BATON_BD_BACKEND/BATON_BD_BIN)."

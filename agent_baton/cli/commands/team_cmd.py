@@ -58,6 +58,7 @@ from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.engine.team_tools import (
     TeamAuthorizationError,
+    TeamBackendUnavailableError,
     TeamConcurrencyError,
     TeamToolError,
     team_claim,
@@ -468,10 +469,13 @@ def _call_team_tool(fn, **kwargs):
         )
     except TeamAuthorizationError as exc:
         user_error(str(exc), exit_code=EXIT_AUTHORIZATION)
+    except TeamBackendUnavailableError as exc:
+        # Typed, not message-sniffed: a usage error whose user-supplied
+        # team_id/member_id merely contains the word "unavailable" must NOT
+        # be misclassified as "environment broken, stop retrying" (exit 5).
+        user_error(str(exc), exit_code=EXIT_BACKEND_UNAVAILABLE)
     except TeamToolError as exc:
-        msg = str(exc)
-        code = EXIT_BACKEND_UNAVAILABLE if "unavailable" in msg.lower() else EXIT_USAGE
-        user_error(msg, exit_code=code)
+        user_error(str(exc), exit_code=EXIT_USAGE)
     raise AssertionError("unreachable")  # pragma: no cover -- user_error never returns
 
 

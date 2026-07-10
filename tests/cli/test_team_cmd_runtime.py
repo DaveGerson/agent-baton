@@ -313,6 +313,20 @@ class TestFailureTaxonomyExitCodes:
             ))
         assert exc_info.value.code == team_cmd.EXIT_CONCURRENCY_CONFLICT
 
+    def test_unknown_team_id_containing_unavailable_is_usage_not_backend(
+        self, bootstrapped_task: str,
+    ) -> None:
+        """Regression (phase 4 review): the exit-5 mapping must branch on the
+        typed TeamBackendUnavailableError, not sniff "unavailable" in the
+        message — a user-supplied team_id containing that word is a plain
+        typo (exit 2, "fix and retry"), not "environment broken, stop
+        retrying" (exit 5)."""
+        with pytest.raises(SystemExit) as exc_info:
+            team_cmd._handle_team_list(_ns(
+                member_id="1.1.a", team_id="team-unavailable",
+            ))
+        assert exc_info.value.code == team_cmd.EXIT_USAGE
+
     def test_backend_unavailable_exits_5(
         self, context_root: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
