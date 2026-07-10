@@ -645,14 +645,38 @@ class WorktreeManager:
         handle: WorktreeHandle,
         *,
         commit_hash: str = "",
-        strategy: str = "rebase",  # "rebase" | "merge" | "none"
+        strategy: str = "merge",  # "rebase" | "merge" | "none"
     ) -> str:
         """Fast-forward the parent branch with the worktree's commit(s).
 
         Returns the parent branch HEAD SHA after fold.
 
+        Strategy note (Phase 1 1.3 — bd-1.1 follow-up): ``create()`` always
+        leaves the worktree's own branch (``handle.branch``) checked out
+        inside the worktree for the worktree's entire lifetime (fold-back
+        only ever runs before cleanup). ``"rebase"`` rewrites
+        ``handle.branch`` in place via the 3-argument ``git rebase --onto``
+        form, which git implements as "check out the target ref, then
+        rebase" — for a real worktree commit this either (a) refuses
+        outright with "refusing to fetch/rebase ... checked out" (the
+        historical, SAFE failure mode every real dispatch hit), or, if that
+        guard were ever bypassed, (b) would detach HEAD and overwrite
+        whatever is checked out in ``self._canonical_repo`` — which in
+        normal (in-place, shared-working-tree) operation IS the live
+        project directory. Do not "fix" the rebase fetch step in isolation;
+        that trades a safe failure for real working-tree corruption. Rebase
+        is therefore left as a known-broken (but fail-safe) opt-in only —
+        never the default. ``"merge"`` does not touch ``handle.branch`` or
+        require any fetch (worktrees of one repository share one object
+        database, so *commit_hash* is already reachable) and only ever
+        updates the currently-checked-out branch in ``self._canonical_repo``
+        via a normal ``git merge`` — the same working-directory-safe
+        operation as merging any other branch — so it is the default.
+
         Raises:
-            WorktreeFoldError: rebase/merge conflict; worktree is LEFT INTACT.
+            WorktreeFoldError: rebase/merge conflict, or (merge strategy)
+                ``handle.base_branch`` is not what's currently checked out
+                in ``self._canonical_repo``; worktree is LEFT INTACT.
             WorktreeProvenanceError: *commit_hash* cannot be verified as new
                 work that actually exists in ``handle.path`` (missing from
                 the worktree, or already an ancestor of ``handle.base_sha``
@@ -690,11 +714,12 @@ class WorktreeManager:
             if strategy == "none":
                 # Fast-forward only — skip rebase.
                 new_head = self._fast_forward(handle, commit_hash)
-            elif strategy == "merge":
-                new_head = self._merge_fold(handle, commit_hash)
-            else:
-                # Default: rebase
+            elif strategy == "rebase":
                 new_head = self._rebase_fold(handle, commit_hash)
+            else:
+                # Default: merge — see the strategy note in this method's
+                # docstring for why merge, not rebase, is the safe default.
+                new_head = self._merge_fold(handle, commit_hash)
         except WorktreeFoldError:
             raise
         except WorktreeCreateError as exc:
@@ -843,7 +868,29 @@ class WorktreeManager:
                 )
 
     def _rebase_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
-        """Rebase worktree branch onto current working branch tip and FF."""
+        """Rebase worktree branch onto current working branch tip and FF.
+
+        KNOWN BROKEN for real worktree commits (Phase 1 1.3 review): the
+        worktree's own branch is checked out inside the worktree for the
+        worktree's entire lifetime, so step 1's fetch below reliably fails
+        with git's "refusing to fetch into branch ... checked out" guard
+        before any rebase is attempted. This fails SAFELY — no
+        checkout/rebase runs, ``self._canonical_repo``'s working directory
+        is never touched, and the caller sees a normal ``WorktreeFoldError``
+        (worktree retained). Do not silence that guard (e.g. with
+        ``--update-head-ok``) without also fixing what comes next: the
+        3-argument ``git rebase --onto`` form below checks out its target
+        ref into whatever repository/worktree it is run in — verified to
+        detach HEAD and overwrite the working directory of
+        ``self._canonical_repo`` (the live project checkout in normal
+        in-place operation) even when the fetch step is bypassed entirely.
+        ``fold_back()`` therefore defaults to the "merge" strategy instead
+        (see its docstring); this method is reachable only via an explicit
+        ``strategy="rebase"`` and is expected to always raise
+        ``WorktreeFoldError`` for real worktree commits until it is
+        redesigned (e.g. to operate inside a disposable scratch worktree
+        rather than directly in ``self._canonical_repo``).
+        """
         # Step 1: fetch the worktree's branch ref into the canonical repo
         _run_git(
             ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
@@ -885,13 +932,40 @@ class WorktreeManager:
         return new_tip
 
     def _merge_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
-        """Merge worktree branch into working branch."""
-        _run_git(
-            ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
-            cwd=self._canonical_repo,
-        )
+        """Merge *commit_hash* into ``handle.base_branch``.
+
+        Merges *commit_hash* directly — no ``git fetch`` from the worktree
+        path is needed or attempted. All worktrees of one repository
+        (``handle.path`` included) share a single object database, so a
+        commit made inside the worktree is already reachable by SHA from
+        ``self._canonical_repo`` the moment it exists. (A ``fetch`` into a
+        ref *name* that is checked out in one of the repo's own worktrees
+        — the pattern the now-unused rebase path still uses — is what git
+        refuses; referencing the commit directly by SHA sidesteps that
+        entirely.)
+
+        Fails closed (``WorktreeFoldError``) if ``handle.base_branch`` is
+        not the branch currently checked out in ``self._canonical_repo``:
+        ``git merge`` always merges into whatever is checked out there, so
+        proceeding without this guard could silently attribute the
+        worktree's commit to the wrong branch.
+        """
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(self._canonical_repo),
+        ).stdout.strip()
+        if current_branch != handle.base_branch:
+            raise WorktreeFoldError(
+                f"refusing to merge-fold step={handle.step_id}: "
+                f"{self._canonical_repo} has '{current_branch}' checked "
+                f"out, not the expected base_branch "
+                f"'{handle.base_branch}' — merging here would attribute "
+                f"the worktree's commit to the wrong branch"
+            )
         merge_result = subprocess.run(
-            ["git", "merge", "--no-ff", handle.branch, "-m",
+            ["git", "merge", "--no-ff", commit_hash, "-m",
              f"Merge worktree/{handle.step_id} into {handle.base_branch}"],
             capture_output=True,
             text=True,

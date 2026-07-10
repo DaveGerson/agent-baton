@@ -291,6 +291,95 @@ class TestWorktreeFoldBackClean:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 1.3 — default fold strategy must actually succeed for a real
+# worktree commit (bd-1.1 follow-up: "rebase" was the hardcoded default and
+# always failed for a real worktree commit because create() leaves
+# handle.branch checked out inside the worktree for its entire lifetime, and
+# git refuses `git fetch <path> branch:branch` into a ref name that is
+# checked out anywhere in the repository. This was masked in the existing
+# suite because every real-git fold test pinned strategy="none"/"rebase"
+# explicitly and never exercised the default. "merge" is now the default:
+# it merges the commit by SHA (no fetch needed -- worktrees of one
+# repository share one object database) and only ever updates whichever
+# branch is currently checked out in the canonical repo.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldBackDefaultStrategySucceeds:
+    """fold_back(handle) with NO explicit strategy must actually land the
+    worktree's commit in the parent branch for a real, unmocked worktree
+    commit -- not raise WorktreeFoldError."""
+
+    def test_default_strategy_merges_real_worktree_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-fold-default", step_id="1.1", base_branch="main")
+        agent_sha = _commit_file(handle.path, "default_strategy.txt", "agent output")
+
+        # No strategy kwarg -- exercises whatever fold_back() defaults to.
+        new_head = mgr.fold_back(handle, commit_hash=agent_sha)
+
+        assert new_head, "default strategy must produce a new parent HEAD"
+
+        parent_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head == new_head
+
+        show = subprocess.run(
+            ["git", "show", f"{parent_head}:default_strategy.txt"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        )
+        assert show.returncode == 0, (
+            "the agent's file must be reachable from the parent branch "
+            "after a default-strategy fold; got fold error instead of a "
+            "successful merge" if show.returncode != 0 else ""
+        )
+        assert show.stdout == "agent output"
+
+        # The canonical repo's own working directory must reflect the fold
+        # (merge, unlike raw update-ref, syncs the checkout) -- no
+        # dirty/desynced parent left behind.
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout
+        assert "default_strategy.txt" not in status or status.strip() == ""
+
+    def test_default_strategy_refuses_wrong_checked_out_branch(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """If the canonical repo has switched off base_branch by the time
+        fold-back runs, the merge default must fail closed rather than
+        attributing the commit to whatever happens to be checked out."""
+        handle = mgr.create(task_id="task-fold-wrongbranch", step_id="1.1", base_branch="main")
+        agent_sha = _commit_file(handle.path, "wrong_branch.txt", "agent output")
+
+        subprocess.run(
+            ["git", "switch", "-c", "other-branch"], cwd=tmp_git_repo,
+            check=True, capture_output=True,
+        )
+
+        with pytest.raises(WorktreeFoldError, match="checked out"):
+            mgr.fold_back(handle, commit_hash=agent_sha)
+
+        # Nothing must have been merged into the wrong branch.
+        other_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        show = subprocess.run(
+            ["git", "show", f"{other_head}:wrong_branch.txt"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        )
+        assert show.returncode != 0, (
+            "the agent's commit must not be attributed to the wrong "
+            "currently-checked-out branch"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 5 — test_worktree_fold_back_conflict
 # ---------------------------------------------------------------------------
 
