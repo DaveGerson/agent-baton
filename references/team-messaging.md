@@ -1,7 +1,8 @@
 # Team Messaging and Shared Tasks
 
-This reference documents the `team_*` tools available to agents running
-inside a team step, and how messages and shared tasks flow between
+This reference documents the team-coordination surface available to
+agents running inside a team step — the `baton team` CLI verbs (see
+"Tools" below) — and how messages and shared tasks flow between
 members.
 
 ## Overview
@@ -11,8 +12,10 @@ stable `team_id`. Agents in that team can:
 
 - **Send messages** to their peers or to other teams.
 - **Share tasks** on a team board that survives crashes and resumes.
-- **Stand up sub-teams** (leads only) when the work needs further
-  decomposition.
+
+Sub-teams are predefined in the plan and dispatched by the engine;
+there is **no callable tool** for standing one up mid-flight — see
+"Standing up a sub-team" under Tools.
 
 Messages and tasks ride on the existing Bead store using new `bead_type`
 values (`message`, `task`, `message_ack`). There is no new table and no
@@ -54,7 +57,9 @@ Implications:
 
 When a member receives a message, the engine records a `message_ack`
 bead on their next outcome so the message is not re-delivered in
-subsequent dispatches. Each member's ack is scoped to that member —
+subsequent dispatches. An explicit `baton team read` acks what it
+returns for the same reason (pass `--no-ack` to peek without
+consuming). Each member's ack is scoped to that member —
 broadcast messages can be acked by one recipient without suppressing
 delivery to others.
 
@@ -66,96 +71,130 @@ integration (Phase 6 of the spec).
 
 ## Tools
 
-### `team_send_message(to_team, to_member?, subject, body)`
+Agents coordinate through the **`baton team` CLI**, invoked via the
+`Bash` tool. This is the only callable surface a dispatched team member
+has — the Python-level functions in
+`agent_baton.core.engine.team_tools` (`team_send_message`,
+`team_add_task`, `team_claim_task`, `team_complete_task`) are internal
+engine APIs, **not** tools an agent can call directly. Do not narrate a
+`team_send_message(...)`-style call; shell out to the CLI instead. Full
+contract (authorization, concurrency, idempotency, failure taxonomy):
+`docs/internal/team-runtime-contract.md`.
 
-Send a message to a team or a specific member. Returns the `bead_id`
-of the new message.
+Identity: pass `--member-id <your-member-id>` on every call
+(`$BATON_TEAM_MEMBER_ID` is set automatically on daemon/worktree
+dispatches, but the flag works unconditionally). `--task-id` can usually
+be omitted (`$BATON_TASK_ID` is set). Add `--json` for parseable output.
 
-```python
-team_send_message(
-    to_team="team-search",
-    to_member="1.2.a",           # omit or None for broadcast
-    subject="Schema change",
-    body="I updated the Order.id type to UUID in 1.1.b. See bd-c4a2.",
-)
+### `baton team send`
+
+Send a message to a team or a specific member. Prints the
+`message_bead_id` of the new message.
+
+```bash
+baton team send --from-team team-billing --member-id 1.1.a \
+  --to-team team-search --to-member 1.2.a \
+  --subject "Schema change" \
+  --body "I updated the Order.id type to UUID in 1.1.b. See bd-c4a2." --json
+# omit --to-member for a broadcast to the whole --to-team
 ```
 
-### `team_add_task(title, detail?)`
+### `baton team update` (create mode)
 
-Append a task to the caller's team board. Returns the `bead_id`.
+Append a task to the team board. Prints the new `task_bead_id`.
 Unclaimed tasks are visible to every member of the team; claimed tasks
 hide from everyone except the claimer.
 
-```python
-team_add_task(
-    title="Write migration for Order.id UUID",
-    detail="Affects billing + search; coordinate before deploy.",
-)
+```bash
+baton team update --team-id team-billing --member-id 1.1.a \
+  --title "Write migration for Order.id UUID" \
+  --detail "Affects billing + search; coordinate before deploy." --json
+# retry-safe: add --idempotency-key <key> so an ambiguous failure can be
+# retried without creating a duplicate task
 ```
 
-### `team_claim_task(task_bead_id)`
+### `baton team claim`
 
-Claim an open task. Replaces any existing claim — last-writer-wins.
+Claim an open task. Optimistic concurrency: fails with exit code `4` if
+another member already holds the claim (re-run `baton team list`, then
+retry against fresh state). Pass `--allow-reassign` to force a takeover
+of a stalled task.
 
-### `team_complete_task(task_bead_id, outcome)`
+```bash
+baton team claim --team-id team-billing --member-id 1.1.b \
+  --task-bead-id bd-1234 --json
+```
+
+### `baton team update` (complete mode)
 
 Close a task with an outcome summary. Once closed, the task is no
 longer listed as open but remains in the audit trail.
 
-### `team_dispatch(members, synthesis?)` — LEAD-ONLY
-
-Stand up a sub-team under the caller. Non-lead callers receive a
-`TeamToolError`. The new sub-team members are dispatched on the next
-engine call; the caller's own outcome plus the sub-team's outcomes are
-merged by `synthesis`.
-
-```python
-team_dispatch(
-    members=[
-        {"agent_name": "backend-engineer", "task_description": "write adapter"},
-        {"agent_name": "test-engineer",   "task_description": "write tests"},
-    ],
-    synthesis={"strategy": "merge_files"},
-)
+```bash
+baton team update --team-id team-billing --member-id 1.1.b \
+  --task-bead-id bd-1234 --status complete --outcome "Migration shipped." --json
 ```
+
+### `baton team list` / `baton team read`
+
+Pull-based board and mailbox reads:
+
+```bash
+baton team list --team-id team-billing --member-id 1.1.b --json
+# --status open|claimed|done to filter; --resource teams for child teams;
+# --all for the unfiltered lead/observer-wide view
+
+baton team read --team-id team-billing --member-id 1.1.b --json
+# acks what it returns by default; --no-ack peeks without consuming
+```
+
+Exit codes are meaningful: `2` = bad input (check for a typo), `3` =
+role not authorized, `4` = claim conflict (refresh and retry), `5` =
+team backend not configured (stop and report — do not retry).
+
+### Standing up a sub-team — NO callable tool
+
+There is **no callable `team_dispatch` surface in this runtime** — no
+CLI verb, no MCP tool. A lead cannot stand up a sub-team mid-flight; do
+not narrate or simulate a `team_dispatch(...)` call. Sub-teams are
+predefined in the plan (a `TeamMember` with a non-empty `sub_team`) and
+dispatched by the engine automatically. If the work genuinely needs an
+unplanned sub-team, say so explicitly in your outcome (e.g. a
+`BEAD_WARNING:`) so a human or the planner can add it.
 
 ## Patterns
 
 ### Cross-team coordination
 
-```
-team-billing (lead 1.1.a) → team_send_message(
-    to_team="team-search", to_member="1.2.a",
-    subject="Order.id is UUID now",
-    body="Please update the search index writer.",
-)
+```bash
+# team-billing lead (1.1.a):
+baton team send --from-team team-billing --member-id 1.1.a \
+  --to-team team-search --to-member 1.2.a \
+  --subject "Order.id is UUID now" \
+  --body "Please update the search index writer."
 ```
 
 The message lands in `1.2.a`'s next dispatch prompt under
-"Prior Discoveries & Messages". No interrupt, no blocking.
+"Prior Discoveries & Messages" (or an explicit `baton team read`).
+No interrupt, no blocking.
 
 ### Discover-and-delegate
 
-```
-team-billing lead (1.1.a):
-  — investigate timeout
-  — team_add_task("fix retry loop in auth", detail="...")
+```bash
+# team-billing lead (1.1.a) investigates a timeout, then:
+baton team update --team-id team-billing --member-id 1.1.a \
+  --title "fix retry loop in auth" --detail "..."
 
-Any member of team-billing on their next dispatch sees the task and can
-team_claim_task(<id>) to take it on.
+# Any member of team-billing on their next dispatch (or via
+# `baton team list`) sees the task and can take it on:
+baton team claim --team-id team-billing --member-id 1.1.b \
+  --task-bead-id <id>
 ```
 
 ### On-the-fly decomposition
 
-```
-team-billing lead (1.1.a) discovers the work is three distinct pieces:
-  team_dispatch(members=[
-      {"agent_name": "backend-engineer", "member_id": "1.1.a.api"},
-      {"agent_name": "backend-engineer", "member_id": "1.1.a.db"},
-      {"agent_name": "test-engineer",    "member_id": "1.1.a.test"},
-  ])
-
-The engine registers a child team under team-billing, dispatches the
-three sub-members alongside the lead's own work, and merges the
-outcomes via the enclosing step's synthesis on completion.
-```
+Not available as a callable tool — see "Standing up a sub-team" above.
+When a plan predefines a sub-team, the engine registers a child team
+under the parent, dispatches the sub-members alongside the lead's own
+work, and merges the outcomes via the enclosing step's synthesis on
+completion.

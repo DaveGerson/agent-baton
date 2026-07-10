@@ -105,8 +105,11 @@ independent streams (e.g. billing backend vs. search backend vs. UI).
   the lead as a worker AND the sub-team members in the same wave; the
   lead's own outcome is merged with sub-team outcomes by the enclosing
   step's `synthesis` strategy.
-- Leads can also stand up sub-teams on the fly via the `team_dispatch`
-  tool. Non-lead members calling `team_dispatch` receive a clear error.
+- There is currently **no callable tool** for a lead to stand up a
+  sub-team on the fly — sub-teams must be predefined in the plan. If a
+  lead reports that unplanned decomposition is needed (e.g. via a
+  `BEAD_WARNING:`), treat it as a plan-change decision, not something
+  the lead can self-serve.
 
 When to run teams flat vs nested:
 - **Flat** when the work is uniform and members need no internal
