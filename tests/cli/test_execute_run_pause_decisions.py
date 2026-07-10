@@ -205,6 +205,7 @@ class TestInteractHeadlessPause:
         action_dict = {
             "action_type": ActionType.INTERACT.value,
             "interact_step_id": "1.1",
+            "interact_turn": 1,
             "message": "Agent is asking a question",
         }
 
@@ -225,8 +226,75 @@ class TestInteractHeadlessPause:
         assert pending[0].decision_type == "interact_response"
         assert pending[0].options == ["done"]
 
+    def test_multi_turn_interact_does_not_replay_a_stale_resolution(
+        self, tmp_path: Path,
+    ) -> None:
+        """One resolved answer must resume the interaction exactly once.
+
+        Regression (phase 2 review): the interact decision ID was keyed on
+        ``(task, step)`` only, so when the agent came back with turn 2 the
+        runner found turn 1's already-resolved decision under the same ID
+        and silently re-applied the same input on every subsequent turn —
+        the human was never asked again.  Turn 2 must instead record a NEW
+        pending decision and pause.
+        """
+        task_id = "interact-task-3"
+        turn1 = {
+            "action_type": ActionType.INTERACT.value,
+            "interact_step_id": "1.1",
+            "interact_turn": 1,
+        }
+
+        # First encounter: records the turn-1 pending decision and pauses.
+        mock_engine = MagicMock()
+        with _non_tty(), pytest.raises(SystemExit):
+            _run_loop(
+                engine=mock_engine, launcher=None, action_dict=dict(turn1),
+                max_steps=10, dry_run=False, model_override="sonnet",
+                task_id=task_id, context_root=tmp_path,
+            )
+
+        dm = DecisionManager(decisions_dir=tmp_path / "decisions")
+        pending = [r for r in dm.pending() if r.task_id == task_id]
+        assert len(pending) == 1
+        dm.resolve(pending[0].request_id, chosen_option="reply", rationale="answer-one")
+
+        # Re-invocation: applies turn 1's answer once, then the agent
+        # replies and the engine returns INTERACT again for turn 2.
+        mock_engine = MagicMock()
+        turn2_action = MagicMock()
+        turn2_action.to_dict.return_value = {
+            "action_type": ActionType.INTERACT.value,
+            "interact_step_id": "1.1",
+            "interact_turn": 2,
+        }
+        complete_action = MagicMock()
+        complete_action.to_dict.return_value = {
+            "action_type": ActionType.COMPLETE.value, "summary": "done",
+        }
+        mock_engine.next_action.side_effect = [turn2_action, complete_action]
+
+        with _non_tty(), pytest.raises(SystemExit) as exc_info:
+            _run_loop(
+                engine=mock_engine, launcher=None, action_dict=dict(turn1),
+                max_steps=10, dry_run=False, model_override="sonnet",
+                task_id=task_id, context_root=tmp_path,
+            )
+        assert exc_info.value.code != 0
+
+        # The one human answer was applied exactly once.
+        mock_engine.provide_interact_input.assert_called_once_with(
+            step_id="1.1", input_text="answer-one",
+        )
+        # Turn 2 recorded its own, new pending decision.
+        pending_after = [r for r in dm.pending() if r.task_id == task_id]
+        assert len(pending_after) == 1
+        assert pending_after[0].request_id != pending[0].request_id
+
     def test_already_resolved_done_completes_interaction(self, tmp_path: Path) -> None:
-        request_id = deterministic_decision_id("interact-task-2", "interact", "1.1")
+        # Interact decision IDs are turn-scoped (see the multi-turn
+        # regression above) — one answer resumes exactly one turn.
+        request_id = deterministic_decision_id("interact-task-2", "interact", "1.1", 1)
         dm = DecisionManager(decisions_dir=tmp_path / "decisions")
         from agent_baton.models.decision import DecisionRequest
         dm.request(DecisionRequest(
@@ -244,6 +312,7 @@ class TestInteractHeadlessPause:
         action_dict = {
             "action_type": ActionType.INTERACT.value,
             "interact_step_id": "1.1",
+            "interact_turn": 1,
         }
 
         with _non_tty():

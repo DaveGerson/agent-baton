@@ -756,7 +756,15 @@ class TaskWorker:
             return
 
         task_id = self._engine.status().get("task_id", "")
-        request_id = deterministic_decision_id(task_id, "interact", step_id)
+        # The ID must be turn-scoped: an interaction re-presents the SAME
+        # step_id on every turn, so a (task, step)-only ID would match turn
+        # 1's already-resolved decision on turn 2 and silently replay the
+        # same input forever without ever asking the human again.  The turn
+        # number is stable across a crash/restart at the same turn (it is
+        # derived from the persisted interaction history), so crash-resume
+        # still converges on one request per logical decision.
+        turn = getattr(action, "interact_turn", 0)
+        request_id = deterministic_decision_id(task_id, "interact", step_id, turn)
         if self._decision_manager.get(request_id) is None:
             req = DecisionRequest(
                 request_id=request_id,

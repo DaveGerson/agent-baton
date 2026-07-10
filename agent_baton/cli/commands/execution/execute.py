@@ -3089,7 +3089,14 @@ def _run_loop(
                     engine.provide_interact_input(step_id=step_id, input_text=text)
                 print("  [INTERACT] recorded", file=sys.stderr)
             else:
-                request_id = _pending_decision_request_id(task_id, "interact", step_id)
+                # Turn-scoped ID: the same step_id re-presents on every
+                # interaction turn, so a (task, step)-only ID would match
+                # turn 1's already-resolved decision on turn 2 and replay
+                # the same input forever without asking the human again.
+                turn = action_dict.get("interact_turn", 0)
+                request_id = _pending_decision_request_id(
+                    task_id, "interact", step_id, turn,
+                )
                 resolution = _ensure_pending_decision(
                     context_root=context_root,
                     request_id=request_id,

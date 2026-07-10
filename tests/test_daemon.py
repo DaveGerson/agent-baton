@@ -594,6 +594,60 @@ class TestWorkerDecisionIntegration:
 
         asyncio.run(_run())
 
+    def test_interact_stale_resolution_is_not_replayed_on_next_turn(
+        self, tmp_path: Path,
+    ) -> None:
+        """One resolved interact answer must resume exactly one turn.
+
+        Regression (phase 2 review): the interact decision ID was keyed on
+        ``(task, step)`` only, so on turn 2 the worker found turn 1's
+        already-resolved decision under the same ID and re-applied the same
+        input on every subsequent turn without ever asking the human again.
+        """
+        from unittest.mock import MagicMock
+
+        dm = DecisionManager(decisions_dir=tmp_path / "decisions")
+        engine = MagicMock()
+        engine.status.return_value = {"task_id": "task-i"}
+        shutdown = asyncio.Event()
+        shutdown.set()  # let _handle_interact return instead of polling
+        worker = TaskWorker(
+            engine=engine, launcher=DryRunLauncher(),
+            decision_manager=dm, shutdown_event=shutdown,
+            gate_poll_interval=0.01,
+        )
+
+        def _action(turn: int):
+            a = MagicMock()
+            a.interact_step_id = "1.1"
+            a.interact_turn = turn
+            a.message = "agent asks a question"
+            return a
+
+        async def _run():
+            # Turn 1: a pending decision is recorded (shutdown set → returns).
+            await worker._handle_interact(_action(1))
+            pending = [r for r in dm.pending() if r.task_id == "task-i"]
+            assert len(pending) == 1
+            turn1_id = pending[0].request_id
+            dm.resolve(turn1_id, chosen_option="reply", rationale="answer-one")
+
+            # Turn 1 re-entry (e.g. after restart): applies the answer once.
+            await worker._handle_interact(_action(1))
+            engine.provide_interact_input.assert_called_once_with(
+                step_id="1.1", input_text="answer-one",
+            )
+
+            # Turn 2: the stale turn-1 resolution must NOT be replayed —
+            # a fresh pending decision must be recorded instead.
+            await worker._handle_interact(_action(2))
+            engine.provide_interact_input.assert_called_once()
+            pending2 = [r for r in dm.pending() if r.task_id == "task-i"]
+            assert len(pending2) == 1
+            assert pending2[0].request_id != turn1_id
+
+        asyncio.run(_run())
+
     def test_interact_no_decision_manager_completes_immediately(self, tmp_path: Path) -> None:
         """Without a DecisionManager, INTERACT finalizes via
         complete_interaction() instead of busy-looping forever."""
