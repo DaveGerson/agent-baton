@@ -220,10 +220,15 @@ class TeamRegistry:
         *expected_status* — a compare-and-swap guard expressed as a single
         ``UPDATE ... WHERE status = ?`` so the check-then-set is atomic
         within SQLite's own statement execution (no separate read
-        round-trip to race against). Used by the team-level synthesis
-        state machine (see ``docs/internal/team-runtime-contract.md``
-        §Synthesis State Machine) to guard against two concurrent
-        synthesis drivers double-transitioning the same team.
+        round-trip to race against). Provided as the CAS primitive for
+        the team-level synthesis state machine designed in
+        ``docs/internal/team-runtime-contract.md`` §Synthesis State
+        Machine (guarding two concurrent synthesis drivers against
+        double-transitioning the same team). NOTE: the current executor
+        implementation (Phase 4, 4.3) guards exactly-once synthesis
+        dispatch with the persisted ``StepResult.synthesis_dispatched``
+        flag instead and does not yet call this method — it is exercised
+        by tests and available for driver-level use.
 
         Returns:
             ``True`` if the row existed, matched *expected_status*, and was

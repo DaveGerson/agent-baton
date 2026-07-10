@@ -466,7 +466,7 @@ again with the same idempotency_key," not "assume it failed."
 | Unknown `team_id` / unregistered `member_id` / malformed `resource`/`status`/transition argument | `TeamToolError` | `2` (usage error) |
 | Role not authorized for the requested tool | `TeamAuthorizationError` (`TeamToolError` subclass) | `3` (authorization error) |
 | Optimistic-concurrency conflict (`team_claim`) | `TeamConcurrencyError` (`TeamToolError` subclass) | `4` (conflict — caller should re-`team_list` and retry against fresh state, not blindly retry the same claim) |
-| Underlying store unavailable (`TeamRegistry`/`BeadStore` not configured — e.g. schema predates v15, or `bd` binary missing) | `TeamToolError` ("TeamRegistry is unavailable...") | `5` (backend unavailable — distinct from `2` so a caller/monitor can tell "your call was wrong" from "the environment is broken") |
+| Underlying store unavailable (`TeamRegistry`/`BeadStore` not configured — e.g. schema predates v15, or `bd` binary missing) | `TeamBackendUnavailableError` (`TeamToolError` subclass) | `5` (backend unavailable — distinct from `2` so a caller/monitor can tell "your call was wrong" from "the environment is broken") |
 
 All four are `TeamToolError` subclasses (or `TeamToolError` itself) so a
 caller that only wants "did this fail" can catch the base class; a caller
@@ -519,18 +519,19 @@ a lead announces `ESCALATED` to its sub-team ("waiting on human input, hold
 your commits"). The state machine and the tool surface are two views of the
 same lifecycle, not independent designs.
 
-**Scope of this step:** the enum, transition table, and validity function
-are landed (`agent_baton/models/execution.py`) and unit-tested
-(`tests/test_team_tools.py::TestSynthesisStateMachine`). Wiring an actual
-`SynthesisState` field into persisted `StepResult`/executor state, and
-having `executor.py`'s synthesis path (`SynthesisSpec.strategy` dispatch)
-actually transition through these states and call
-`TeamRegistry.set_status_if` at the team-status boundaries, is deferred
-(§9.3) — `executor.py` is outside this step's allowed paths, and wiring a
-persisted field into `StepResult`'s hand-rolled `to_dict()` (see
-`agent_baton/models/CLAUDE.md`'s migration-discipline note) deserves its
-own reviewed step rather than a name-only enum riding in on an
-architecture doc.
+**Scope of this step (updated by 4.3):** the enum, transition table, and
+validity function landed with 4.1 (`agent_baton/models/execution.py`,
+unit-tested in `tests/test_team_tools.py::TestSynthesisStateMachine`).
+Step 4.3 subsequently wired the persisted field in: `StepResult` carries
+`synthesis_state` + `synthesis_dispatched` (schema v48 migration), and
+`executor.py`'s `agent_synthesis` path drives the `SYNTHESIZING`,
+`ESCALATED` (resume edge), and terminal `SYNTHESIZED`/`FAILED` states via
+`_apply_synthesis`/`_pending_synthesis_dispatch`/`record_step_result`.
+The intermediate `PENDING`/`COLLECTING`/`READY`/`VERIFYING` states remain
+design vocabulary (member collection is tracked by `member_results`
+directly; verification happens inside `record_step_result` before the
+terminal edge lands), and `TeamRegistry.set_status_if` is not yet called
+by the executor — see §9.3 for what is still open.
 
 ---
 
@@ -563,12 +564,14 @@ architecture doc.
 
 ### 9.3 Wire the synthesis state machine into the executor
 
-Land a `SynthesisState`-typed field on `StepResult` (with a migration note
-per `agent_baton/models/CLAUDE.md`), and have `executor.py`'s
-`agent_synthesis`/`merge_files`/`concatenate` strategies actually transition
-through `PENDING → … → SYNTHESIZED|FAILED`, calling
-`TeamRegistry.set_status_if` at the `COLLECTING → READY` and
-`VERIFYING → SYNTHESIZED` boundaries.
+Mostly DONE in step 4.3: `StepResult.synthesis_state`/`synthesis_dispatched`
+persisted (schema v48), `agent_synthesis` transitions through
+`SYNTHESIZING → (ESCALATED →) SYNTHESIZED|FAILED` with exactly-once,
+restart-safe dispatch. Still open: surfacing the intermediate
+`PENDING`/`COLLECTING`/`READY`/`VERIFYING` states as persisted values, and
+calling `TeamRegistry.set_status_if` at the `COLLECTING → READY` and
+`VERIFYING → SYNTHESIZED` boundaries (needed only once two independent
+synthesis drivers can race — see §6.1's process model).
 
 ---
 

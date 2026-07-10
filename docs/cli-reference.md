@@ -774,6 +774,40 @@ baton team status
 baton team show --task-id 2026-07-02-billing-rollout-ab12cd34
 ```
 
+#### Team runtime-contract verbs: `list` / `claim` / `update` / `send` / `read`
+
+The callable boundary for the five canonical team tools a dispatched team
+member uses to coordinate mid-flight (full contract:
+`docs/internal/team-runtime-contract.md`). All verbs accept `--task-id`
+(defaults to `$BATON_TASK_ID` or the active task), `--member-id` (defaults
+to `$BATON_TEAM_MEMBER_ID`, set automatically on team-member dispatches),
+and `--json` for machine-readable output.
+
+```
+baton team list   --team-id ID [--member-id ID] [--resource tasks|teams] [--status open|claimed|done] [--limit N] [--all] [--json]
+baton team claim  --team-id ID --member-id ID --task-bead-id ID [--allow-reassign] [--json]
+baton team update --team-id ID --member-id ID (--title T [--detail D] [--idempotency-key K] [--parent-task-bead-id ID] | --task-bead-id ID --status complete --outcome O) [--json]
+baton team send   --from-team ID --member-id ID --to-team ID [--to-member ID] --subject S --body B [--json]
+baton team read   --team-id ID --member-id ID [--limit N] [--no-ack] [--json]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | Shared task board (unclaimed tasks plus the caller's claims; `--all` for the unfiltered view) or, with `--resource teams`, registered child teams. |
+| `claim` | Claim an open task with optimistic concurrency -- fails (exit `4`) if another member holds it; `--allow-reassign` forces a takeover. |
+| `update` | Create a task (`--title`, optional retry-safe `--idempotency-key`) or complete one (`--task-bead-id --status complete --outcome`). |
+| `send` | Send a mailbox message to a team (broadcast) or a specific member. Delivery is next-dispatch or an explicit `read`, never an interrupt. |
+| `read` | Pull unread mailbox messages; acks what it returns by default (`--no-ack` peeks without consuming). |
+
+Exit codes are part of the contract for scripted callers: `2` usage error
+(unknown team/member id, malformed arguments), `3` role not authorized,
+`4` claim conflict (refresh with `list`, then retry), `5` team backend
+unavailable (registry/bead store not configured -- do not retry).
+
+There is intentionally **no** `baton team dispatch` verb -- standing up a
+sub-team mid-flight has no callable surface in this release; sub-teams are
+predefined in the plan.
+
 ---
 
 ### `baton knowledge list` / `show` / `scan` / `audit` / `propose`

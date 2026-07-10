@@ -260,10 +260,13 @@ class SynthesisState(str, Enum):
 
     Typed vocabulary for the synthesis state machine designed in
     ``docs/internal/team-runtime-contract.md`` §Synthesis State Machine.
-    Defined here as the shared contract type; wiring it into persisted
-    ``StepResult``/executor state is a follow-up implementation step (this
-    enum and :data:`SYNTHESIS_STATE_TRANSITIONS` are the design artifact,
-    not yet consulted by the executor).
+    Persisted on ``StepResult.synthesis_state`` and driven by the executor
+    (Phase 4, 4.3): ``ExecutionEngine._apply_synthesis`` enters
+    ``SYNTHESIZING`` for the ``agent_synthesis`` strategy,
+    ``_pending_synthesis_dispatch`` handles the ``ESCALATED ->
+    SYNTHESIZING`` resume edge, and ``record_step_result`` lands the
+    terminal ``SYNTHESIZED``/``FAILED`` edge after scope/commit/evidence
+    verification.
 
     States:
         PENDING: Team step dispatched; no member outcomes collected yet.
