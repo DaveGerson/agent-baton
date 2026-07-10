@@ -1275,3 +1275,268 @@ class TestUnverifiableProvenanceFailsClosed:
         assert parent_head_after == base_sha == parent_head_before, (
             "parent branch must not advance when provenance is unverifiable"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.3 — resume_from_takeover must not discard work on fold failure
+# ---------------------------------------------------------------------------
+#
+# Regression for a defect found reviewing the bd-1.1 fold-back fail-closed
+# guards: resume_from_takeover() marked the TakeoverRecord "resumed_at" /
+# "resolution=completed" and returned True BEFORE checking whether
+# WorktreeManager.fold_back() actually succeeded, and any exception it
+# raised was caught and merely logged. A rebase conflict or a provenance
+# failure during resume therefore looked like a successful resume to every
+# caller (CLI, state on disk), while the developer's commits stayed
+# stranded in a worktree that nothing further protected from later
+# reclamation (gc_stale has no reason to retain a worktree whose takeover
+# record claims to be resolved).
+
+
+def _force_gate_failed(engine: "ExecutionEngine") -> None:
+    state = engine._load_execution()
+    assert state is not None
+    state.status = "gate_failed"
+    engine._save_execution(state)
+
+
+class TestResumeFromTakeoverFoldFailureDoesNotDiscardWork:
+    """A fold-back failure during resume_from_takeover must fail closed:
+    the takeover record must stay active, the worktree must be retained on
+    disk (never cleaned up), and the call must return False -- never a
+    silently-logged "success"."""
+
+    def test_fold_back_exception_leaves_record_active_and_worktree_intact(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TAKEOVER_ENABLED", "1")
+        from agent_baton.core.engine.takeover import TakeoverRecord
+        from agent_baton.core.engine.worktree_manager import WorktreeFoldError
+
+        plan = _plan(task_id="task-resume-fold-fail")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        _force_gate_failed(engine)
+        record = engine.start_takeover("1.1", reason="test-fold-fail", pid=0)
+        assert record is not None
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Developer commits inside the worktree so HEAD advances past
+        # last_known_worktree_head -- resume must attempt a real fold.
+        (wt_path / "dev_fix.py").write_text("# developer fix\n")
+        subprocess.run(["git", "add", "dev_fix.py"], cwd=wt_path, check=True,
+                        capture_output=True)
+        subprocess.run(["git", "commit", "-m", "developer fix"], cwd=wt_path,
+                        check=True, capture_output=True)
+
+        # Simulate the documented rebase-fold defect (git refuses to fetch
+        # into a branch checked out in its own worktree) without depending
+        # on that specific git failure mode being reproducible everywhere.
+        def _always_conflicts(self, handle, *, commit_hash="", strategy="rebase"):
+            raise WorktreeFoldError(f"simulated conflict for step={handle.step_id}")
+
+        monkeypatch.setattr(
+            type(engine._worktree_mgr), "fold_back", _always_conflicts
+        )
+
+        result = engine.resume_from_takeover("1.1", rerun_gate=False, abort=False)
+
+        assert result is False, (
+            "resume_from_takeover must report failure when fold-back fails "
+            "-- it must never claim success for work that was not folded"
+        )
+
+        state_after = engine._load_execution()
+        assert state_after is not None
+
+        # The takeover record must remain ACTIVE (not silently marked
+        # resolved) so the operator knows the resume did not truly land.
+        last_record_dict = None
+        for r in state_after.takeover_records:
+            if r.get("step_id") == "1.1":
+                last_record_dict = r
+        assert last_record_dict is not None
+        last_record = TakeoverRecord.from_dict(last_record_dict)
+        assert last_record.is_active(), (
+            "takeover record must stay active after a failed fold-back -- "
+            f"got resumed_at={last_record.resumed_at!r} "
+            f"resolution={last_record.resolution!r}"
+        )
+
+        # The worktree (and the developer's commit inside it) must be
+        # retained on disk -- never cleaned up when the fold never landed.
+        assert wt_path.is_dir(), (
+            "worktree must be retained on disk when fold-back fails; "
+            "deleting it here would permanently discard the developer's commit"
+        )
+        assert (wt_path / "dev_fix.py").exists()
+
+        # The handle must still be tracked in step_worktrees so later
+        # lifecycle code (straggler sweep, forensic recovery) still knows
+        # about it -- it must not be silently dropped as if folded.
+        assert "1.1" in getattr(state_after, "step_worktrees", {}), (
+            "step_worktrees must still reference the un-folded worktree"
+        )
+
+        # The parent branch must NOT have advanced -- nothing was folded.
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head_after == parent_head_before, (
+            "parent branch must not advance when fold-back failed"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.3 — unmodeled fold/discard-check exceptions must also fail closed
+# ---------------------------------------------------------------------------
+#
+# record_step_result()'s worktree lifecycle block only caught the two
+# *modeled* failure types (WorktreeProvenanceError, WorktreeFoldError) around
+# fold_back()/_verify_safe_to_discard(). Any OTHER exception type (e.g. the
+# git binary vanishing mid-operation, a permissions error, or any bug)
+# escaped those inner handlers into the outer catch-all, which only logs a
+# warning and leaves `result.status` exactly as the caller passed it in
+# (typically "complete") -- silently recording success without ever knowing
+# whether the commit actually reached the parent branch, or whether the
+# worktree was actually safe to discard.
+
+
+class TestUnexpectedFoldExceptionFailsClosed:
+    """An unmodeled exception from ``WorktreeManager.fold_back()`` during a
+    complete step with a reported commit must still fail the step closed:
+    status becomes "failed", the worktree is retained (cleanup never runs),
+    and the parent branch never advances."""
+
+    def test_unexpected_exception_during_fold_marks_step_failed(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plan = _plan(task_id="task-unexpected-fold-exc")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        assert wt_path.is_dir()
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        def _boom(self, handle, *, commit_hash="", strategy="rebase"):
+            raise RuntimeError("simulated unmodeled fold failure")
+
+        monkeypatch.setattr(type(engine._worktree_mgr), "fold_back", _boom)
+
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims success",
+            commit_hash="deadbeef" * 5,
+            files_changed=["f.txt"],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "an unmodeled exception from fold_back() must fail the step "
+            f"closed, not silently record success; got {step_result.status!r}"
+        )
+
+        assert wt_path.is_dir(), (
+            "worktree must be retained when the fold outcome is unknown"
+        )
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )
+
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head_after == parent_head_before, (
+            "parent branch must not advance when the fold outcome is unknown"
+        )
+
+
+class TestUnexpectedDiscardCheckExceptionFailsClosed:
+    """An unmodeled exception from ``WorktreeManager._verify_safe_to_discard()``
+    on the "no commit reported" success path must fail the step closed
+    rather than silently proceeding to delete the worktree."""
+
+    def test_unexpected_exception_during_discard_check_marks_step_failed(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plan = _plan(task_id="task-unexpected-discard-exc")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        assert wt_path.is_dir()
+
+        def _boom(self, handle):
+            raise RuntimeError("simulated unmodeled discard-check failure")
+
+        monkeypatch.setattr(
+            type(engine._worktree_mgr), "_verify_safe_to_discard", _boom
+        )
+
+        # status="complete" with NO commit_hash -> the "no commit reported"
+        # discard-check path.
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims success, no commit",
+            commit_hash="",
+            files_changed=[],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "an unmodeled exception from the discard-safety check must fail "
+            f"the step closed; got {step_result.status!r}"
+        )
+
+        assert wt_path.is_dir(), (
+            "worktree must be retained -- it must never be deleted while "
+            "the safety check's outcome is unknown"
+        )
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )

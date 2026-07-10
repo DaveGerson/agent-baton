@@ -3039,6 +3039,39 @@ class ExecutionEngine:
                                 result.status = "failed"
                                 result.error = f"WorktreeFoldError: {fold_exc}"
                                 self._emit_worktree_error(state, step_id, "fold", str(fold_exc))
+                            except Exception as unexpected_fold_exc:  # noqa: BLE001
+                                # Any OTHER exception from fold_back (e.g. the
+                                # git binary vanishing mid-operation, a
+                                # permissions error) must fail closed exactly
+                                # like a modeled WorktreeFoldError.  Without
+                                # this branch the exception would escape to
+                                # the outer handler below, which only logs a
+                                # warning and leaves `result.status` at
+                                # whatever the caller passed in (typically
+                                # "complete") -- silently claiming the step
+                                # succeeded when whether the commit actually
+                                # landed in the parent branch is unknown.
+                                _log.warning(
+                                    "Unexpected error during fold-back for "
+                                    "step %s: %s",
+                                    step_id, unexpected_fold_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-fold-unexpected-error "
+                                            f"step={step_id} reason={unexpected_fold_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = (
+                                    f"WorktreeFoldUnexpectedError: {unexpected_fold_exc}"
+                                )
+                                self._emit_worktree_error(
+                                    state, step_id, "fold", str(unexpected_fold_exc)
+                                )
                             else:
                                 # Success path: clean up the worktree.
                                 # bd-f2f7: retry with force=True if untracked
@@ -3090,6 +3123,36 @@ class ExecutionEngine:
                                 result.error = f"WorktreeProvenanceError: {prov_exc}"
                                 self._emit_worktree_error(
                                     state, step_id, "provenance", str(prov_exc)
+                                )
+                            except Exception as unexpected_discard_exc:  # noqa: BLE001
+                                # Any OTHER exception from the safety check
+                                # (e.g. git binary missing mid-run) must fail
+                                # closed exactly like WorktreeProvenanceError
+                                # -- never fall through to the outer handler,
+                                # which would leave `result.status` at
+                                # whatever the caller passed in without the
+                                # ground-truth safety check having actually
+                                # completed.
+                                _log.warning(
+                                    "Unexpected error verifying safe-to-discard "
+                                    "for step %s: %s",
+                                    step_id, unexpected_discard_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-discard-check-unexpected-error "
+                                            f"step={step_id} reason={unexpected_discard_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = (
+                                    f"WorktreeDiscardCheckError: {unexpected_discard_exc}"
+                                )
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(unexpected_discard_exc)
                                 )
                             else:
                                 # Clean up without fold.
@@ -4088,10 +4151,14 @@ class ExecutionEngine:
         4. If HEAD == last_known_head and no diff: refuse resume (no commit made).
         5. If HEAD differs: optionally append Co-Authored-By trailer.
         6. If *rerun_gate*: re-run the gate command; if fail → stay paused-takeover.
-        7. Record gate result, mark resolution, proceed.
+        7. Fold the worktree's commits back into the parent branch; only if
+           that succeeds, record gate result and mark resolution.
 
-        Returns True when execution can proceed (gate passed or rerun skipped).
-        Returns False when still failing or aborted.
+        Returns True when execution can proceed (gate passed and — if a
+        worktree was involved — its commits were folded into the parent
+        branch). Returns False when still failing, aborted, or when the
+        fold-back itself failed (the takeover record stays active and the
+        worktree is retained on disk for a retry).
         """
         from agent_baton.core.engine.takeover import TakeoverRecord, TakeoverSession
 
@@ -4226,48 +4293,96 @@ class ExecutionEngine:
                         "Fix the remaining issues and run 'baton execute resume' again."
                     )
 
-        # Update takeover record only when the gate has actually passed.
-        # If the gate is still failing the takeover stays "active" (the
-        # record keeps resumed_at empty) — this preserves I9: status
-        # remains "paused-takeover" iff at least one record is active.
+        # Update takeover record only when the gate has actually passed AND
+        # the developer's worktree commits actually fold back into the
+        # parent branch. Marking the record "resolved" (and cleaning up the
+        # worktree) before a fold that then fails would leave the operator
+        # believing the takeover succeeded while the isolated commits never
+        # reached the parent branch — and a "resolved" record with no
+        # retained worktree reference is exactly what later lifecycle code
+        # (straggler sweep, gc_stale) treats as safe to reclaim, which would
+        # permanently discard the developer's work. So: fold BEFORE marking
+        # resolved, and only mark resolved (and only clean up the worktree)
+        # once the fold has genuinely succeeded.
         records_raw = list(getattr(state, "takeover_records", []))
         if gate_passed:
-            for i, r in enumerate(records_raw):
-                if r.get("step_id") == step_id and not r.get("resumed_at"):
-                    r["resumed_at"] = _utcnow()
-                    r["resolution"] = "completed"
-                    records_raw[i] = r
-                    break
-            state.takeover_records = records_raw
-
-            # Fold back developer commits into parent branch.
+            fold_ok = True
             if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
+                from agent_baton.core.engine.worktree_manager import (
+                    WorktreeCleanupError,
+                )
                 try:
                     self._worktree_mgr._trace = self._trace
                     self._worktree_mgr.fold_back(handle, commit_hash=new_head)
-                    self._worktree_mgr.cleanup(handle, on_failure=False)
-                except Exception as fold_exc:
+                except Exception as fold_exc:  # noqa: BLE001 — any fold failure fails closed
+                    fold_ok = False
                     _log.warning(
-                        "resume_from_takeover: fold-back failed for step=%s: %s",
+                        "resume_from_takeover: fold-back failed for step=%s: %s "
+                        "— takeover record NOT marked resolved; worktree "
+                        "retained on disk for retry.",
                         step_id, fold_exc,
                     )
+                    print(
+                        f"Fold-back failed for step {step_id}: {fold_exc}\n"
+                        f"The developer's commits in {handle.path} have NOT "
+                        "been folded into the parent branch, and the worktree "
+                        "has NOT been removed. Resolve the issue and run "
+                        "'baton execute resume' again, or abort with "
+                        "'baton execute resume --abort'."
+                    )
+                else:
+                    # Fold succeeded — the parent branch already has the
+                    # commit(s); safe to reclaim the worktree now.
+                    try:
+                        self._worktree_mgr.cleanup(handle, on_failure=False)
+                    except WorktreeCleanupError:
+                        try:
+                            self._worktree_mgr.cleanup(handle, on_failure=False, force=True)
+                        except WorktreeCleanupError as clean_exc:
+                            _log.warning(
+                                "resume_from_takeover: post-fold cleanup failed "
+                                "for step=%s (non-fatal, worktree retained on "
+                                "disk): %s",
+                                step_id, clean_exc,
+                            )
+                    # Drop the now-stale handle so later lifecycle code (e.g.
+                    # the task-completion straggler sweep) never mistakes an
+                    # already-folded-and-removed worktree for one still in
+                    # need of fold-back/cleanup.
+                    _step_worktrees = dict(getattr(state, "step_worktrees", {}))
+                    _step_worktrees.pop(step_id, None)
+                    state.step_worktrees = _step_worktrees
 
-            # Emit trace event.
-            if self._trace is not None:
-                self._tracer.record_event(
-                    self._trace,
-                    "takeover_resumed",
-                    agent_name=None,
-                    phase=state.current_phase,
-                    step=0,
-                    details={
-                        "task_id": state.task_id,
-                        "step_id": step_id,
-                        "resolution": "completed",
-                        "dev_commits": dev_commits,
-                        "gate_passed": True,
-                    },
-                )
+            if fold_ok:
+                for i, r in enumerate(records_raw):
+                    if r.get("step_id") == step_id and not r.get("resumed_at"):
+                        r["resumed_at"] = _utcnow()
+                        r["resolution"] = "completed"
+                        records_raw[i] = r
+                        break
+                state.takeover_records = records_raw
+
+                # Emit trace event.
+                if self._trace is not None:
+                    self._tracer.record_event(
+                        self._trace,
+                        "takeover_resumed",
+                        agent_name=None,
+                        phase=state.current_phase,
+                        step=0,
+                        details={
+                            "task_id": state.task_id,
+                            "step_id": step_id,
+                            "resolution": "completed",
+                            "dev_commits": dev_commits,
+                            "gate_passed": True,
+                        },
+                    )
+            else:
+                # Fold failed: the takeover is NOT resolved regardless of
+                # gate outcome — report failure to the caller so it does not
+                # treat this resume as having landed the work.
+                gate_passed = False
         else:
             # Status already paused-takeover from start_takeover; the
             # active record is preserved.  No transition needed — simply
