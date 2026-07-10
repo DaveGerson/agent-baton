@@ -757,10 +757,18 @@ class WorktreeManager:
 
         Raises:
             WorktreeProvenanceError: the commit is missing from the
-                worktree, or it already predates (is an ancestor of, or
-                equal to) ``handle.base_sha``.  The worktree is left
-                completely intact — callers must not fold or clean up
-                after this raises.
+                worktree, it already predates (is an ancestor of, or
+                equal to) ``handle.base_sha``, or it is not reachable from
+                the worktree's own HEAD (all worktrees of one repository
+                share a single object database, so mere object existence
+                does not prove the commit was made *in this worktree* — a
+                parent-repository commit that post-dates ``base_sha``
+                exists in the shared store too, and folding it would let
+                the success-path cleanup silently discard the worktree's
+                real work).  Also raised when git itself cannot answer any
+                of these questions (ambiguous provenance fails closed).
+                The worktree is left completely intact — callers must not
+                fold or clean up after this raises.
         """
         if not handle.path.exists():
             raise WorktreeProvenanceError(
@@ -802,6 +810,54 @@ class WorktreeManager:
                     f"instead of worktree {handle.path} — refusing to fold "
                     f"or clean up"
                 )
+            if anc.returncode != 1:
+                # merge-base --is-ancestor answers 0 (yes) or 1 (no); any
+                # other code means git could not answer — ambiguous
+                # provenance fails closed.
+                raise WorktreeProvenanceError(
+                    f"cannot verify commit {commit_hash[:8]} for "
+                    f"step={handle.step_id}: git merge-base failed in "
+                    f"{handle.path} (rc={anc.returncode}) — refusing to fold "
+                    f"or clean up while provenance is ambiguous"
+                )
+
+        # A commit can exist in the shared object database without ever
+        # having been made in THIS worktree (all worktrees of one repository
+        # share one object store — e.g. a parent-repository commit that
+        # post-dates base_sha). Require the commit to be reachable from the
+        # worktree's own HEAD, i.e. actually part of this worktree's
+        # history. Without this, a wrong-directory probe that reports the
+        # parent's advanced HEAD would "fold" a no-op and the success-path
+        # cleanup would silently discard the worktree's real work.
+        head_r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(handle.path),
+        )
+        if head_r.returncode != 0:
+            raise WorktreeProvenanceError(
+                f"cannot verify commit {commit_hash[:8]} for "
+                f"step={handle.step_id}: git rev-parse HEAD failed in "
+                f"worktree {handle.path} (rc={head_r.returncode}) — refusing "
+                f"to fold or clean up while provenance is ambiguous"
+            )
+        worktree_head = head_r.stdout.strip()
+        if commit_hash != worktree_head:
+            reach = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", commit_hash, worktree_head],
+                capture_output=True,
+                cwd=str(handle.path),
+            )
+            if reach.returncode != 0:
+                raise WorktreeProvenanceError(
+                    f"commit {commit_hash[:8]} reported for step={handle.step_id} "
+                    f"is not reachable from worktree HEAD {worktree_head[:8]} "
+                    f"in {handle.path}; it exists in the shared object "
+                    f"database but is not this worktree's work (the signature "
+                    f"of a commit read from the parent repository) — refusing "
+                    f"to fold or clean up"
+                )
 
     def _verify_safe_to_discard(self, handle: WorktreeHandle) -> None:
         """Fail closed before permanently deleting a worktree with NO
@@ -820,9 +876,11 @@ class WorktreeManager:
 
         Raises:
             WorktreeProvenanceError: the worktree's HEAD has diverged from
-                ``handle.base_sha`` (an unreported commit exists) or the
-                working tree has uncommitted changes.  The worktree is left
-                intact.
+                ``handle.base_sha`` (an unreported commit exists), the
+                working tree has uncommitted changes, or git itself cannot
+                inspect the worktree (broken/pruned ``.git`` linkage —
+                ambiguous state fails closed rather than deleting whatever
+                the directory still holds).  The worktree is left intact.
         """
         if not self._enabled or str(handle.path) == "/dev/null":
             return
@@ -835,16 +893,25 @@ class WorktreeManager:
             text=True,
             cwd=str(handle.path),
         )
-        if head_r.returncode == 0:
-            current_head = head_r.stdout.strip()
-            if handle.base_sha and current_head != handle.base_sha:
-                raise WorktreeProvenanceError(
-                    f"worktree for step={handle.step_id} at {handle.path} has "
-                    f"HEAD {current_head[:8]} which diverges from its "
-                    f"recorded base {handle.base_sha[:8]}, but no commit was "
-                    f"reported — refusing to delete a worktree with an "
-                    f"unreported commit; retaining for recovery"
-                )
+        if head_r.returncode != 0:
+            # git cannot even resolve HEAD in the worktree (corrupted or
+            # pruned linkage). Whether real work would be lost is UNKNOWN —
+            # fail closed instead of deleting an uninspectable directory.
+            raise WorktreeProvenanceError(
+                f"cannot verify worktree for step={handle.step_id} at "
+                f"{handle.path}: git rev-parse HEAD failed "
+                f"(rc={head_r.returncode}); refusing to delete a worktree "
+                f"whose state cannot be inspected; retaining for recovery"
+            )
+        current_head = head_r.stdout.strip()
+        if handle.base_sha and current_head != handle.base_sha:
+            raise WorktreeProvenanceError(
+                f"worktree for step={handle.step_id} at {handle.path} has "
+                f"HEAD {current_head[:8]} which diverges from its "
+                f"recorded base {handle.base_sha[:8]}, but no commit was "
+                f"reported — refusing to delete a worktree with an "
+                f"unreported commit; retaining for recovery"
+            )
 
         status_r = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -852,20 +919,26 @@ class WorktreeManager:
             text=True,
             cwd=str(handle.path),
         )
-        if status_r.returncode == 0:
-            # Ignore baton's own bookkeeping file — it is always untracked
-            # inside a freshly created worktree and is not agent work.
-            dirty_lines = [
-                line for line in status_r.stdout.splitlines()
-                if line.strip() and not line.strip().endswith(".baton-worktree.json")
-            ]
-            if dirty_lines:
-                raise WorktreeProvenanceError(
-                    f"worktree for step={handle.step_id} at {handle.path} has "
-                    f"uncommitted changes ({len(dirty_lines)} path(s)) but no "
-                    f"commit was reported — refusing to delete a dirty "
-                    f"worktree; retaining for recovery"
-                )
+        if status_r.returncode != 0:
+            raise WorktreeProvenanceError(
+                f"cannot verify worktree for step={handle.step_id} at "
+                f"{handle.path}: git status failed (rc={status_r.returncode}); "
+                f"refusing to delete a worktree whose state cannot be "
+                f"inspected; retaining for recovery"
+            )
+        # Ignore baton's own bookkeeping file — it is always untracked
+        # inside a freshly created worktree and is not agent work.
+        dirty_lines = [
+            line for line in status_r.stdout.splitlines()
+            if line.strip() and not line.strip().endswith(".baton-worktree.json")
+        ]
+        if dirty_lines:
+            raise WorktreeProvenanceError(
+                f"worktree for step={handle.step_id} at {handle.path} has "
+                f"uncommitted changes ({len(dirty_lines)} path(s)) but no "
+                f"commit was reported — refusing to delete a dirty "
+                f"worktree; retaining for recovery"
+            )
 
     def _rebase_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
         """Rebase worktree branch onto current working branch tip and FF.

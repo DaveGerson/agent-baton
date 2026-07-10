@@ -477,6 +477,49 @@ class TestFoldBackRejectsUnverifiableCommit:
             mgr.fold_back(handle, commit_hash=first_sha)
         assert handle.path.is_dir()
 
+    def test_rejects_parent_repo_descendant_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Phase 1 review regression: a commit made in the PARENT repo
+        after worktree creation (a descendant of base_sha) exists in the
+        shared object database, is not equal to base_sha, and is not an
+        ancestor of base_sha — yet it is NOT this worktree's work. Before
+        the fix it passed the provenance guard, "folded" as a no-op merge
+        ("Already up to date"), and the success-path cleanup then deleted
+        the worktree containing the agent's real, unfolded commit —
+        silent worktree loss. The guard must reject any commit that is
+        not reachable from the worktree's own HEAD."""
+        handle = mgr.create(task_id="task-prov-desc", step_id="1.1", base_branch="main")
+        # Real agent work inside the worktree.
+        agent_sha = _commit_file(handle.path, "agent_work.txt", "real work")
+        # Parent repo advances past base_sha (e.g. a sibling step folded).
+        parent_sha = _commit_file(tmp_git_repo, "parent_advance.txt", "parent")
+        assert parent_sha != agent_sha
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=parent_sha)
+
+        # Worktree (and the agent's real commit) retained for recovery.
+        assert handle.path.is_dir()
+        wt_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=handle.path,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert wt_head == agent_sha
+
+    def test_rejects_parent_descendant_even_without_worktree_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Same wrong-report signature when the agent made NO commit at
+        all: the parent's advanced HEAD must never be claimed as the
+        worktree result."""
+        handle = mgr.create(task_id="task-prov-desc2", step_id="1.1", base_branch="main")
+        parent_sha = _commit_file(tmp_git_repo, "parent_only.txt", "parent")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=parent_sha)
+        assert handle.path.is_dir()
+
     def test_accepts_genuine_new_commit(
         self, mgr: WorktreeManager, tmp_git_repo: Path
     ) -> None:
@@ -520,6 +563,26 @@ class TestVerifySafeToDiscard:
         with pytest.raises(WorktreeProvenanceError):
             mgr._verify_safe_to_discard(handle)
         assert handle.path.is_dir(), "Worktree must be retained when it has uncommitted changes"
+
+    def test_fails_closed_when_git_cannot_inspect_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Phase 1 review regression: when the worktree directory exists
+        but git cannot inspect it (broken/pruned .git linkage → rev-parse
+        rc=128), whether real work would be lost is UNKNOWN. Before the
+        fix both probes were silently skipped on nonzero returncode and
+        the caller proceeded to delete the directory — fail-open in a
+        fail-closed guard. Ambiguous state must raise and retain."""
+        handle = mgr.create(task_id="task-prov-broken", step_id="1.1", base_branch="main")
+        # Agent work that would be lost if the directory were deleted.
+        (handle.path / "wip.txt").write_text("uncommitted agent work", encoding="utf-8")
+        # Corrupt the worktree's git linkage so rev-parse/status fail.
+        (handle.path / ".git").write_text("gitdir: /nonexistent/broken", encoding="utf-8")
+
+        with pytest.raises(WorktreeProvenanceError, match="cannot be inspected"):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "uninspectable worktree must be retained"
+        assert (handle.path / "wip.txt").exists()
 
     def test_allows_genuinely_clean_worktree(
         self, mgr: WorktreeManager, tmp_git_repo: Path
