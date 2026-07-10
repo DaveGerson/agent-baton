@@ -118,6 +118,22 @@ class PlanDraft:
     # Populated by ValidationStage.  See ``planning.stages.validation.PlanDefect``.
     plan_defects: list = field(default_factory=list)
 
+    # --- Talent-factory lifecycle inputs/outputs ---
+    # See agent_baton.core.engine.planning.capability_gap and
+    # docs/internal/talent-factory-contract.md.
+    #
+    # ``skip_init``/``allow_talent_builder`` are inputs (caller-controlled
+    # policy overrides — CLI ``--skip-init`` and manager config
+    # ``team.allow_talent_builder`` respectively); defaults preserve
+    # pre-existing planner behavior (generation permitted, not skipped).
+    # ``capability_gaps``/``talent_lifecycle_decisions`` are outputs
+    # populated by RosterStage and surfaced on
+    # ``plan.plan_diagnostics["capability_gaps"]`` by AssemblyStage.
+    skip_init: bool = False
+    allow_talent_builder: bool = True
+    capability_gaps: list = field(default_factory=list)
+    talent_lifecycle_decisions: list = field(default_factory=list)
+
     @classmethod
     def from_inputs(
         cls,
@@ -133,6 +149,8 @@ class PlanDraft:
         intervention_level: str = "low",
         default_model: str | None = None,
         gate_scope: "GateScope" = "focused",
+        skip_init: bool = False,
+        allow_talent_builder: bool = True,
     ) -> "PlanDraft":
         """Build a fresh draft from create_plan kwargs."""
         return cls(
@@ -147,4 +165,6 @@ class PlanDraft:
             intervention_level=intervention_level,
             default_model=default_model,
             gate_scope=gate_scope,
+            skip_init=skip_init,
+            allow_talent_builder=allow_talent_builder,
         )

@@ -19,6 +19,10 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.core.engine.planning.capability_gap import (
+    decide_talent_lifecycle,
+    detect_missing_role_gap,
+)
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.rules.default_agents import (
     DEFAULT_AGENTS,
@@ -67,6 +71,7 @@ class RosterStage:
             )
             draft.resolved_agents = resolved_agents
             draft.agent_route_map = agent_route_map
+            self._detect_capability_gaps(draft, services=services)
             return draft
 
         # Step 4+4b — pattern lookup + bead hints.
@@ -119,11 +124,53 @@ class RosterStage:
         )
         draft.resolved_agents = resolved_agents
         draft.agent_route_map = agent_route_map
+        self._detect_capability_gaps(draft, services=services)
         return draft
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _detect_capability_gaps(
+        self,
+        draft: PlanDraft,
+        *,
+        services: PlannerServices,
+    ) -> None:
+        """Represent capability gaps for explicitly-requested agents.
+
+        Only fires for ``draft.agents`` (a caller explicitly named a role)
+        — the default/pattern/concern-expansion rosters only ever draw
+        from agent names the registry is known to have, so scanning them
+        here would be pure noise, not evidence.  See
+        agent_baton.core.engine.planning.capability_gap and
+        docs/internal/talent-factory-contract.md for the model this
+        implements.
+
+        Never mutates ``draft.resolved_agents`` — detection here is
+        diagnostic-only (surfaced via ``plan_diagnostics`` and routing
+        notes). Actually dispatching talent-builder generation from a
+        detected gap is a downstream execution-time concern, bounded by
+        the ``TalentLifecycleAction`` returned for each gap.
+        """
+        if not draft.agents:
+            return
+        known_base_names = {name.split("--", 1)[0] for name in services.registry.names}
+        for requested in draft.agents:
+            gap = detect_missing_role_gap(requested, known_agents=known_base_names)
+            if gap is None:
+                continue
+            decision = decide_talent_lifecycle(
+                gap,
+                allow_talent_builder=draft.allow_talent_builder,
+                skip_init=draft.skip_init,
+            )
+            draft.capability_gaps.append(gap)
+            draft.talent_lifecycle_decisions.append(decision)
+            draft.routing_notes.append(
+                f"capability gap: '{requested}' ({gap.kind.value}) -> "
+                f"{decision.action.value} ({decision.reason})"
+            )
 
     def _apply_pattern(
         self,

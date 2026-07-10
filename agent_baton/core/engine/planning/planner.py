@@ -146,6 +146,13 @@ def build_plan_diagnostics(
         "degraded_packs": degraded_packs,
         "docs_indexed": docs_indexed,
         "attachments_selected": knowledge_attachment_count,
+        # Preserved verbatim across re-diagnostics passes (e.g. goal-driven
+        # amend cycles) — this function doesn't re-run capability-gap
+        # detection, only RosterStage does. See capability_gap.py.
+        "capability_gaps": list(existing.get("capability_gaps", [])),
+        "talent_lifecycle_decisions": list(
+            existing.get("talent_lifecycle_decisions", [])
+        ),
     }
 
 
@@ -278,8 +285,18 @@ class IntelligentPlanner:
         intervention_level: str = "low",
         default_model: str | None = None,
         gate_scope: "GateScope" = "focused",
+        skip_init: bool = False,
+        allow_talent_builder: bool = True,
     ) -> "MachinePlan":
-        """Build a complete plan by running the seven-stage pipeline."""
+        """Build a complete plan by running the seven-stage pipeline.
+
+        ``skip_init`` and ``allow_talent_builder`` control the talent-factory
+        lifecycle for any capability gap detected during planning (see
+        ``agent_baton.core.engine.planning.capability_gap`` and
+        docs/internal/talent-factory-contract.md). Defaults preserve prior
+        planner behavior — generation is permitted, nothing is skipped —
+        so existing callers are unaffected until they opt in.
+        """
         from agent_baton.core.observability import current_exporter
         from datetime import datetime, timezone
 
@@ -297,6 +314,8 @@ class IntelligentPlanner:
             explicit_knowledge_packs=explicit_knowledge_packs,
             explicit_knowledge_docs=explicit_knowledge_docs,
             intervention_level=intervention_level,
+            skip_init=skip_init,
+            allow_talent_builder=allow_talent_builder,
             default_model=default_model,
             gate_scope=gate_scope,
         )
