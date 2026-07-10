@@ -205,3 +205,47 @@ class TeamRegistry:
                 "TeamRegistry.set_status failed for (%s, %s): %s",
                 task_id, team_id, exc,
             )
+
+    def set_status_if(
+        self,
+        task_id: str,
+        team_id: str,
+        *,
+        expected_status: str,
+        status: str,
+    ) -> bool:
+        """Conditionally transition a team's status (optimistic concurrency).
+
+        Only applies the write when the row's CURRENT ``status`` equals
+        *expected_status* — a compare-and-swap guard expressed as a single
+        ``UPDATE ... WHERE status = ?`` so the check-then-set is atomic
+        within SQLite's own statement execution (no separate read
+        round-trip to race against). Used by the team-level synthesis
+        state machine (see ``docs/internal/team-runtime-contract.md``
+        §Synthesis State Machine) to guard against two concurrent
+        synthesis drivers double-transitioning the same team.
+
+        Returns:
+            ``True`` if the row existed, matched *expected_status*, and was
+            updated. ``False`` on any other outcome (missing table, missing
+            row, or a stale/mismatched *expected_status* — the caller
+            should treat ``False`` as "someone else already moved this
+            team" and re-read before retrying).
+        """
+        if not self._table_exists():
+            return False
+        try:
+            conn = self._conn()
+            cursor = conn.execute(
+                "UPDATE teams SET status = ? "
+                "WHERE task_id = ? AND team_id = ? AND status = ?",
+                (status, task_id, team_id, expected_status),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as exc:
+            _log.warning(
+                "TeamRegistry.set_status_if failed for (%s, %s): %s",
+                task_id, team_id, exc,
+            )
+            return False

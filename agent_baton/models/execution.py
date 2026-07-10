@@ -255,6 +255,73 @@ class SynthesisSpec(PlanModel):
         return self.model_dump(mode="python")
 
 
+class SynthesisState(str, Enum):
+    """Lifecycle of merging a team step's member outcomes into one result.
+
+    Typed vocabulary for the synthesis state machine designed in
+    ``docs/internal/team-runtime-contract.md`` §Synthesis State Machine.
+    Defined here as the shared contract type; wiring it into persisted
+    ``StepResult``/executor state is a follow-up implementation step (this
+    enum and :data:`SYNTHESIS_STATE_TRANSITIONS` are the design artifact,
+    not yet consulted by the executor).
+
+    States:
+        PENDING: Team step dispatched; no member outcomes collected yet.
+        COLLECTING: At least one, but not all required, member outcomes
+            have been recorded.
+        READY: All required member outcomes (respecting ``depends_on``)
+            are in; synthesis has not started.
+        SYNTHESIZING: Merge strategy is running — ``concatenate``/
+            ``merge_files`` execute synchronously into this state and
+            fall through; ``agent_synthesis`` dispatches a synthesis
+            agent and stays here until that agent completes.
+        VERIFYING: Merge output is produced; routed through the same
+            scope/commit/evidence verification pipeline non-team steps
+            use (Phase 3) before being accepted as the step result.
+        SYNTHESIZED: Terminal success — verified merge output accepted
+            as the step's ``StepResult``.
+        ESCALATED: ``conflict_handling="escalate"`` detected a conflict;
+            waiting on an APPROVAL decision naming the resolution.
+        FAILED: Terminal failure — ``conflict_handling="fail"`` tripped,
+            verification rejected the merge, or a member outcome was
+            itself ``"failed"`` with no recovery path.
+    """
+
+    PENDING = "pending"
+    COLLECTING = "collecting"
+    READY = "ready"
+    SYNTHESIZING = "synthesizing"
+    VERIFYING = "verifying"
+    SYNTHESIZED = "synthesized"
+    ESCALATED = "escalated"
+    FAILED = "failed"
+
+
+# Valid forward transitions for each SynthesisState. SYNTHESIZED and FAILED
+# are terminal (empty transition sets). ESCALATED can only resume into
+# SYNTHESIZING (the lead re-runs synthesis after a human/decision resolves
+# the conflict) or terminate into FAILED (resolution was "abandon").
+SYNTHESIS_STATE_TRANSITIONS: dict["SynthesisState", frozenset["SynthesisState"]] = {
+    SynthesisState.PENDING: frozenset({SynthesisState.COLLECTING}),
+    SynthesisState.COLLECTING: frozenset({SynthesisState.READY, SynthesisState.FAILED}),
+    SynthesisState.READY: frozenset({SynthesisState.SYNTHESIZING, SynthesisState.FAILED}),
+    SynthesisState.SYNTHESIZING: frozenset({
+        SynthesisState.VERIFYING, SynthesisState.ESCALATED, SynthesisState.FAILED,
+    }),
+    SynthesisState.VERIFYING: frozenset({
+        SynthesisState.SYNTHESIZED, SynthesisState.ESCALATED, SynthesisState.FAILED,
+    }),
+    SynthesisState.ESCALATED: frozenset({SynthesisState.SYNTHESIZING, SynthesisState.FAILED}),
+    SynthesisState.SYNTHESIZED: frozenset(),
+    SynthesisState.FAILED: frozenset(),
+}
+
+
+def is_valid_synthesis_transition(frm: "SynthesisState", to: "SynthesisState") -> bool:
+    """Return True when *frm* -> *to* is an allowed synthesis-state edge."""
+    return to in SYNTHESIS_STATE_TRANSITIONS.get(frm, frozenset())
+
+
 class TeamMember(PlanModel):
     """A member of a coordinated agent team within a step.
 

@@ -41,6 +41,17 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+class TeamBoardConflictError(Exception):
+    """Raised by :meth:`TeamBoard.claim_task` when an optimistic-concurrency
+    claim (``expected_status="open"``) loses a race to another member, or
+    when the target bead does not exist / is not a task.
+
+    Only raised when the caller opts into concurrency checking; the legacy
+    ``expected_status=None`` call shape keeps the original last-writer-wins
+    behavior and never raises this.
+    """
+
+
 class TeamBoard:
     """Facade over :class:`BeadStore` for team messages and shared tasks.
 
@@ -188,8 +199,25 @@ class TeamBoard:
         title: str,
         detail: str = "",
         parent_task_bead_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
-        """Write an ``open`` ``task`` bead and return its ``bead_id``."""
+        """Write an ``open`` ``task`` bead and return its ``bead_id``.
+
+        When *idempotency_key* is provided, a prior call with the same
+        ``(team_id, idempotency_key)`` pair is detected (tag
+        ``idem=<key>``) and its existing ``bead_id`` is returned instead of
+        writing a duplicate task — safe for callers that retry a
+        create-task request after an ambiguous failure (e.g. timeout with
+        unknown outcome).
+        """
+        if idempotency_key:
+            existing = self._store.query(
+                task_id=task_id, bead_type="task",
+                tags=[f"team={team_id}", f"idem={idempotency_key}"],
+                limit=1,
+            )
+            if existing:
+                return existing[0].bead_id
         now = _utcnow()
         content = f"{title}\n\n{detail}" if detail else title
         tags = [
@@ -198,6 +226,8 @@ class TeamBoard:
         ]
         if parent_task_bead_id:
             tags.append(f"parent_task={parent_task_bead_id}")
+        if idempotency_key:
+            tags.append(f"idem={idempotency_key}")
         bead_count = self._count()
         bead_id = _generate_bead_id(task_id, "team-board", content, now, bead_count)
         bead = Bead(
@@ -221,18 +251,52 @@ class TeamBoard:
         task_id: str,
         task_bead_id: str,
         member_id: str,
+        expected_status: str | None = None,
     ) -> None:
         """Add a ``claimed_by=<member_id>`` tag to a ``task`` bead.
 
         Uses the :class:`BeadStore.write` INSERT-OR-REPLACE semantics so
-        the bead is updated in place while preserving ``created_at``.  If
-        the bead is already claimed by a different member, the existing
-        tag is replaced — last-writer-wins.
+        the bead is updated in place while preserving ``created_at``.
+
+        Concurrency modes (default preserves the original behavior):
+
+        - ``expected_status=None`` (default) — legacy last-writer-wins.
+          The existing ``claimed_by`` tag (if any) is silently replaced,
+          regardless of who held it.  Used by reassignment flows (e.g. a
+          lead reassigning a stalled task) and by the legacy
+          ``team_claim_task`` tool.
+        - ``expected_status="open"`` — optimistic concurrency.  Raises
+          :class:`TeamBoardConflictError` if the task is already claimed
+          by a *different* member.  Re-claiming a task already claimed by
+          the SAME member is a no-op success (idempotent retry).  Used by
+          the canonical ``team_claim`` tool — see
+          ``docs/internal/team-runtime-contract.md``.
+
+        Raises:
+            TeamBoardConflictError: *task_bead_id* does not exist, is not
+                a ``task`` bead, or (in ``expected_status="open"`` mode)
+                is already claimed by someone else.
         """
         bead = self._store.read(task_bead_id)
         if bead is None or bead.bead_type != "task":
             _log.warning("claim_task: bead %s missing or not a task", task_bead_id)
-            return
+            raise TeamBoardConflictError(
+                f"Task {task_bead_id!r} not found or not a task bead."
+            )
+        existing_claim = next(
+            (t.split("=", 1)[1] for t in bead.tags if t.startswith("claimed_by=")),
+            None,
+        )
+        if (
+            expected_status == "open"
+            and existing_claim is not None
+            and existing_claim != member_id
+        ):
+            raise TeamBoardConflictError(
+                f"Task {task_bead_id!r} is already claimed by "
+                f"{existing_claim!r}; {member_id!r} cannot claim it while "
+                "expected_status='open' (optimistic concurrency)."
+            )
         # Strip any existing claimed_by tag before adding the new one.
         new_tags = [t for t in bead.tags if not t.startswith("claimed_by=")]
         new_tags.append(f"claimed_by={member_id}")
@@ -278,6 +342,25 @@ class TeamBoard:
             elif f"claimed_by={member_id}" in claimed:
                 out.append(t)
         return out
+
+    def done_tasks_for_team(
+        self,
+        *,
+        task_id: str,
+        team_id: str,
+        limit: int = 100,
+    ) -> list[Bead]:
+        """Return closed (``status="done"``) ``task`` beads scoped to *team_id*.
+
+        Companion to :meth:`open_tasks_for_team` (which only ever returns
+        store-status ``open`` beads) — used by the ``team_list`` tool's
+        ``status="done"`` filter so completed work stays visible in the
+        audit trail without being mixed into the default open/claimed view.
+        """
+        return self._store.query(
+            task_id=task_id, bead_type="task", status="closed",
+            tags=[f"team={team_id}"], limit=limit,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
