@@ -623,3 +623,128 @@ class TestDecisionResolveIdempotency:
         resolution = dm.get_resolution(req.request_id)
         assert resolution is not None
         assert resolution["chosen_option"] == "approve"
+
+
+# ===========================================================================
+# Duplicate approval submission against a real, engine-backed decision
+#
+# TestDecisionResolveIdempotency (above) proves the DecisionManager-level
+# double-resolve guard in isolation. This class proves the guard holds for
+# the actual production shape: a decision tied to a real ExecutionEngine
+# via the deterministic request_id (§4's "apply + resume" path), where a
+# duplicate submission racing behind the first must be rejected BEFORE the
+# apply-to-engine / spawn-headless-resume side effects run a second time --
+# not just before the DecisionManager resolution file is overwritten.
+# ===========================================================================
+
+
+class TestDuplicateApprovalSubmissionAgainstEngine:
+    def _build_single_phase_execution_awaiting_approval(self, tmp_root: Path):
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
+
+        plan = MachinePlan(
+            task_id="dup-approval-task",
+            task_summary="duplicate approval submission test",
+            phases=[
+                PlanPhase(
+                    phase_id=1, name="P1", approval_required=True,
+                    steps=[PlanStep(step_id="1.1", agent_name="backend", task_description="x")],
+                ),
+            ],
+        )
+        engine = ExecutionEngine(team_context_root=tmp_root, task_id=plan.task_id)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend", status="complete")
+        action = engine.next_action()
+        assert action.action_type.value == "approval", action.action_type
+        return plan
+
+    def test_duplicate_submission_rejected_before_reapplying_to_engine_or_respawning(
+        self, tmp_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from agent_baton.core.engine.executor import ExecutionEngine
+        from agent_baton.core.events.bus import EventBus
+        from agent_baton.core.runtime.decisions import deterministic_decision_id
+        from agent_baton.models.decision import DecisionRequest
+
+        bus = EventBus()
+        app = create_app(team_context_root=tmp_root, bus=bus)
+        client = TestClient(app)
+        dm = DecisionManager(decisions_dir=tmp_root / "decisions", bus=bus)
+
+        plan = self._build_single_phase_execution_awaiting_approval(tmp_root)
+        request_id = deterministic_decision_id(plan.task_id, "approval", 1)
+        dm.request(DecisionRequest(
+            request_id=request_id, task_id=plan.task_id,
+            decision_type="phase_approval", summary="approve please",
+            options=["approve", "reject"],
+        ))
+
+        resolved_events: list[dict] = []
+        bus.subscribe(
+            "human.decision_resolved",
+            lambda event: resolved_events.append(event.payload),
+        )
+
+        popen_calls: list = []
+
+        def _fake_popen(cmd, **kwargs):
+            popen_calls.append({"cmd": cmd, "kwargs": kwargs})
+            return MagicMock(pid=999)
+
+        monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+        # --- First submission (the real reviewer): applies to the engine
+        # and spawns a headless resume. ---
+        first = client.post(
+            f"/api/v1/decisions/{request_id}/resolve",
+            json={"option": "approve", "resolved_by": "reviewer-a"},
+        )
+        assert first.status_code == 200
+        assert first.json()["execution_resumed"] is True
+
+        engine = ExecutionEngine(team_context_root=tmp_root, task_id=plan.task_id)
+        status_after_first = engine.status()
+        assert status_after_first["status"] != "approval_pending"
+        state_after_first = engine._load_execution()
+        assert state_after_first is not None
+        approvals_after_first = list(state_after_first.approval_results)
+        assert len(approvals_after_first) == 1
+        assert approvals_after_first[0].result == "approve"
+
+        resume_spawns_after_first = [
+            c for c in popen_calls if any("agent_baton" in str(a) for a in c["cmd"])
+        ]
+        assert len(resume_spawns_after_first) == 1
+
+        # --- Second, duplicate submission (a racing second reviewer, or a
+        # retried client request) with a DIFFERENT decision: must be
+        # rejected outright. ---
+        second = client.post(
+            f"/api/v1/decisions/{request_id}/resolve",
+            json={"option": "reject", "resolved_by": "reviewer-b"},
+        )
+        assert second.status_code == 400
+
+        # The engine must not have been touched a second time: no new
+        # ApprovalResult, no status regression, no second headless resume
+        # subprocess spawned.
+        state_after_second = engine._load_execution()
+        assert state_after_second is not None
+        assert state_after_second.approval_results == approvals_after_first
+
+        resume_spawns_after_second = [
+            c for c in popen_calls if any("agent_baton" in str(a) for a in c["cmd"])
+        ]
+        assert len(resume_spawns_after_second) == 1, (
+            "duplicate submission must not spawn a second headless resume"
+        )
+
+        # The human_decision_resolved event fired exactly once, carrying
+        # the WINNING (first) resolution.
+        assert len(resolved_events) == 1
+        assert resolved_events[0]["chosen_option"] == "approve"
+        assert resolved_events[0]["resolved_by"] == "reviewer-a"

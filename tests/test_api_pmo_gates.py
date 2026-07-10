@@ -15,6 +15,9 @@ Strategy:
 """
 from __future__ import annotations
 
+import argparse
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -30,9 +33,12 @@ from agent_baton.api.deps import (  # noqa: E402
     get_pmo_store,
 )
 from agent_baton.api.server import create_app  # noqa: E402
+from agent_baton.core.engine.executor import ExecutionEngine  # noqa: E402
 from agent_baton.core.events.bus import EventBus  # noqa: E402
 from agent_baton.core.pmo.scanner import PmoScanner  # noqa: E402
 from agent_baton.core.pmo.store import PmoStore  # noqa: E402
+from agent_baton.core.runtime.decisions import DecisionManager, deterministic_decision_id  # noqa: E402
+from agent_baton.models.decision import DecisionRequest  # noqa: E402
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep  # noqa: E402
 from agent_baton.models.pmo import PmoCard, PmoProject  # noqa: E402
 
@@ -805,3 +811,253 @@ class TestApprovalExceptionMapping:
             assert field in body, f"Missing required field: {field}"
         assert isinstance(body["message"], str) and body["message"]
         assert isinstance(body["details"], dict)
+
+
+# ===========================================================================
+# PMO cross-surface lifecycle: execute -> pause -> API-approve -> resume ->
+# complete
+#
+# docs/internal/execution-runtime-contract.md §6 (the pause-and-resume
+# contract) + §7.2's PMO-launch model: `POST /pmo/execute/{card_id}` spawns
+# a headless `baton execute run` subprocess; `POST .../pause` and
+# `.../resume` send real SIGSTOP/SIGCONT to that worker process and must
+# NOT mutate persisted ExecutionState (durability is emergent from "state
+# is saved at the last completed engine call", not from the OS pause
+# itself); `POST .../decisions/{id}/resolve` is the API-approve step, which
+# applies the resolution to the engine and spawns a headless resume
+# subprocess. This test exercises the pause/resume endpoints against a
+# REAL signalled process (not mocked) and the resolve endpoint against a
+# REAL resume that is allowed to run inline (subprocess.Popen replaced with
+# a same-process, in-process invocation of the exact same canonical runner
+# a real subprocess would exec) so the full chain -- including reaching
+# COMPLETE -- is genuinely exercised end to end.
+# ===========================================================================
+
+
+class TestPmoExecuteToPauseToApiApproveToResumeToComplete:
+    def _context_root(self, project_root: Path) -> Path:
+        return project_root / ".claude" / "team-context"
+
+    def _seed_awaiting_approval_execution(
+        self, project_root: Path, task_id: str,
+    ) -> MachinePlan:
+        """Simulate a headless `baton execute run` subprocess that already
+        ran step 1.1, hit the phase's approval requirement, recorded a
+        durable decision request, and exited (the "execute" + emergent
+        "pause" per contract §6). A single phase with no further work means
+        approving completes the execution immediately -- no second
+        subprocess round trip needed to observe COMPLETE."""
+        plan = MachinePlan(
+            task_id=task_id,
+            task_summary="PMO full-lifecycle test",
+            phases=[
+                PlanPhase(
+                    phase_id=1, name="Implementation", approval_required=True,
+                    steps=[PlanStep(step_id="1.1", agent_name="backend", task_description="x")],
+                ),
+            ],
+        )
+        context_root = self._context_root(project_root)
+        engine = ExecutionEngine(team_context_root=context_root, task_id=task_id)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend", status="complete")
+        action = engine.next_action()
+        assert action.action_type.value == "approval", action.action_type
+        return plan
+
+    def test_full_lifecycle_pause_approve_resume_complete(
+        self,
+        tmp_path: Path,
+        registered_store: PmoStore,
+        project_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        card = _awaiting_card(task_id="pmo-lifecycle-task")
+        plan = self._seed_awaiting_approval_execution(project_root, card.card_id)
+        context_root = self._context_root(project_root)
+
+        request_id = deterministic_decision_id(card.card_id, "approval", 1)
+        dm = DecisionManager(decisions_dir=context_root / "decisions")
+        dm.request(DecisionRequest(
+            request_id=request_id, task_id=card.card_id,
+            decision_type="phase_approval", summary="approve please",
+            options=["approve", "reject"],
+        ))
+
+        client = _make_app(tmp_path, registered_store, [card])
+
+        # --- 1) "execute" already happened (seeded above); persisted
+        # status is approval_pending before we touch pause/resume. ---
+        status_before_pause = ExecutionEngine(
+            team_context_root=context_root, task_id=card.card_id,
+        ).status()
+        assert status_before_pause["status"] == "approval_pending"
+
+        # --- 2) pause: a REAL worker process (standing in for the headless
+        # `baton execute run` subprocess) is signalled via the real PMO
+        # pause endpoint. ---
+        worker_proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"]
+        )
+        try:
+            exec_dir = context_root / "executions" / card.card_id
+            exec_dir.mkdir(parents=True, exist_ok=True)
+            (exec_dir / "worker.pid").write_text(str(worker_proc.pid))
+
+            r_pause = client.post(f"/api/v1/pmo/execute/{card.card_id}/pause")
+            assert r_pause.status_code == 200, r_pause.text
+            assert r_pause.json()["status"] == "paused"
+
+            # Persisted execution status must be UNCHANGED by the OS-level
+            # pause -- proves §6's "pause is not a status value" contract.
+            status_during_pause = ExecutionEngine(
+                team_context_root=context_root, task_id=card.card_id,
+            ).status()
+            assert status_during_pause["status"] == "approval_pending"
+
+            # --- 3) resume (OS-level, pre-approval): unfreezes the process;
+            # still must not touch persisted status. ---
+            r_resume = client.post(f"/api/v1/pmo/execute/{card.card_id}/resume")
+            assert r_resume.status_code == 200, r_resume.text
+            assert r_resume.json()["status"] == "running"
+
+            status_after_os_resume = ExecutionEngine(
+                team_context_root=context_root, task_id=card.card_id,
+            ).status()
+            assert status_after_os_resume["status"] == "approval_pending"
+        finally:
+            worker_proc.terminate()
+            worker_proc.wait(timeout=5)
+
+        # --- 4) API-approve: resolve the durable decision through the
+        # PMO decision-inbox endpoint. The headless resume subprocess this
+        # spawns is replaced with an in-process invocation of the exact
+        # same canonical runner (`_handle_run`) a real subprocess would
+        # exec, so completion is genuinely driven, not asserted by fiat. ---
+        popen_calls: list[dict] = []
+
+        def _fake_popen(cmd, **kwargs):
+            popen_calls.append({"cmd": cmd, "kwargs": kwargs})
+            from agent_baton.cli.commands.execution.execute import _handle_run
+
+            task_id_arg = cmd[cmd.index("--task-id") + 1]
+            args = argparse.Namespace(
+                subcommand="run",
+                plan=str(context_root / "plan.json"),
+                model="sonnet",
+                max_steps=50,
+                dry_run=False,
+                task_id=task_id_arg,
+                output="text",
+                token_budget=0,
+            )
+            with patch(
+                "agent_baton.cli.commands.execution.execute._resolve_context_root",
+                return_value=context_root,
+            ), patch(
+                "agent_baton.core.runtime.claude_launcher.ClaudeCodeLauncher",
+                MagicMock(),
+            ):
+                _handle_run(args)
+            return MagicMock(pid=54321)
+
+        monkeypatch.setattr("subprocess.Popen", _fake_popen)
+
+        r_resolve = client.post(
+            f"/api/v1/pmo/execute/{card.card_id}/decisions/{request_id}/resolve",
+            json={"option": "approve"},
+        )
+        assert r_resolve.status_code == 200, r_resolve.text
+        body = r_resolve.json()
+        assert body["resolved"] is True
+        assert body["execution_resumed"] is True, body
+
+        resume_calls = [
+            c for c in popen_calls if any("agent_baton" in str(a) for a in c["cmd"])
+        ]
+        assert resume_calls, "expected a headless resume subprocess for this card"
+
+        # --- 5) complete: the in-process "subprocess" call above must have
+        # driven the single-phase plan all the way to COMPLETE. ---
+        final_status = ExecutionEngine(
+            team_context_root=context_root, task_id=card.card_id,
+        ).status()
+        assert final_status["status"] == "complete"
+
+        # The approval was applied exactly once.
+        final_state = ExecutionEngine(
+            team_context_root=context_root, task_id=card.card_id,
+        )._load_execution()
+        assert final_state is not None
+        assert len(final_state.approval_results) == 1
+        assert final_state.approval_results[0].result == "approve"
+
+        # The decision itself resolved exactly once.
+        resolved_req = dm.get(request_id)
+        assert resolved_req is not None
+        assert resolved_req.status == "resolved"
+
+    def test_duplicate_approval_submission_is_rejected_and_does_not_re_resume(
+        self,
+        tmp_path: Path,
+        registered_store: PmoStore,
+        project_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second, duplicate approval submission for the same decision
+        (e.g. two reviewers racing on the PMO decision inbox) must be
+        rejected outright and must not spawn a second headless resume nor
+        re-apply the resolution to the engine."""
+        card = _awaiting_card(task_id="pmo-duplicate-approval-task")
+        self._seed_awaiting_approval_execution(project_root, card.card_id)
+        context_root = self._context_root(project_root)
+
+        request_id = deterministic_decision_id(card.card_id, "approval", 1)
+        dm = DecisionManager(decisions_dir=context_root / "decisions")
+        dm.request(DecisionRequest(
+            request_id=request_id, task_id=card.card_id,
+            decision_type="phase_approval", summary="approve please",
+            options=["approve", "reject"],
+        ))
+
+        client = _make_app(tmp_path, registered_store, [card])
+
+        popen_calls: list = []
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *a, **k: popen_calls.append((a, k)) or MagicMock(pid=1),
+        )
+
+        first = client.post(
+            f"/api/v1/pmo/execute/{card.card_id}/decisions/{request_id}/resolve",
+            json={"option": "approve"},
+        )
+        assert first.status_code == 200
+
+        state_after_first = ExecutionEngine(
+            team_context_root=context_root, task_id=card.card_id,
+        )._load_execution()
+        assert state_after_first is not None
+        approvals_after_first = list(state_after_first.approval_results)
+
+        popen_calls.clear()
+        second = client.post(
+            f"/api/v1/pmo/execute/{card.card_id}/decisions/{request_id}/resolve",
+            json={"option": "reject"},
+        )
+        assert second.status_code == 400
+
+        # The engine state must be exactly what the FIRST call produced --
+        # the duplicate submission must not re-apply or flip the decision.
+        state_after_second = ExecutionEngine(
+            team_context_root=context_root, task_id=card.card_id,
+        )._load_execution()
+        assert state_after_second is not None
+        assert state_after_second.approval_results == approvals_after_first
+
+        # No second headless resume subprocess was spawned for the
+        # rejected duplicate.
+        resume_calls = [
+            c for c in popen_calls if any("agent_baton" in str(a) for a in c[0][0])
+        ]
+        assert resume_calls == []

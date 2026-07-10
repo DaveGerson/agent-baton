@@ -22,6 +22,7 @@ These tests pin the resume contract:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ from agent_baton.cli.commands.execution import execute as _mod
 from agent_baton.cli.commands.execution.execute import _handle_run
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
+from agent_baton.core.runtime.decisions import DecisionManager, deterministic_decision_id
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -552,6 +554,135 @@ class TestNonTtyApprovalSafety:
         assert all(a.result != "reject" for a in final.approval_results)
         # Status must NOT be "failed" — the prior bug set it via reject.
         assert final.status != "failed"
+
+
+# ===========================================================================
+# Non-TTY approval pause is durable across a process boundary and completes
+# exactly once
+#
+# This is the central behavioral contract for Phase 2, step 2.3
+# (docs/internal/execution-runtime-contract.md §5, §6, §8's "Compat: two
+# decision systems" row): a task paused on a non-TTY approval prompt must
+# (1) leave persisted execution AND decision state untouched across the
+# process exit, (2) not duplicate the pending decision if re-invoked before
+# it is resolved, (3) pick up and apply a resolution supplied through ANY
+# other supported surface (here: the DecisionManager directly, the same
+# object the REST API's /decisions/{id}/resolve route and the PMO decision
+# inbox both delegate to) without asking again, and (4) complete exactly
+# once -- a further invocation after completion must refuse to restart.
+# ===========================================================================
+
+class TestNonTtyApprovalPauseSurvivesRestartAndCompletesOnce:
+    def _dm(self, tmp_path: Path) -> DecisionManager:
+        return DecisionManager(decisions_dir=tmp_path / "decisions")
+
+    @contextlib.contextmanager
+    def _non_tty_run_patches(self, tmp_path: Path):
+        """All patches needed for one non-TTY `_handle_run` invocation,
+        as a single reusable context manager (each call mints fresh
+        `patch(...)` objects, so this may be invoked more than once per
+        test to simulate successive process boundaries)."""
+        with contextlib.ExitStack() as stack:
+            for cm in _patches_for_run(tmp_path):
+                stack.enter_context(cm)
+            stack.enter_context(patch("sys.stdin.isatty", return_value=False))
+            stack.enter_context(patch(
+                "agent_baton.core.runtime.claude_launcher.ClaudeCodeLauncher",
+                MagicMock(),
+            ))
+            yield
+
+    def test_pause_persists_then_resolves_via_decision_manager_then_completes_once(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(_APPROVAL_PLAN), encoding="utf-8")
+        _seed_partial_state(
+            context_root=tmp_path,
+            plan_dict=_APPROVAL_PLAN,
+            completed_step_ids=["1.1"],
+            approvals=[],
+            status="running",
+        )
+
+        task_id = _APPROVAL_PLAN["task_id"]
+        args = _make_args(str(plan_path), task_id=None, dry_run=False)
+        dm = self._dm(tmp_path)
+        request_id = deterministic_decision_id(task_id, "approval", 1)
+
+        before = StatePersistence(tmp_path, task_id=task_id).load()
+        assert before is not None
+        assert before.status == "running"
+
+        # --- 1) First process: no TTY, no recorded decision -> must pause
+        # durably (non-zero exit) WITHOUT mutating execution state beyond
+        # the (state-machine-owned) approval_pending transition, and must
+        # record a durable decision request other surfaces can see. ---
+        with self._non_tty_run_patches(tmp_path), pytest.raises(SystemExit) as exc1:
+            _handle_run(args)
+        assert exc1.value.code != 0
+
+        after_pause = StatePersistence(tmp_path, task_id=task_id).load()
+        assert after_pause is not None
+        assert after_pause.status == "approval_pending"
+        assert after_pause.approval_results == []
+
+        pending = dm.get(request_id)
+        assert pending is not None
+        assert pending.status == "pending"
+
+        # --- 2) A second process boundary before resolution: re-invoking
+        # must pause again (not silently reject / not silently complete)
+        # and must NOT duplicate the pending decision request. ---
+        with self._non_tty_run_patches(tmp_path), pytest.raises(SystemExit) as exc2:
+            _handle_run(args)
+        assert exc2.value.code != 0
+
+        still_pending = dm.get(request_id)
+        assert still_pending is not None
+        assert still_pending.status == "pending"
+        assert [r.request_id for r in dm.pending()] == [request_id]
+
+        unchanged = StatePersistence(tmp_path, task_id=task_id).load()
+        assert unchanged is not None
+        assert unchanged.status == "approval_pending"
+        assert unchanged.approval_results == []
+
+        # --- 3) The decision is answered through a DIFFERENT surface --
+        # directly via DecisionManager, mirroring what the REST API and
+        # the PMO decision inbox both ultimately call. ---
+        resolved = dm.resolve(
+            request_id=request_id, chosen_option="approve", rationale="lgtm",
+        )
+        assert resolved is True
+
+        # --- 4) Re-invoking `_handle_run` (still non-TTY, still a brand
+        # new process) must apply the durable resolution exactly once and
+        # drive the (single-phase) plan to COMPLETE without prompting
+        # again. ---
+        with self._non_tty_run_patches(tmp_path):
+            _handle_run(args)
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "COMPLETE" in out
+
+        final = StatePersistence(tmp_path, task_id=task_id).load()
+        assert final is not None
+        assert final.status == "complete"
+        assert len(final.approval_results) == 1
+        assert final.approval_results[0].result == "approve"
+
+        # --- 5) A further invocation must refuse to restart the now-
+        # terminal task -- "complete once, and only once". ---
+        with self._non_tty_run_patches(tmp_path), pytest.raises(SystemExit) as exc4:
+            _handle_run(args)
+        assert exc4.value.code != 0
+
+        final_after = StatePersistence(tmp_path, task_id=task_id).load()
+        assert final_after is not None
+        assert final_after.status == "complete"
+        assert len(final_after.approval_results) == 1
 
 
 # ---------------------------------------------------------------------------

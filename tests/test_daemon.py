@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -830,6 +831,125 @@ class TestSharedLifecycleContract:
         direct_complete_ids = {r.step_id for r in direct_state.step_results if r.status == "complete"}
         worker_complete_ids = {r.step_id for r in worker_state.step_results if r.status == "complete"}
         assert direct_complete_ids == worker_complete_ids == {"1.1", "1.2"}
+
+
+# ===========================================================================
+# Daemon restart while a decision is pending
+#
+# docs/internal/execution-runtime-contract.md §5 (restart semantics) + §7.1
+# (no duplicate-call guard on record_step_result -- the mid-dispatch gap)
+# describe a worker crash as the one blind spot in "state is durable at
+# every transition boundary": a step left `dispatched` on a crash is stuck
+# until an operator (or WorkerSupervisor.start(resume=True)) clears it. This
+# test drives a real crash-and-restart across a human-required gate: the
+# first worker creates the durable decision request and then "dies" (its
+# asyncio task is cancelled) before the decision is resolved; a brand-new
+# engine + worker pair -- exactly what WorkerSupervisor.start(resume=True)
+# constructs -- must resume without duplicating the pending decision, and
+# the task must reach COMPLETE exactly once after the (single) decision is
+# eventually resolved.
+# ===========================================================================
+
+class TestDaemonRestartWithPendingDecision:
+    def test_worker_crash_while_gate_pending_then_restart_completes_once(
+        self, tmp_path: Path,
+    ) -> None:
+        from agent_baton.core.events.bus import EventBus
+
+        task_id = "restart-pending-decision-task"
+        plan = _plan(
+            task_id=task_id,
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], gate=_gate("review")),
+                _phase(phase_id=1, steps=[_step("2.1", agent="tester")]),
+            ],
+        )
+        decisions_dir = tmp_path / "decisions"
+        bus = EventBus()
+        dm = DecisionManager(decisions_dir=decisions_dir, bus=bus)
+
+        needed_events: list[dict] = []
+        bus.subscribe(
+            "human.decision_needed",
+            lambda event: needed_events.append(event.payload),
+        )
+
+        async def _run() -> str:
+            # --- "Crash" worker: reaches the review gate, records the
+            # durable decision request, then the process dies (the
+            # asyncio task is cancelled) before anyone resolves it. ---
+            engine1 = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            engine1.start(plan)
+            worker1 = TaskWorker(
+                engine=engine1, launcher=DryRunLauncher(), decision_manager=dm, bus=bus,
+            )
+            worker1_task = asyncio.create_task(worker1.run())
+            for _ in range(100):
+                if dm.pending():
+                    break
+                await asyncio.sleep(0.02)
+            assert dm.pending(), "worker1 should have created a pending gate decision"
+            pending_before_crash = dm.pending()[0]
+
+            worker1_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker1_task
+
+            # The crash must not have silently mutated state: the task is
+            # still waiting on the gate, not failed/complete.
+            crashed_status = engine1.status().get("status")
+            assert crashed_status not in ("complete", "failed", "cancelled"), crashed_status
+            # Exactly one decision request exists so far -- crashing did
+            # not spawn a second one.
+            assert len(dm.list_all()) == 1
+            assert len(needed_events) == 1
+
+            # --- "Restart": WorkerSupervisor.start(resume=True) would
+            # build exactly this pair -- a fresh engine that resumes from
+            # disk and clears any stuck `dispatched` steps, plus a fresh
+            # worker sharing the SAME DecisionManager (same decisions_dir
+            # on disk -- the durable queue every surface reads). ---
+            engine2 = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            engine2.resume()
+            engine2.recover_dispatched_steps()
+            launcher2 = DryRunLauncher()
+            worker2 = TaskWorker(
+                engine=engine2, launcher=launcher2, decision_manager=dm, bus=bus,
+            )
+
+            async def _resolve_after_reentry() -> None:
+                # The restarted worker re-enters the same gate. The
+                # deterministic request_id must make it reuse the SAME
+                # pending request rather than mint a duplicate.
+                for _ in range(100):
+                    if dm.pending():
+                        break
+                    await asyncio.sleep(0.02)
+                assert len(dm.pending()) == 1, "restart must not duplicate the pending decision"
+                assert dm.pending()[0].request_id == pending_before_crash.request_id
+                dm.resolve(dm.pending()[0].request_id, chosen_option="approve")
+
+            resolver_task = asyncio.create_task(_resolve_after_reentry())
+            results = await asyncio.gather(resolver_task, worker2.run())
+            return results[1]
+
+        summary = asyncio.run(_run())
+        assert "complete" in summary.lower()
+
+        # Exactly one decision request/resolution ever existed for this
+        # gate across the crash + restart -- no duplicate -- and the
+        # human_decision_needed event fired exactly once (the restarted
+        # worker found the pending request already on disk and did not
+        # re-publish it).
+        all_decisions = dm.list_all()
+        assert len(all_decisions) == 1
+        assert all_decisions[0].status == "resolved"
+        assert len(needed_events) == 1
+
+        final_status = ExecutionEngine(
+            team_context_root=tmp_path, task_id=task_id,
+        ).status()
+        assert final_status.get("status") == "complete"
 
 
 # ===========================================================================
