@@ -131,3 +131,24 @@ class TestGetBeadStoreFromWorktree:
         empty.mkdir()
         monkeypatch.chdir(empty)
         assert bead_cmd._get_bead_store() is None
+
+
+class TestDeriveProjectRootDoesNotOvershoot:
+    """bd-p6k: ``_derive_project_root``'s ``.claude/team-context/baton.db``
+    fallback must only strip three path components when db_path actually
+    matches that shape -- otherwise it must fall back to db_path's own
+    parent, never an ancestor above the caller's directory. The sibling bug
+    in ``bead_backend._derive_repo_root`` (see tests/test_bd_backend.py) is
+    what actually corrupted tests/test_worktree_manager.py on CI, but this
+    module has the identical fallback shape and must be guarded too.
+    """
+
+    def test_conventional_shape_unchanged(self, tmp_path: Path) -> None:
+        db_path = tmp_path / ".claude" / "team-context" / "baton.db"
+        assert bead_cmd._derive_project_root(db_path) == tmp_path
+
+    def test_shallow_db_path_does_not_overshoot(self, tmp_path: Path) -> None:
+        shallow_db = tmp_path / "baton.db"
+        root = bead_cmd._derive_project_root(shallow_db)
+        assert root == tmp_path
+        assert root != tmp_path.parent

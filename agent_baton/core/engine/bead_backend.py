@@ -102,7 +102,30 @@ def _derive_repo_root(db_path: Path) -> Path:
     """Walk upward from *db_path* to a directory containing ``.git``/``.beads``.
 
     Falls back to the db's grandparent (``.claude/team-context`` → project root)
-    and finally the db parent.
+    ONLY when *db_path* actually follows that ``<root>/.claude/team-context/
+    baton.db`` convention -- otherwise falls back to the db's own parent
+    directory instead.
+
+    bd-p6k: the old unconditional ``db_path.parent.parent.parent`` fallback
+    assumed every caller's ``db_path`` follows the 3-level convention. Callers
+    that pass a shallower path (e.g. ``<dir>/baton.db``, one level deep) got
+    a *different directory three levels above db_path* -- which, for a path
+    like ``/tmp/pytest-of-*/pytest-N/<test>/baton.db``, overshoots past the
+    test's own tmp_path into ``/tmp/pytest-of-*`` (the pytest session's
+    *shared* base temp dir). :func:`make_bead_store` then constructs a
+    ``BdClient`` rooted there, and the first bead write's lazy ``bd init``
+    plants a stray ``.git``/``.beads`` in that shared ancestor -- which
+    every *other* test's ``tmp_path`` (a descendant of the same shared base)
+    then discovers via git's upward repo search, corrupting unrelated
+    "not in a git repo" assertions for the rest of the pytest session. See
+    ``tests/test_worktree_manager.py::TestEngineFallbackWhenDisabled::
+    test_non_git_root_auto_disables_manager`` and
+    ``TestCanonicalRepoPorcelainParse::test_resolve_canonical_repo_raises_on_non_git_dir``,
+    which fail on Linux CI purely because a *different, earlier* test in the
+    same session poisoned the shared tmp base this way.
+
+    Falling back to ``db_path.parent`` instead is always safe: it can never
+    escape the directory the caller explicitly pointed ``db_path`` at.
     """
     candidate = db_path.parent
     for _ in range(10):
@@ -112,8 +135,13 @@ def _derive_repo_root(db_path: Path) -> Path:
         if parent == candidate:
             break
         candidate = parent
-    # .claude/team-context/baton.db -> project root is two levels up.
+    # .claude/team-context/baton.db -> project root is two levels up, but
+    # only trust that shape when db_path actually matches it (bd-p6k).
     try:
-        return db_path.parent.parent.parent
+        team_context = db_path.parent
+        claude_dir = team_context.parent
+        if team_context.name == "team-context" and claude_dir.name == ".claude":
+            return claude_dir.parent
+        return db_path.parent
     except Exception:
         return db_path.parent

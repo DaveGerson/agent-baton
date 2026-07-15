@@ -116,32 +116,75 @@ def _resolve_db_path() -> Path:
     return cwd_default
 
 
+def _has_discoverable_project_context(db: Path) -> bool:
+    """Return ``True`` when there is real evidence of a baton project for
+    *db* (the path :func:`_resolve_db_path` resolved), as opposed to
+    ``_resolve_db_path``/``_derive_project_root`` silently falling back to a
+    fabricated guess (bd-p6k).
+
+    "Real evidence" is any of:
+
+    - An explicit override was given (``BATON_DB_PATH`` env var, or
+      ``_DEFAULT_DB_PATH`` monkey-patched to an absolute path -- the
+      caller/test is explicitly vouching for this location).
+    - *db* actually exists on disk (a real, discovered ``baton.db``).
+    - A real ``.git``/``.beads`` marker exists somewhere up the tree from
+      *db* (see :func:`_find_project_root_marker`).
+
+    Without any of these, ``_derive_project_root``'s only remaining move is
+    to fabricate a "project root" by stripping three path components off of
+    *db* (the ``.claude/team-context/baton.db`` convention) -- which
+    silently succeeds even in a directory with zero project context (e.g.
+    the user's home directory). :func:`_get_bead_store` uses this guard so
+    read-only discovery reports "no bead store available" instead of
+    spawning a ``.beads/`` workspace in an unrelated directory.
+    """
+    if os.environ.get("BATON_DB_PATH", "").strip():
+        return True
+    patched = _DEFAULT_DB_PATH
+    if patched.is_absolute() and patched != Path("/").joinpath(_DB_REL):
+        return True
+    if db.exists():
+        return True
+    return _find_project_root_marker(db) is not None
+
+
 def _get_bead_store():
     """Resolve the bead store for the current project.
 
     Returns a :class:`~agent_baton.core.engine.bd_bead_store.BdBeadStore`
     backed by the bd workspace, or ``None`` when the store cannot be
-    constructed (e.g. ``bd`` binary missing).
+    constructed (e.g. ``bd`` binary missing) or when there is no
+    discoverable project context at all (bd-p6k; see
+    :func:`_has_discoverable_project_context`).
 
     ADR-13b WP-G: ``baton.db`` existence is NOT required.  Beads now live
     in the ``.beads/`` workspace managed by ``bd``, not in ``baton.db``.
     We always attempt to construct the store so that read commands (list,
     show, close, …) find beads created by ``baton beads create`` or by the
     engine even when no ``baton execute start`` has been run in the current
-    directory (i.e. ``baton.db`` is absent).  An empty/absent ``.beads/``
-    workspace returns empty results gracefully; it does NOT return ``None``.
+    directory (i.e. ``baton.db`` is absent), as long as there is *some*
+    real evidence of a project (an explicit ``BATON_DB_PATH``/patched
+    default, a discovered ``baton.db``, or a ``.git``/``.beads`` marker up
+    the tree).  An empty/absent ``.beads/`` workspace returns empty results
+    gracefully; it does NOT return ``None``.
 
-    ``None`` is returned only when ``bd`` itself is unavailable
+    ``None`` is returned when ``bd`` itself is unavailable
     (:class:`~agent_baton.core.engine.bd_client.BdNotAvailable`) so callers
-    can degrade gracefully with an accurate "bd unavailable" message. Any
-    OTHER construction failure raises :class:`BeadStoreInitError` instead
-    of being silently swallowed into the same ``None`` -- see
+    can degrade gracefully with an accurate "bd unavailable" message, or
+    when nothing above indicates this is actually a baton project (bd-p6k)
+    -- otherwise every invocation from an arbitrary directory (e.g. a bare
+    ``/tmp`` scratch dir) would silently fabricate a ``.beads/`` workspace
+    there. Any OTHER construction failure raises :class:`BeadStoreInitError`
+    instead of being silently swallowed into the same ``None`` -- see
     :func:`_resolve_store_or_exit` (F7).
     """
     from agent_baton.core.engine.bead_backend import make_bead_store
     from agent_baton.core.engine.bd_client import BdNotAvailable
 
     db = _resolve_db_path()
+    if not _has_discoverable_project_context(db):
+        return None
     try:
         return make_bead_store(db, repo_root=_derive_project_root(db))
     except BdNotAvailable:
@@ -214,12 +257,12 @@ def _resolve_store_or_exit(getter, action: str):
     return store
 
 
-def _derive_project_root(db_path: Path) -> Path:
-    """Walk upward from *db_path* to the project root containing ``.git``/``.beads``.
-
-    Mirrors the heuristic in ``bead_backend._derive_repo_root`` but is
-    inlined here so the CLI can pass an explicit ``repo_root`` to
-    ``make_bead_store`` rather than relying on the backend to re-discover it.
+def _find_project_root_marker(db_path: Path) -> Path | None:
+    """Walk upward from *db_path* looking for a real ``.git``/``.beads``
+    marker directory. Returns ``None`` (rather than guessing) when none is
+    found within 10 levels -- used by :func:`_has_discoverable_project_context`
+    to tell a genuine discovery from :func:`_derive_project_root`'s fallback
+    fabrication (bd-p6k).
     """
     candidate = db_path.parent
     for _ in range(10):
@@ -229,9 +272,44 @@ def _derive_project_root(db_path: Path) -> Path:
         if parent == candidate:
             break
         candidate = parent
-    # .claude/team-context/baton.db -> project root is two levels up.
+    return None
+
+
+def _derive_project_root(db_path: Path) -> Path:
+    """Walk upward from *db_path* to the project root containing ``.git``/``.beads``.
+
+    Mirrors the heuristic in ``bead_backend._derive_repo_root`` but is
+    inlined here so the CLI can pass an explicit ``repo_root`` to
+    ``make_bead_store`` rather than relying on the backend to re-discover it.
+
+    Falls back to guessing the ``.claude/team-context/baton.db`` convention
+    (project root is three levels up) when no real marker is found AND
+    *db_path* actually matches that shape -- otherwise falls back to
+    *db_path*'s own parent directory. This fallback is intentionally
+    permissive -- it backs :func:`_get_or_create_bead_store`, which must
+    bootstrap a brand-new project with no markers yet. Callers that need to
+    distinguish a genuine marker from this guess (e.g. :func:`_get_bead_store`,
+    which must NOT construct a store in a directory with no project context
+    at all) should use :func:`_find_project_root_marker` directly instead.
+
+    bd-p6k: unconditionally stripping three path components assumed every
+    ``db_path`` follows the ``<root>/.claude/team-context/baton.db``
+    convention. A shallower ``db_path`` (e.g. one level under a tmp dir)
+    would overshoot past the caller's own directory into an unrelated
+    ancestor -- see the identical fix and full rationale in
+    ``bead_backend._derive_repo_root``, which is where this actually bit
+    (bd-p6k's worktree_manager.py CI failures were traced to that sibling
+    function, not this one, but the same guard belongs here too).
+    """
+    found = _find_project_root_marker(db_path)
+    if found is not None:
+        return found
     try:
-        return db_path.parent.parent.parent
+        team_context = db_path.parent
+        claude_dir = team_context.parent
+        if team_context.name == "team-context" and claude_dir.name == ".claude":
+            return claude_dir.parent
+        return db_path.parent
     except Exception:
         return db_path.parent
 

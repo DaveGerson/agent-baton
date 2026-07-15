@@ -297,6 +297,51 @@ def test_make_bead_store_returns_bd_store(tmp_path, monkeypatch):
     )
 
 
+def test_derive_repo_root_convention_shape_unchanged(tmp_path):
+    """The `<root>/.claude/team-context/baton.db` convention still resolves
+    to `<root>` when no real .git/.beads marker exists (regression guard for
+    bd-p6k's overshoot fix below -- the common-case shape must be unaffected).
+    """
+    from agent_baton.core.engine.bead_backend import _derive_repo_root
+
+    db_path = tmp_path / ".claude" / "team-context" / "baton.db"
+    assert _derive_repo_root(db_path) == tmp_path
+
+
+def test_derive_repo_root_does_not_overshoot_shallow_db_path(tmp_path):
+    """bd-p6k: a db_path that does NOT follow the .claude/team-context/
+    convention must never resolve to an ancestor ABOVE the caller's own
+    directory.
+
+    Before the fix, ``_derive_repo_root`` unconditionally stripped three
+    path components off of *any* db_path when no .git/.beads marker was
+    found, assuming the .claude/team-context/baton.db shape. For a shallow
+    db_path (e.g. ``<dir>/baton.db``, one level deep -- as several
+    make_bead_store() callers pass, see agent_baton/core/engine/executor.py
+    and friends), that overshot past the caller's own directory into an
+    unrelated ancestor two levels up. When that ancestor happens to be a
+    *shared* directory (e.g. pytest's session-wide tmp base dir), the first
+    bead write's lazy `bd init` plants a stray .git/.beads there, which
+    every other test's tmp_path (a descendant of that same shared base)
+    then "discovers" via git's upward repo search -- corrupting unrelated
+    "not in a git repo" assertions for the rest of the pytest session (this
+    is exactly how tests/test_worktree_manager.py's
+    test_non_git_root_auto_disables_manager and
+    test_resolve_canonical_repo_raises_on_non_git_dir failed on CI).
+    """
+    from agent_baton.core.engine.bead_backend import _derive_repo_root
+
+    shallow_db = tmp_path / "baton.db"
+    root = _derive_repo_root(shallow_db)
+    assert root == tmp_path, (
+        f"_derive_repo_root must not overshoot past the caller's own "
+        f"directory ({tmp_path}) for a non-conventional db_path; got {root}"
+    )
+    # In particular, it must never land on tmp_path's parent (the ambient/
+    # shared pytest session directory in real test runs).
+    assert root != tmp_path.parent
+
+
 def test_make_bead_store_warns_once_per_process_on_failure(tmp_path, monkeypatch, caplog):
     """bd-7is: ~20 call sites swallow BdNotAvailable at debug level, so a
     missing bd binary was previously invisible. The factory now emits
