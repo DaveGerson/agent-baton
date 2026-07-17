@@ -162,6 +162,10 @@ export interface ForgePlanResponse {
   shared_context: string;
   pattern_source: string | null;
   created_at: string;
+  /** True when this plan was built with ManagerModePlanner post-processing
+   * (Phase 7 "Turn PMO into the director console") -- gates whether the
+   * `/pmo/manager/{card_id}/...` artifact API has anything to return. */
+  manager_mode?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -647,4 +651,333 @@ export interface FireSpecDraftResponse {
   spec_id: string;
   task_id: string;
   status: 'fired';
+}
+
+// ---------------------------------------------------------------------------
+// Manager-mode PMO API types (Phase 7 -- "Turn PMO into the director console")
+// Backend: agent_baton/api/routes/pmo_manager.py + agent_baton/api/models/responses.py
+// Domain shapes: agent_baton/models/manager.py
+// ---------------------------------------------------------------------------
+
+/** Common envelope for a single manager-mode artifact read. `revision`/
+ * `published_at` are `null` when nothing has ever been published for this
+ * task -- treat that as "artifacts exist but are unversioned", not an error. */
+export interface ManagerArtifactEnvelope {
+  task_id: string;
+  revision: number | null;
+  published_at: string | null;
+}
+
+export interface ManagerCharterResponse extends ManagerArtifactEnvelope {
+  /** Rendered project-charter.md contents (Markdown -- no JSON sidecar exists). */
+  markdown: string;
+}
+
+export interface Workstream {
+  id: string;
+  name: string;
+  objective: string;
+  likely_paths: string[];
+  allowed_paths: string[];
+  owner_role: string;
+  dependencies: string[];
+  deliverables: string[];
+  risks: string[];
+}
+
+export interface ScopeMapData {
+  task_id: string;
+  workstreams: Workstream[];
+  cross_cutting_concerns: string[];
+  out_of_scope: string[];
+  scope_expansion_policy: string;
+}
+
+export interface ManagerScopeMapResponse extends ManagerArtifactEnvelope {
+  scope_map: ScopeMapData;
+}
+
+export interface ManagerWorkstreamPhaseLink {
+  phase_id: number;
+  phase_name: string;
+  workstream: Workstream;
+}
+
+export interface ManagerWorkstreamsResponse extends ManagerArtifactEnvelope {
+  links: ManagerWorkstreamPhaseLink[];
+}
+
+export interface TeamBlueprintRole {
+  role: string;
+  agent_name: string;
+  mission: string;
+  owns: string[];
+  does_not_own: string[];
+  required_knowledge_packs: string[];
+  default_context_budget: number;
+  expected_handoffs: string[];
+  escalation_triggers: string[];
+}
+
+export interface TeamBlueprintData {
+  task_id: string;
+  team_name: string;
+  mission: string;
+  roles: TeamBlueprintRole[];
+  workstream_assignments: Record<string, string>;
+  collaboration_rules: string[];
+  escalation_triggers: string[];
+  phase_policies: Record<string, unknown>;
+}
+
+export interface ManagerTeamBlueprintResponse extends ManagerArtifactEnvelope {
+  team_blueprint: TeamBlueprintData;
+}
+
+/** One role's card, as rendered Markdown (the canonical dispatch form). */
+export interface ManagerRoleCard {
+  role: string;
+  markdown: string;
+}
+
+export interface ManagerRoleCardsResponse extends ManagerArtifactEnvelope {
+  role_cards: ManagerRoleCard[];
+}
+
+export interface KnowledgePackReference {
+  name: string;
+  path: string;
+  reason: string;
+  confidence: string;
+  status: string;
+  token_estimate: number;
+  documents: string[];
+}
+
+export interface MissingKnowledgePack {
+  name: string;
+  reason: string;
+  proposed_sources: string[];
+}
+
+export interface KnowledgePlanData {
+  task_id: string;
+  selected_packs: KnowledgePackReference[];
+  missing_packs: MissingKnowledgePack[];
+  stale_packs: string[];
+  per_role_packs: Record<string, string[]>;
+  per_step_packs: Record<string, string[]>;
+}
+
+export interface ManagerKnowledgePlanResponse extends ManagerArtifactEnvelope {
+  knowledge_plan: KnowledgePlanData;
+}
+
+/** One step's scope-contract listing entry. */
+export interface ManagerScopeContractSummary {
+  step_id: string;
+  agent_name: string;
+  workstream_id: string;
+  allowed_paths: string[];
+}
+
+export interface ManagerScopeContractsResponse extends ManagerArtifactEnvelope {
+  contracts: ManagerScopeContractSummary[];
+}
+
+export interface ScopeContractData {
+  step_id: string;
+  agent_name: string;
+  workstream_id: string;
+  mission: string;
+  in_scope: string[];
+  out_of_scope: string[];
+  allowed_paths: string[];
+  expected_artifacts: string[];
+  definition_of_done: string[];
+  escalation_triggers: string[];
+}
+
+export interface ManagerScopeContractResponse extends ManagerArtifactEnvelope {
+  step_id: string;
+  contract: ScopeContractData;
+  markdown: string;
+}
+
+export interface ContextReference {
+  path: string;
+  kind: 'file' | 'doc' | 'handoff' | 'bead';
+  reason: string;
+  token_estimate: number;
+}
+
+/** Metadata-only view of a per-step context bundle (no full document bodies). */
+export interface ManagerContextBundleSummary {
+  step_id: string;
+  agent_name: string;
+  must_read_count: number;
+  reference_only_count: number;
+  knowledge_pack_count: number;
+  token_budget: number;
+  estimated_tokens: number;
+  truncation_warnings: string[];
+}
+
+export interface ManagerContextBundlesResponse extends ManagerArtifactEnvelope {
+  bundles: ManagerContextBundleSummary[];
+}
+
+export interface ContextBundleData {
+  task_id: string;
+  step_id: string;
+  agent_name: string;
+  scope_contract_path: string;
+  must_read: ContextReference[];
+  reference_only: ContextReference[];
+  knowledge_packs: KnowledgePackReference[];
+  prior_handoffs: string[];
+  decisions: string[];
+  constraints: string[];
+  token_budget: number;
+  estimated_tokens: number;
+  truncation_warnings: string[];
+}
+
+export interface ManagerContextBundleResponse extends ManagerArtifactEnvelope {
+  step_id: string;
+  bundle: ContextBundleData;
+}
+
+export interface ManagerReportResponse extends ManagerArtifactEnvelope {
+  /** manager-brief.md contents (always present post-save). */
+  manager_brief: string;
+  /** manager-report.md contents -- a retrospective, only present post-execution. */
+  manager_report: string;
+}
+
+/** One entry from decision-log.jsonl (a typed ManagerDecision packet). */
+export interface ManagerDecision {
+  decision_id: string;
+  decision_type: 'scope_expansion' | 'ambiguity' | 'knowledge_gap' | 'review_veto' | 'approval' | string;
+  task_id: string;
+  summary: string;
+  context: string;
+  options: string[];
+  recommended_option: string;
+  created_at: string;
+  resolved_at: string | null;
+  resolution: string | null;
+  markdown: string;
+}
+
+export interface ManagerDecisionListResponse {
+  task_id: string;
+  count: number;
+  decisions: ManagerDecision[];
+}
+
+export interface ManagerDecisionResolveBody {
+  resolution: 'approve' | 'reject';
+  additional_paths?: string[];
+}
+
+export interface ManagerDecisionResolveResponse {
+  applied: boolean;
+  resolution: string | null;
+  step_id: string;
+  decision_id: string;
+  new_allowed_paths: string[];
+  error: string | null;
+}
+
+export interface ManagerVersionResponse {
+  task_id: string;
+  published: boolean;
+  revision: number;
+  prior_revision: number;
+  trigger: string;
+  created_at: string;
+  plan_fingerprint: string;
+  phase_count: number;
+  step_count: number;
+  published_paths: string[];
+}
+
+export interface ManagerValidationResponse {
+  task_id: string;
+  published: boolean;
+  valid: boolean;
+  fingerprint_match: boolean;
+  revision: number;
+  current_plan_fingerprint: string;
+  published_plan_fingerprint: string;
+  errors: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Generic execution decision inbox (APPROVAL / FEEDBACK / INTERACT actions)
+// Backend: agent_baton/api/routes/pmo.py -- /pmo/execute/{card_id}/decisions
+// ---------------------------------------------------------------------------
+
+export interface ExecutionDecision {
+  request_id: string;
+  task_id: string;
+  decision_type: string;
+  summary: string;
+  options: string[];
+  deadline: string | null;
+  context_files: string[];
+  created_at: string;
+  status: 'pending' | 'resolved' | 'expired' | string;
+  context_file_contents?: Record<string, string> | null;
+}
+
+export interface ExecutionDecisionListResponse {
+  count: number;
+  decisions: ExecutionDecision[];
+}
+
+export interface ResolveExecutionDecisionBody {
+  option: string;
+  rationale?: string;
+  resolved_by?: string;
+}
+
+export interface ResolveExecutionDecisionResponse {
+  resolved: boolean;
+  execution_resumed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Card execution detail -- GET /pmo/cards/{card_id}/execution
+// ---------------------------------------------------------------------------
+
+export interface ExecutionStepEvent {
+  event_type: string;
+  step_id: string;
+  agent?: string | null;
+  status?: string | null;
+  timestamp: string;
+  message?: string | null;
+}
+
+export interface ExecutionGoalOverlay {
+  completion_condition: string | null;
+  goal_status: string;
+  amend_cycles_used: number;
+  max_amend_cycles: number;
+  checks_count: number;
+  last_check_met: boolean | null;
+}
+
+export interface CardExecutionDetail {
+  task_id: string;
+  status: string;
+  current_phase: string;
+  steps: ExecutionStepEvent[];
+  started_at: string;
+  elapsed_seconds: number;
+  turn_count: number;
+  tokens_used_usd: number;
+  goal: ExecutionGoalOverlay;
 }

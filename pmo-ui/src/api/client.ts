@@ -57,6 +57,28 @@ import type {
   FireSpecDraftBody,
   ImportSpecDraftBody,
   FireSpecDraftResponse,
+  ManagerCharterResponse,
+  ManagerScopeMapResponse,
+  ManagerWorkstreamsResponse,
+  ManagerTeamBlueprintResponse,
+  ManagerRoleCardsResponse,
+  ManagerRoleCard,
+  ManagerKnowledgePlanResponse,
+  ManagerScopeContractsResponse,
+  ManagerScopeContractResponse,
+  ManagerContextBundlesResponse,
+  ManagerContextBundleResponse,
+  ManagerReportResponse,
+  ManagerDecisionListResponse,
+  ManagerDecision,
+  ManagerDecisionResolveBody,
+  ManagerDecisionResolveResponse,
+  ManagerVersionResponse,
+  ManagerValidationResponse,
+  ExecutionDecisionListResponse,
+  ResolveExecutionDecisionBody,
+  ResolveExecutionDecisionResponse,
+  CardExecutionDetail,
 } from './types';
 import { beadsApi, type BeadListParams, type BeadListResponse, type Bead } from './beads';
 
@@ -465,6 +487,134 @@ export const api = {
   /** Import a spec draft from GitHub Issues or Azure DevOps. */
   importSpecDraft(body: ImportSpecDraftBody): Promise<SpecDraft> {
     return request('/specs/import', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  // ---------------------------------------------------------------------------
+  // Card execution detail (F7 director console -- also used by ExecutionProgress)
+  // ---------------------------------------------------------------------------
+
+  /** Step-level execution events + goal-loop overlay for a single card. */
+  getCardExecution(cardId: string): Promise<CardExecutionDetail> {
+    return request(`/cards/${encodeURIComponent(cardId)}/execution`);
+  },
+
+  // ---------------------------------------------------------------------------
+  // Generic execution decision inbox (APPROVAL / FEEDBACK / INTERACT) --
+  // /api/v1/pmo/execute/{card_id}/decisions
+  // ---------------------------------------------------------------------------
+
+  /** List every decision request (pending and resolved) recorded for a card. */
+  listExecutionDecisions(cardId: string): Promise<ExecutionDecisionListResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/decisions`);
+  },
+
+  /** Resolve a pending decision; resumes the paused execution when applicable. */
+  resolveExecutionDecision(
+    cardId: string,
+    requestId: string,
+    body: ResolveExecutionDecisionBody,
+  ): Promise<ResolveExecutionDecisionResponse> {
+    return request(`/execute/${encodeURIComponent(cardId)}/decisions/${encodeURIComponent(requestId)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  // ---------------------------------------------------------------------------
+  // Manager-mode PMO API (Phase 7 -- "Turn PMO into the director console")
+  // All endpoints under /api/v1/pmo/manager/{card_id}/...
+  // ---------------------------------------------------------------------------
+
+  /** Project charter (rendered Markdown). */
+  getManagerCharter(cardId: string): Promise<ManagerCharterResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/charter`);
+  },
+
+  /** Scope map (workstream decomposition). */
+  getManagerScopeMap(cardId: string): Promise<ManagerScopeMapResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/scope-map`);
+  },
+
+  /** Each plan phase paired with its owning workstream. */
+  getManagerWorkstreams(cardId: string): Promise<ManagerWorkstreamsResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/workstreams`);
+  },
+
+  /** Ad-hoc team composition for the plan. */
+  getManagerTeamBlueprint(cardId: string): Promise<ManagerTeamBlueprintResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/team-blueprint`);
+  },
+
+  /** Every role card, rendered Markdown (the canonical dispatch form). */
+  listManagerRoleCards(cardId: string): Promise<ManagerRoleCardsResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/role-cards`);
+  },
+
+  /** One role's card Markdown. */
+  getManagerRoleCard(cardId: string, role: string): Promise<ManagerRoleCard> {
+    return request(`/manager/${encodeURIComponent(cardId)}/role-cards/${encodeURIComponent(role)}`);
+  },
+
+  /** Plan-wide knowledge pack selection/gap analysis. */
+  getManagerKnowledgePlan(cardId: string): Promise<ManagerKnowledgePlanResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/knowledge-plan`);
+  },
+
+  /** Summary of every nontrivial step's scope contract. */
+  listManagerScopeContracts(cardId: string): Promise<ManagerScopeContractsResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/scope-contracts`);
+  },
+
+  /** One step's full scope contract (JSON + rendered Markdown). */
+  getManagerScopeContract(cardId: string, stepId: string): Promise<ManagerScopeContractResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/scope-contracts/${encodeURIComponent(stepId)}`);
+  },
+
+  /** Metadata (no document bodies) for every step's context bundle. */
+  listManagerContextBundles(cardId: string): Promise<ManagerContextBundlesResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/context-bundles`);
+  },
+
+  /** One step's full context bundle. */
+  getManagerContextBundle(cardId: string, stepId: string): Promise<ManagerContextBundleResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/context-bundles/${encodeURIComponent(stepId)}`);
+  },
+
+  /** Manager brief (always present post-save) + manager report (post-execution retrospective). */
+  getManagerReport(cardId: string): Promise<ManagerReportResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/report`);
+  },
+
+  /** Every typed decision packet filed for this card's manager-mode plan. */
+  listManagerDecisions(cardId: string): Promise<ManagerDecisionListResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/decisions`);
+  },
+
+  /** One decision packet (current, i.e. post-resolution, state). */
+  getManagerDecision(cardId: string, decisionId: string): Promise<ManagerDecision> {
+    return request(`/manager/${encodeURIComponent(cardId)}/decisions/${encodeURIComponent(decisionId)}`);
+  },
+
+  /** Approve or reject a scope-expansion decision (the only resolvable type today). */
+  resolveManagerDecision(
+    cardId: string,
+    decisionId: string,
+    body: ManagerDecisionResolveBody,
+  ): Promise<ManagerDecisionResolveResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/decisions/${encodeURIComponent(decisionId)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** Published artifact-revision manifest, if any. */
+  getManagerVersion(cardId: string): Promise<ManagerVersionResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/version`);
+  },
+
+  /** Whether published manager-mode artifacts are still version-consistent with the plan on disk. */
+  getManagerValidation(cardId: string): Promise<ManagerValidationResponse> {
+    return request(`/manager/${encodeURIComponent(cardId)}/validation`);
   },
 
   /**

@@ -9,6 +9,7 @@ import { BeadGraphView } from './views/BeadGraphView';
 import { BeadTimelineView } from './views/BeadTimelineView';
 import { KeyboardShortcutsDialog } from './components/KeyboardShortcutsDialog';
 import { RoleBasedDashboard } from './views/RoleBasedDashboard';
+import { ManagerWorkspaceView } from './views/ManagerWorkspaceView';
 import { DeveloperScorecard } from './views/DeveloperScorecard';
 import { ArchReviewPanel } from './views/ArchReviewPanel';
 import { PlaybookGallery } from './views/PlaybookGallery';
@@ -27,6 +28,7 @@ type View =
   | 'spec-queue'
   | 'workforce'
   | 'beads'
+  | 'manager'
   | 'role'
   | 'scorecard'
   | 'arch-review'
@@ -99,6 +101,7 @@ export default function App() {
     { id: 'spec-queue'  as const, label: 'Spec Queue',     emoji: '📬' },
     { id: 'workforce'   as const, label: 'Workforce',      emoji: '📡' },
     { id: 'boh'         as const, label: 'Back of House',  emoji: '🚪' },
+    { id: 'manager'     as const, label: 'Manager',        emoji: '🧭' },
     { id: 'role'        as const, label: 'Role View',      emoji: '👤' },
     { id: 'scorecard'   as const, label: 'Scorecard',      emoji: '📊' },
     { id: 'arch-review' as const, label: 'Arch Review',    emoji: '🏛️' },
@@ -334,6 +337,16 @@ export default function App() {
         >
           <BackOfHousePanel onBack={backToBoard} />
         </div>
+        {view === 'manager' && (
+          <div
+            id="panel-manager"
+            role="tabpanel"
+            aria-labelledby="tab-manager"
+            style={{ height: '100%', overflowY: 'auto' }}
+          >
+            <ManagerWorkspaceView />
+          </div>
+        )}
         {view === 'role' && (
           <div
             id="panel-role"
