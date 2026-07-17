@@ -68,6 +68,7 @@ __all__ = [
     "validate_manager_artifacts",
     "rebuild_and_publish",
     "load_revision_manifest",
+    "plan_fingerprint",
 ]
 
 
@@ -288,12 +289,18 @@ def load_revision_manifest(paths: ManagerArtifactPaths) -> "dict | None":
         return None
 
 
-def _plan_fingerprint(plan: "MachinePlan") -> str:
+def plan_fingerprint(plan: "MachinePlan") -> str:
     """A short, order-sensitive digest of *plan*'s phase/step shape.
 
     Not a security control -- purely a cheap "did the published sidecars
     correspond to this exact step list" debugging aid surfaced in the
-    revision manifest.
+    revision manifest. Public (Phase 7 "Turn PMO into the director
+    console"): the manager-mode validation API
+    (``agent_baton/api/routes/pmo_manager.py``) recomputes this over the
+    CURRENT persisted plan and compares it against the manifest's recorded
+    fingerprint to answer "is the published management view still
+    version-consistent with the plan on disk" without re-running the full
+    ``ManagerModePlanner`` composition.
     """
     step_ids = [step.step_id for phase in plan.phases for step in phase.steps]
     raw = json.dumps(
@@ -301,6 +308,12 @@ def _plan_fingerprint(plan: "MachinePlan") -> str:
         sort_keys=True,
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+# Backward-compat alias for the module-private name used before this was
+# promoted to a public helper -- keeps any existing internal call sites
+# (and this module's own rebuild_and_publish, below) working unchanged.
+_plan_fingerprint = plan_fingerprint
 
 
 # ---------------------------------------------------------------------------

@@ -825,6 +825,15 @@ async def forge_plan(
         except asyncio.QueueFull:
             pass
 
+    # Phase 7 "Turn PMO into the director console": stamp manager_mode onto
+    # the plan the same way `baton plan --manager-mode` does (see
+    # cli/commands/execution/plan_cmd.py) -- the flag rides in the returned
+    # plan dict so the UI can preview/edit it, and POST /pmo/forge/approve
+    # later reads whatever value ends up on that (possibly user-edited)
+    # dict, not this request field again.
+    if req.manager_mode:
+        plan.manager_mode = True
+
     return ForgePlanResponse(session_id=session_id, plan=plan.to_dict())
 
 
@@ -849,13 +858,19 @@ async def forge_approve(
         store: Injected PMO store singleton (to resolve project path).
 
     Returns:
-        ``{"saved": true, "path": "<plan.json path>"}``
+        ``{"saved": true, "path": "<plan.json path>", "manager_mode": ...,
+        "manager_revision": ...}``
 
     Raises:
         HTTPException 400: If the plan dict is malformed.
         HTTPException 404: If the specified project is not registered.
-        HTTPException 500: If writing the plan files fails.
+        HTTPException 422: If the plan is manager_mode and its manager-mode
+            config (project ``.claude/baton.yaml``) is invalid.
+        HTTPException 500: If writing the plan files, or building the
+            manager-mode artifact set, fails.
     """
+    from pathlib import Path
+
     project = store.get_project(req.project_id)
     if project is None:
         raise HTTPException(
@@ -867,19 +882,65 @@ async def forge_approve(
         from agent_baton.models.execution import MachinePlan
 
         plan = MachinePlan.from_dict(req.plan)
-        saved_path = forge.save_plan(plan, project)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid plan payload: {exc}",
         ) from exc
+
+    # Phase 7 "Turn PMO into the director console": Forge calls the exact
+    # same ManagerModePlanner post-processing CLI planning uses
+    # (`baton plan --manager-mode --save`) so a manager-mode plan created
+    # via the PMO ends up with the identical, version-consistent sidecar
+    # set the manager-mode read API (GET /pmo/manager/{card_id}/...)
+    # exposes -- see ForgeSession.save_plan's docstring for the exact
+    # ordering contract.
+    manager_config = None
+    if plan.manager_mode:
+        from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
+
+        project_root = Path(project.path)
+        try:
+            if ManagerConfig.find_config_file(project_root) is not None:
+                manager_config = ManagerConfig.load(project_root)
+            else:
+                manager_config = ManagerConfig()
+        except ManagerConfigError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid manager config for project '{req.project_id}': {exc}",
+            ) from exc
+
+    try:
+        saved_path = forge.save_plan(plan, project, manager_config=manager_config)
     except Exception as exc:
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+        if isinstance(exc, ManagerArtifactPublishError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         raise HTTPException(
             status_code=500,
             detail=f"Failed to save plan: {exc}",
         ) from exc
 
-    return ForgeApproveResponse(saved=True, path=str(saved_path))
+    manager_revision: int | None = None
+    if plan.manager_mode:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.rebuild import load_revision_manifest
+
+        context_root = Path(project.path) / ".claude" / "team-context"
+        manifest = load_revision_manifest(
+            ManagerArtifactPaths(context_root, plan.task_id)
+        )
+        if manifest is not None:
+            manager_revision = int(manifest.get("revision", 0) or 0)
+
+    return ForgeApproveResponse(
+        saved=True,
+        path=str(saved_path),
+        manager_mode=bool(plan.manager_mode),
+        manager_revision=manager_revision,
+    )
 
 
 @router.post("/pmo/forge/interview", response_model=InterviewResponse)

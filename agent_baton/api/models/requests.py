@@ -18,6 +18,7 @@ The models are organized into groups:
   ``RegenerateRequest``
 - **Learning**: ``ApplyLearningFixRequest``, ``UpdateLearningIssueRequest``
 - **Feedback**: ``RecordFeedbackRequest``
+- **Manager-mode decisions**: ``ManagerDecisionResolveRequest``
 """
 from __future__ import annotations
 
@@ -254,6 +255,17 @@ class CreateForgeRequest(BaseModel):
         ge=0,
         le=2,
         description="Plan priority: 0=normal, 1=high, 2=critical.",
+    )
+    manager_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, the generated plan is stamped with "
+            "MachinePlan.manager_mode=True. The client can still toggle it "
+            "off before approving by clearing the field on the returned "
+            "plan dict; POST /pmo/forge/approve reads whatever value is "
+            "set on the (possibly user-edited) plan it receives, not this "
+            "request field."
+        ),
     )
 
 
@@ -730,4 +742,39 @@ class ImportSpecDraftRequest(BaseModel):
     repo: str = Field(
         default="",
         description="GitHub repository name (required for source='github').",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manager-mode decision resolution (Phase 7 "Turn PMO into the director console")
+# ---------------------------------------------------------------------------
+
+
+class ManagerDecisionResolveRequest(BaseModel):
+    """Request body for
+    ``POST /api/v1/pmo/manager/{card_id}/decisions/{decision_id}/resolve``.
+
+    Narrow, typed mutation surface: currently the only decision_type this
+    resolves is ``"scope_expansion"`` -- see
+    ``agent_baton.core.engine.executor.ExecutionEngine.resolve_scope_expansion``,
+    which is the sole engine entry point this endpoint calls. Other
+    ``ManagerDecision.decision_type`` values (``ambiguity``,
+    ``knowledge_gap``, ``review_veto``, ``approval``) have no engine-side
+    apply path yet and are rejected with a 400, not silently accepted.
+    """
+
+    resolution: Literal["approve", "reject"] = Field(
+        ...,
+        description="'approve' widens the step's scope and republishes the "
+        "manager-mode artifact set; 'reject' records the denial and "
+        "changes nothing else.",
+    )
+    additional_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional explicit path list to grant on approval. When empty, "
+            "the violated paths recorded in the decision's scope-evidence "
+            "sidecar are used (the common case: approve exactly what the "
+            "diff-derived violation flagged)."
+        ),
     )
