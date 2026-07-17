@@ -166,7 +166,32 @@ class ClassificationStage:
             classified_phases = None  # let downstream logic handle phases
             # 5. Agent selection (legacy path for explicit overrides)
             if agents is None:
-                resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+                if phases is not None:
+                    # Explicit phases fully specify the plan shape -- the
+                    # roster the caller actually gets is the union of each
+                    # phase dict's own "agents" list, not a generic
+                    # per-task-type default. Falling back to
+                    # ``_DEFAULT_AGENTS`` here (as when neither agents nor
+                    # phases is given) leaves ``resolved_agents`` carrying
+                    # candidates (e.g. code-reviewer/test-engineer for a
+                    # "generic" task) that never land in any phase built
+                    # from ``phases`` -- ValidationStage's
+                    # review_missing/audit_missing checks read
+                    # ``resolved_agents`` as roster evidence, so a phantom
+                    # candidate here trips a false-positive quality gate.
+                    resolved_agents = []
+                    for _phase_dict in phases:
+                        for _a in _phase_dict.get("agents", []) or []:
+                            if _a not in resolved_agents:
+                                resolved_agents.append(_a)
+                    if not resolved_agents:
+                        # No phase dict specified its own agents (they'll
+                        # be assigned downstream from a fallback roster) --
+                        # the per-type default is the only sane candidate
+                        # pool in that case.
+                        resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
+                else:
+                    resolved_agents = list(_DEFAULT_AGENTS.get(inferred_type, []))
             else:
                 resolved_agents = list(agents)
                 # Warn when an explicit override includes reviewer-class agents

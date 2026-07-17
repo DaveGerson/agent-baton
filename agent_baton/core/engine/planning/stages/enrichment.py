@@ -153,6 +153,15 @@ class EnrichmentStage:
         # returns True for "auditor".  Append a dedicated Audit phase here.
         self._ensure_audit_phase(draft, services)
 
+        # NOTE: draft.resolved_agents can still carry candidates that never
+        # landed in a phase step at this point (concern-split's per-concern
+        # best-fit pick, subtask decomposition's per-subtask agent unions).
+        # ValidationStage's team-consolidation (_consolidate_team) drops
+        # further reviewer-class agents from Implement/Fix team-steps, so
+        # the roster<->phases reconciliation happens once, there, after
+        # every agent-dropping mutation has had its turn -- see
+        # ValidationStage._prune_unused_resolved_agents.
+
         return draft
 
     # ------------------------------------------------------------------

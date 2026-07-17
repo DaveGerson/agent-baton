@@ -156,6 +156,15 @@ class ValidationStage:
         draft.extracted_paths = extracted_paths
         draft.review_result = review_result
 
+        # Reconcile the roster with what actually landed in phases, now
+        # that every agent-dropping mutation (RosterStage's subtask-union,
+        # EnrichmentStage's concern-split, and this stage's own
+        # reviewer-filtering team consolidation) has had its turn.
+        # ``_agent_bases`` below folds ``resolved_agents`` into its
+        # review/audit-coverage evidence, so a candidate that was never
+        # actually assigned a step must not still masquerade as "routed".
+        self._prune_unused_resolved_agents(draft)
+
         # Compute defects from the assembled plan + reviewer result.
         defects = self._detect_defects(draft)
         draft.plan_defects = defects  # type: ignore[attr-defined]
@@ -248,6 +257,25 @@ class ValidationStage:
 
         return budget_tier
 
+    @staticmethod
+    def _remap_depends_on(plan_phases: list, remap: dict[str, str]) -> None:
+        """Rewrite ``step.depends_on`` entries per *remap*, de-duplicating.
+
+        Used after team-step consolidation folds several step_ids into
+        one survivor -- every downstream ``depends_on`` pointing at one of
+        the folded ids must follow it to the survivor, not dangle.
+        """
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.depends_on:
+                    continue
+                new_deps: list[str] = []
+                for dep in step.depends_on:
+                    mapped = remap.get(dep, dep)
+                    if mapped != step.step_id and mapped not in new_deps:
+                        new_deps.append(mapped)
+                step.depends_on = new_deps
+
     def _consolidate_team(
         self,
         *,
@@ -277,7 +305,27 @@ class ValidationStage:
             if phase.phase_id in split_phase_ids:
                 continue
             if is_team_phase(phase, task_summary):
-                phase.steps = [consolidate_team_step(phase)]
+                original_step_ids = [s.step_id for s in phase.steps]
+                consolidated = consolidate_team_step(phase)
+                phase.steps = [consolidated]
+                # Folding N steps into one collapses their step_ids into a
+                # single new one (phase_builder.py's
+                # ``consolidate_team_step`` -- the originals survive only
+                # as nested ``TeamMember`` entries, not top-level steps).
+                # A later phase's step may have declared ``depends_on`` a
+                # specific one of those now-gone ids (e.g. the
+                # "investigative" archetype's Verify step depends on the
+                # Fix phase's implementer step) -- left unrewritten, that
+                # reference dangles and MachinePlan's plan-graph invariant
+                # check rejects the whole plan. Point every such reference
+                # at the surviving consolidated step_id instead.
+                remap = {
+                    sid: consolidated.step_id
+                    for sid in original_step_ids
+                    if sid != consolidated.step_id
+                }
+                if remap:
+                    self._remap_depends_on(plan_phases, remap)
 
         # 12c.4. Extract file paths
         extracted_paths = extract_file_paths(task_summary)
@@ -501,8 +549,24 @@ class ValidationStage:
         )
 
     def _has_review_coverage(self, draft: PlanDraft) -> bool:
+        """A reviewer-class step outside an implement-type phase counts.
+
+        The canonical case is a phase literally named "Review", but
+        several archetypes route a reviewer into a differently-named
+        terminal phase in substance -- e.g. the "investigation"
+        archetype's "Verify" phase, or an explicit ``--agents`` roster
+        applied wholesale across compound-task subtask phases ("Test",
+        "Document", ...). Excluding only ``_IMPLEMENT_PHASE_KEYS`` (rather
+        than requiring an allow-listed name) keeps this in sync with the
+        *other* half of the same rule: a reviewer-class agent inside an
+        implement-type phase is independently flagged as
+        ``agent_phase_mismatch`` above and is filtered out of
+        implement/fix/draft/migrate team-steps by
+        ``consolidate_team_step`` before this runs, so it can never
+        double as coverage by accident.
+        """
         for phase in draft.plan_phases:
-            if self._phase_key(phase.name) != "review":
+            if self._phase_key(phase.name) in self._IMPLEMENT_PHASE_KEYS:
                 continue
             for step in phase.steps:
                 if self._step_agent_bases(step) & self._REVIEWER_BASES:
@@ -535,6 +599,40 @@ class ValidationStage:
             return "develop"
         return key
 
+    def _prune_unused_resolved_agents(self, draft: PlanDraft) -> None:
+        """Drop ``resolved_agents`` entries that never landed in any step.
+
+        Several upstream stages narrow a multi-candidate roster down to
+        fewer agents than ``resolved_agents`` still carries: RosterStage's
+        subtask-union (each subtask only uses its own slice),
+        EnrichmentStage's concern-split (one best-fit agent per concern),
+        and this stage's own team consolidation (``_consolidate_team``
+        filters reviewer-class agents out of Implement/Fix team-steps).
+        Left un-reconciled, the unpicked candidates become phantom roster
+        members: ``_agent_bases`` folds ``resolved_agents`` into its
+        review/audit-coverage evidence, so an agent that was never
+        actually assigned any work still trips a "needs a Review/Audit
+        phase" false positive (review_missing/audit_missing). Only ever
+        removes -- never adds -- so it cannot mask an agent genuinely
+        still needed by the roster.
+        """
+        resolved_agents = getattr(draft, "resolved_agents", None)
+        if not resolved_agents:
+            return
+        used_bases: set[str] = set()
+        for phase in draft.plan_phases:
+            for step in phase.steps:
+                used_bases.update(self._step_agent_bases(step))
+        pruned = [a for a in resolved_agents if (a or "").split("--")[0] in used_bases]
+        if pruned == resolved_agents:
+            return
+        dropped = [a for a in resolved_agents if a not in pruned]
+        draft.routing_notes.append(
+            f"[validation] Pruned unused roster candidate(s) {dropped} — "
+            "never assigned to a phase step."
+        )
+        draft.resolved_agents = pruned
+
     def _agent_bases(self, draft: PlanDraft) -> set[str]:
         bases = {
             (agent or "").split("--")[0]
@@ -550,7 +648,14 @@ class ValidationStage:
     def _step_agent_bases(self, step: object) -> set[str]:
         bases: set[str] = set()
         agent_name = getattr(step, "agent_name", "")
-        if agent_name:
+        # "team" is the consolidated-team-step sentinel (phase_builder.py
+        # ``consolidate_team_step``), never a real agent -- the actual
+        # members live in ``step.team`` and are collected below. Other
+        # call sites (planner.py's own agent-name walks) already exclude
+        # it; this one didn't, so a consolidated team step silently
+        # leaked a fake "team" base name into every downstream
+        # review/audit-coverage check.
+        if agent_name and agent_name != "team":
             bases.add(agent_name.split("--")[0])
         for member in getattr(step, "team", []) or []:
             for name in _collect_member_agent_names(member):

@@ -60,6 +60,13 @@ def tmp_agents_dir(tmp_path: Path) -> Path:
         ("data-analyst", "Data analysis specialist.", "sonnet"),
         ("auditor", "Audit and compliance specialist.", "opus"),
         ("backend-engineer", "Generic backend engineer.", "sonnet"),
+        # Registered so risk-elevation tests exercise the devops risk
+        # keyword heuristic in isolation, without also tripping the
+        # capability-gap/talent-factory machinery for an "unknown to the
+        # registry" agent name (see TestRiskAssessmentStructural).
+        ("devops-engineer", "Infrastructure and deployment specialist.", "sonnet"),
+        ("devops-specialist", "Infrastructure and deployment specialist.", "sonnet"),
+        ("security-reviewer", "Security-focused code review specialist.", "opus"),
     ]
     for name, desc, model in agents:
         content = (
