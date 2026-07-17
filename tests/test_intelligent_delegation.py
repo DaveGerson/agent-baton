@@ -414,10 +414,22 @@ class TestModelInheritance:
         for step in be_steps:
             assert step.model == "sonnet"
 
-    def test_unknown_agent_keeps_default_sonnet(
+    def test_unknown_agent_resolves_to_a_real_registered_agent(
         self, planner: IntelligentPlanner
     ) -> None:
-        """An agent not in registry should keep the default model."""
+        """P5.2: an agent name not in the registry is now resolved before
+        phase construction (the capability-gap lifecycle, see
+        docs/internal/talent-factory-contract.md and
+        agent_baton.core.engine.planning.talent_factory) instead of
+        flowing through as a phantom, undispatchable step name.
+
+        IntelligentPlanner's default (no ``talent_builder_dispatcher``
+        passed, as here) never starts a live generation attempt -- the
+        gap resolves to the deterministic generic-agent fallback, and the
+        resulting step's model comes from *that* real agent's own
+        definition (architect => opus here), not a hardcoded "sonnet"
+        placeholder for a role that was never actually dispatchable.
+        """
         plan = planner.create_plan(
             "Do some work",
             agents=["unknown-specialist"],
@@ -425,8 +437,20 @@ class TestModelInheritance:
         )
         all_steps = [s for p in plan.phases for s in p.steps]
         assert all_steps
-        for step in all_steps:
-            assert step.model == "sonnet"
+        step_agents = {s.agent_name for s in all_steps}
+        assert "unknown-specialist" not in step_agents, (
+            "the plan must never carry a step naming an agent nobody can dispatch"
+        )
+
+        outcomes = plan.plan_diagnostics.get("talent_factory_outcomes", [])
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "generation_failed_fallback"
+        resolved_name = outcomes[0]["resolved_agent_name"]
+        assert resolved_name in step_agents
+
+        resolved_steps = [s for s in all_steps if s.agent_name == resolved_name]
+        for step in resolved_steps:
+            assert step.model == planner._registry.get(resolved_name).model
 
     def test_all_plan_steps_have_model_set(
         self, planner: IntelligentPlanner

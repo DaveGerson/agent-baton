@@ -42,6 +42,8 @@ from agent_baton.core.engine.planning.stages import (
 )
 
 if TYPE_CHECKING:
+    from agent_baton.core.config.manager import TalentFactoryConfig
+    from agent_baton.core.engine.planning.talent_factory import TalentBuilderDispatcher
     from agent_baton.models.execution import GateScope, MachinePlan
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,9 @@ def build_plan_diagnostics(
         "talent_lifecycle_decisions": list(
             existing.get("talent_lifecycle_decisions", [])
         ),
+        "talent_factory_outcomes": list(
+            existing.get("talent_factory_outcomes", [])
+        ),
     }
 
 
@@ -190,6 +195,7 @@ class IntelligentPlanner:
         task_classifier: Any = None,
         bead_store: Any = None,
         project_config: Any = None,
+        talent_builder_dispatcher: "TalentBuilderDispatcher | None" = None,
     ) -> None:
         self._team_context_root = team_context_root
         self._classifier = classifier
@@ -204,6 +210,19 @@ class IntelligentPlanner:
             else knowledge_registry
         )
         self._bead_store = bead_store
+        # Injection seam for the talent-factory dispatch mechanism (P5.2,
+        # docs/internal/talent-factory-contract.md). ``None`` means "no
+        # live dispatch" (resolves lazily to NullTalentBuilderDispatcher
+        # the first time a DISPATCH_TALENT_BUILDER decision needs one) --
+        # this is a deliberately SAFE default: constructing an
+        # IntelligentPlanner with no explicit dispatcher must never start
+        # a live `claude` subprocess as a side effect (many call sites,
+        # including most of the test suite, construct IntelligentPlanner()
+        # directly with no expectation of that). ``baton plan``
+        # (cli/commands/execution/plan_cmd.py) explicitly passes a
+        # HeadlessTalentBuilderDispatcher() for real dispatch -- that is
+        # the one call site meant to actually generate capability.
+        self._talent_builder_dispatcher = talent_builder_dispatcher
 
         # Build collaborators
         from agent_baton.core.orchestration.registry import AgentRegistry
@@ -252,8 +271,22 @@ class IntelligentPlanner:
                 start_dir=team_context_root,
             )
 
-        # Pipeline
-        self._pipeline = _build_default_pipeline()
+        # Pipeline -- split in two so IntelligentPlanner.create_plan() can
+        # run the talent-factory lifecycle (P5.2) between roster assembly
+        # and phase construction: RosterStage (in the pre-pipeline) is
+        # what detects capability gaps and records
+        # capability_gaps/talent_lifecycle_decisions on the draft, and
+        # DecompositionStage (first stage of the post-pipeline) is what
+        # turns draft.resolved_agents into concrete phase/step
+        # assignments -- so any agent-name substitution from a resolved
+        # gap must land on draft.resolved_agents strictly between the
+        # two. _build_default_pipeline() remains the single source of
+        # truth for stage order (see
+        # tests/engine/planning/test_pipeline_smoke.py); this just slices
+        # its stage list rather than duplicating it.
+        _all_stages = _build_default_pipeline().stages
+        self._pre_pipeline = Pipeline(_all_stages[:2])   # classification, roster
+        self._post_pipeline = Pipeline(_all_stages[2:])  # risk .. assembly
 
         # Per-call introspection state (reset each create_plan call)
         self._last_task_classification: Any = None
@@ -287,6 +320,7 @@ class IntelligentPlanner:
         gate_scope: "GateScope" = "focused",
         skip_init: bool = False,
         allow_talent_builder: bool = True,
+        talent_factory_config: "TalentFactoryConfig | None" = None,
     ) -> "MachinePlan":
         """Build a complete plan by running the seven-stage pipeline.
 
@@ -296,6 +330,22 @@ class IntelligentPlanner:
         docs/internal/talent-factory-contract.md). Defaults preserve prior
         planner behavior — generation is permitted, nothing is skipped —
         so existing callers are unaffected until they opt in.
+
+        ``talent_factory_config`` governs the generation *lifecycle* once
+        talent-builder is otherwise permitted to run (retry budget,
+        validation/rollback policy, name-collision policy, registry-reload
+        timing — ``agent_baton.core.config.manager.TalentFactoryConfig``).
+        Defaults to an all-defaults ``TalentFactoryConfig()`` when omitted.
+        When a ``DISPATCH_TALENT_BUILDER`` decision is reached for a gap
+        (see ``capability_gap.decide_talent_lifecycle``), this method
+        performs exactly one bounded dispatch attempt via
+        ``agent_baton.core.engine.planning.talent_factory`` between roster
+        assembly and phase construction — a validated, installed artifact's
+        agent name is substituted into the roster before phases are built
+        for it (re-planning only the previously-unresolved step); a failed
+        or policy-disallowed generation resolves to a deterministic generic
+        agent fallback (or raises ``TalentFactoryError`` if the registry has
+        no fallback candidate at all — an explicit planning failure).
         """
         from agent_baton.core.observability import current_exporter
         from datetime import datetime, timezone
@@ -328,8 +378,20 @@ class IntelligentPlanner:
             knowledge_registry=self._resolve_knowledge_registry(project_root)
         )
 
-        # Run the pipeline.
-        draft = self._pipeline.run(draft, services)
+        # Run classification + roster assembly first — this is what
+        # populates draft.capability_gaps / draft.talent_lifecycle_decisions
+        # (RosterStage._detect_capability_gaps).
+        draft = self._pre_pipeline.run(draft, services)
+
+        # P5.2 — act on any DISPATCH_TALENT_BUILDER decision before phase
+        # construction, so a resolved gap's agent name (generated or
+        # generic-fallback) is what DecompositionStage actually builds
+        # phases/steps for. No-op when no gaps were detected.
+        self._run_talent_factory(draft, services, talent_factory_config)
+
+        # Continue with risk .. assembly using the (possibly talent-factory
+        # -resolved) roster.
+        draft = self._post_pipeline.run(draft, services)
 
         # Optional LLM plan-quality review (BATON_PLAN_REVIEW=haiku|sonnet|opus).
         draft = self._review_plan_with_llm(draft)
@@ -519,6 +581,77 @@ class IntelligentPlanner:
         self._last_pattern_used = draft.pattern
         self._last_retro_feedback = draft.retro_feedback
         self._last_team_cost_estimates = dict(draft.team_cost_estimates)
+
+    def _run_talent_factory(
+        self,
+        draft: PlanDraft,
+        services: PlannerServices,
+        talent_factory_config: "TalentFactoryConfig | None",
+    ) -> None:
+        """Act on each capability-gap lifecycle decision RosterStage recorded.
+
+        Mutates ``draft.resolved_agents`` (and ``draft.agents``, when the
+        caller supplied an explicit list) in place, substituting a
+        resolved agent name for each gap whose lifecycle decision produced
+        one — a generated agent, or a deterministic generic fallback.
+        Always appends one entry to ``draft.talent_factory_outcomes`` and
+        one routing note per gap, so a gap that resolves to nothing
+        actionable (``request_clarification`` / ``queue_for_manager``) is
+        still visible in ``plan_diagnostics`` rather than silently
+        dropped. See docs/internal/talent-factory-contract.md.
+
+        Raises ``TalentFactoryError`` (propagated, not swallowed) only in
+        the "no fallback agent exists anywhere in the registry" edge case
+        — this step's explicit-planning-failure branch.
+        """
+        if not draft.talent_lifecycle_decisions:
+            return
+
+        from agent_baton.core.config.manager import TalentFactoryConfig
+        from agent_baton.core.engine.planning.talent_factory import (
+            NullTalentBuilderDispatcher,
+            run_talent_factory_for_gap,
+        )
+
+        config = talent_factory_config or TalentFactoryConfig()
+        project_root = draft.project_root or Path.cwd()
+        # Not created here -- only lazily, inside run_talent_factory_for_gap,
+        # and only for a gap whose decision actually needs to dispatch. A
+        # skip_init / allow_talent_builder=False / already-resolved plan
+        # must never create so much as an empty directory (see
+        # docs/internal/talent-factory-contract.md: "disabled or skipped
+        # initialization never generates talent").
+        scratch_root = project_root / ".claude" / "team-context" / "talent-builder"
+
+        dispatcher = self._talent_builder_dispatcher or NullTalentBuilderDispatcher()
+
+        for gap, decision in zip(draft.capability_gaps, draft.talent_lifecycle_decisions):
+            outcome = run_talent_factory_for_gap(
+                gap,
+                decision,
+                config=config,
+                registry=services.registry,
+                project_root=project_root,
+                scratch_root=scratch_root,
+                dispatcher=dispatcher,
+            )
+            draft.talent_factory_outcomes.append(outcome.to_dict())
+            draft.routing_notes.append(
+                f"[talent-factory] '{gap.requested_capability}' "
+                f"({gap.kind.value}) -> {outcome.status}: {outcome.detail}"
+            )
+
+            resolved = outcome.resolved_agent_name
+            if resolved and resolved != gap.requested_capability:
+                draft.resolved_agents = [
+                    resolved if a == gap.requested_capability else a
+                    for a in draft.resolved_agents
+                ]
+                if draft.agents is not None:
+                    draft.agents = [
+                        resolved if a == gap.requested_capability else a
+                        for a in draft.agents
+                    ]
 
     def _review_plan_with_llm(self, draft: PlanDraft) -> PlanDraft:
         """Post-pipeline LLM plan-quality review (opt-in via BATON_PLAN_REVIEW).

@@ -191,6 +191,11 @@ class AssemblyStage:
             "talent_lifecycle_decisions": [
                 decision.to_dict() for decision in draft.talent_lifecycle_decisions
             ],
+            # P5.2 -- what IntelligentPlanner._run_talent_factory actually
+            # did with each decision above (dispatch/validate/install
+            # outcome + resolved agent name substituted into the roster).
+            # See agent_baton.core.engine.planning.talent_factory.
+            "talent_factory_outcomes": list(draft.talent_factory_outcomes),
         }
 
     # ------------------------------------------------------------------

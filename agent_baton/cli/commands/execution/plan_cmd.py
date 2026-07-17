@@ -618,6 +618,51 @@ def handler(args: argparse.Namespace) -> None:
     project_root = Path(args.project) if args.project else Path.cwd()
     agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
 
+    # Manager-mode PMO config (M1, see docs/internal/manager-mode-pmo-design.md).
+    # Loaded here -- BEFORE planner.create_plan() -- rather than after, so
+    # `team.allow_talent_builder` and the `talent_factory` section can be
+    # threaded into create_plan() and actually govern the talent-factory
+    # lifecycle for this invocation (docs/internal/talent-factory-contract.md
+    # §11 item 1: "today ManagerConfig loads after create_plan() ... the load
+    # order needs to move earlier"). ManagerConfig is only loaded eagerly when
+    # it can matter -- --manager-mode was passed, or a project baton.yaml
+    # exists that could set manager_mode.enabled_by_default or
+    # team.allow_talent_builder -- so a plain `baton plan` with no
+    # manager-mode/baton.yaml footprint anywhere still skips the lookup.
+    #
+    # ManagerConfig.load() fails early (ManagerConfigError) on malformed YAML
+    # or an invalid nested policy value -- by design, so `baton config
+    # validate` surfaces problems loudly. But a plain `baton plan` (manager
+    # mode not requested) must never crash on someone else's broken
+    # baton.yaml/~/.baton/config.yaml: downgrade to a warning and fall back
+    # to defaults in that case. Only when the user explicitly asked for
+    # manager mode (--manager-mode) do we treat a bad config as a hard,
+    # user-facing error (typed, no raw traceback).
+    from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
+
+    _manager_mode_flag = bool(getattr(args, "manager_mode", False))
+    manager_config = ManagerConfig()
+    if _manager_mode_flag or ManagerConfig.find_config_file(project_root) is not None:
+        try:
+            manager_config = ManagerConfig.load(project_root)
+        except ManagerConfigError as exc:
+            if _manager_mode_flag:
+                validation_error(
+                    f"invalid manager config: {exc}",
+                    hint=(
+                        "Fix .claude/baton.yaml (or ~/.baton/config.yaml), "
+                        "or omit --manager-mode."
+                    ),
+                    docs="docs/internal/manager-mode-pmo-design.md",
+                )
+            _log.warning(
+                "Ignoring invalid manager config (non-fatal, manager mode "
+                "not requested): %s",
+                exc,
+            )
+
+    manager_requested = _manager_mode_flag or manager_config.manager_mode.enabled_by_default
+
     print("Planning...", file=sys.stderr)
 
     knowledge_registry = KnowledgeRegistry()
@@ -655,12 +700,23 @@ def handler(args: argparse.Namespace) -> None:
         _classifier = DataClassifier()
 
     print("  Analyzing patterns and history...", file=sys.stderr)
+    # Talent-factory dispatch (P5.2, docs/internal/talent-factory-contract.md):
+    # `baton plan` is the entry point meant to actually generate capability
+    # for a permitted gap, so it explicitly wires the live dispatcher.
+    # IntelligentPlanner's own default (no dispatcher passed) is
+    # deliberately inert -- constructing a planner must never start a live
+    # `claude` subprocess as a side effect.
+    from agent_baton.core.engine.planning.talent_factory import (
+        HeadlessTalentBuilderDispatcher,
+    )
+
     planner = IntelligentPlanner(
         retro_engine=retro_engine,
         classifier=_classifier,
         policy_engine=PolicyEngine(),
         knowledge_registry=knowledge_registry,
         bead_store=bead_store,
+        talent_builder_dispatcher=HeadlessTalentBuilderDispatcher(),
     )
     print("  Creating execution plan...", file=sys.stderr)
     # M6 prep: record whether --gate-scope was explicitly passed (argparse
@@ -685,6 +741,16 @@ def handler(args: argparse.Namespace) -> None:
         intervention_level=args.intervention,
         default_model=getattr(args, "model", None),
         gate_scope=gate_scope,
+        # Talent-factory lifecycle policy (P5.2, see
+        # docs/internal/talent-factory-contract.md). `--skip-init` is a
+        # per-invocation override; `team.allow_talent_builder` /
+        # `talent_factory` come from the manager config loaded above.
+        # Defaults (skip_init=False, allow_talent_builder=True, a
+        # default-valued TalentFactoryConfig) preserve prior behavior when
+        # neither is set.
+        skip_init=bool(getattr(args, "skip_init", False)),
+        allow_talent_builder=manager_config.team.allow_talent_builder,
+        talent_factory_config=manager_config.talent_factory,
     )
     print("  Done.", file=sys.stderr)
 
@@ -725,48 +791,9 @@ def handler(args: argparse.Namespace) -> None:
         plan.max_amend_cycles = max(0, getattr(args, "max_amend_cycles", 3))
 
     # Manager-mode PMO layer (M1, see docs/internal/manager-mode-pmo-design.md).
-    # ManagerConfig is only loaded when it can matter -- --manager-mode was
-    # passed, or a project baton.yaml exists that could set
-    # manager_mode.enabled_by_default -- so a plain `baton plan` with no
-    # manager-mode footprint anywhere skips the lookup entirely. The
-    # heavier `agent_baton.core.manager` builder package is only imported
-    # further below when manager mode is actually requested, so
-    # non-manager plans have zero core.manager import side effects and
-    # `plan.to_dict()` is unchanged apart from the `manager_mode: False`
-    # field added in this milestone.
-    #
-    # ManagerConfig.load() fails early (ManagerConfigError) on malformed
-    # YAML or an invalid nested policy value -- by design, so `baton
-    # config validate` surfaces problems loudly. But a plain `baton plan`
-    # (manager mode not requested) must never crash on someone else's
-    # broken baton.yaml/~/.baton/config.yaml: downgrade to a warning and
-    # fall back to defaults in that case. Only when the user explicitly
-    # asked for manager mode (--manager-mode) do we treat a bad config as
-    # a hard, user-facing error (typed, no raw traceback).
-    from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
-
-    _manager_mode_flag = bool(getattr(args, "manager_mode", False))
-    manager_config = ManagerConfig()
-    if _manager_mode_flag or ManagerConfig.find_config_file(project_root) is not None:
-        try:
-            manager_config = ManagerConfig.load(project_root)
-        except ManagerConfigError as exc:
-            if _manager_mode_flag:
-                validation_error(
-                    f"invalid manager config: {exc}",
-                    hint=(
-                        "Fix .claude/baton.yaml (or ~/.baton/config.yaml), "
-                        "or omit --manager-mode."
-                    ),
-                    docs="docs/internal/manager-mode-pmo-design.md",
-                )
-            _log.warning(
-                "Ignoring invalid manager config (non-fatal, manager mode "
-                "not requested): %s",
-                exc,
-            )
-
-    manager_requested = _manager_mode_flag or manager_config.manager_mode.enabled_by_default
+    # manager_config / manager_requested were resolved earlier (before
+    # planner.create_plan()) so the talent-factory policy could be threaded
+    # through -- see the block above `knowledge_registry = KnowledgeRegistry()`.
     if manager_requested:
         plan.manager_mode = True
 

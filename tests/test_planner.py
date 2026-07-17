@@ -290,13 +290,22 @@ class TestPlannerCapabilityGapIntegration:
     apply the bounded lifecycle -- this is the expected_outcome behavioral
     contract for P5.1 (docs/internal/talent-factory-contract.md)."""
 
-    def test_unknown_explicit_agent_is_recorded_as_capability_gap(self) -> None:
+    def test_unknown_explicit_agent_is_recorded_as_capability_gap(self, tmp_path) -> None:
         from agent_baton.core.engine.planning.planner import IntelligentPlanner
+        from agent_baton.core.engine.planning.talent_factory import (
+            NullTalentBuilderDispatcher,
+        )
 
-        planner = IntelligentPlanner()
+        # NullTalentBuilderDispatcher keeps this hermetic (no live `claude`
+        # subprocess) -- see TestPlannerTalentFactoryDispatch below for the
+        # full generation-success path with a fake dispatcher.
+        # project_root=tmp_path keeps the talent-factory scratch directory
+        # (and any install attempt) out of the real repo tree.
+        planner = IntelligentPlanner(talent_builder_dispatcher=NullTalentBuilderDispatcher())
         plan = planner.create_plan(
             "Add retry logic to the payment webhook handler",
             agents=["database-whisperer"],
+            project_root=tmp_path,
         )
         gaps = plan.plan_diagnostics.get("capability_gaps", [])
         assert len(gaps) == 1
@@ -310,9 +319,18 @@ class TestPlannerCapabilityGapIntegration:
         # dispatches talent-builder for a first-generation missing-role gap.
         assert decisions[0]["action"] == "dispatch_talent_builder"
 
-        # The gap is diagnostic-only at plan time -- it must not mutate the
-        # roster the caller explicitly asked for.
-        assert "database-whisperer" in plan.plan_diagnostics["selected_agents"]
+        # P5.2: the decision is now ACTED on (P5.1 was diagnostic-only).
+        # With no live dispatcher, the one bounded generation attempt
+        # fails and resolves to the deterministic generic-agent fallback
+        # -- an unresolved agent request must never survive into the
+        # final roster (a plan step naming a nonexistent agent would fail
+        # at execution time with no diagnosis of why).
+        outcomes = plan.plan_diagnostics.get("talent_factory_outcomes", [])
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "generation_failed_fallback"
+        assert outcomes[0]["resolved_agent_name"]
+        assert "database-whisperer" not in plan.plan_diagnostics["selected_agents"]
+        assert outcomes[0]["resolved_agent_name"] in plan.plan_diagnostics["selected_agents"]
 
     def test_skip_init_falls_back_instead_of_dispatching(self) -> None:
         from agent_baton.core.engine.planning.planner import IntelligentPlanner
@@ -366,3 +384,146 @@ class TestPlannerCapabilityGapIntegration:
         planner = IntelligentPlanner()
         plan = planner.create_plan("Add retry logic to the payment webhook handler")
         assert plan.plan_diagnostics.get("capability_gaps") == []
+
+
+# ---------------------------------------------------------------------------
+# IntelligentPlanner.create_plan() -- full talent-factory dispatch (P5.2)
+# ---------------------------------------------------------------------------
+
+
+_GENERATED_AGENT_TEMPLATE = """---
+name: {name}
+description: |
+  Specialist agent generated for this plan.
+model: sonnet
+permissionMode: default
+color: teal
+tools: Read, Glob, Grep
+created_by: talent-builder
+status: draft
+version: 0.1.0
+---
+
+# {title}
+
+## Mission
+
+You are a specialist. Do the specialist thing.
+
+## Before Starting
+
+1. Read this entire agent definition.
+
+## Knowledge References
+
+No knowledge packs required for this role yet.
+
+## Principles
+
+- Be rigorous.
+
+## Anti-Patterns
+
+- Do not fabricate results.
+
+## Output Format
+
+Return a summary of findings.
+"""
+
+
+class _FakeSuccessDispatcher:
+    """Writes a valid generated-agent artifact for every request."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def dispatch(self, request):
+        from agent_baton.core.engine.planning.talent_factory import DispatchOutcome
+
+        self.call_count += 1
+        request.output_dir.mkdir(parents=True, exist_ok=True)
+        name = request.gap.requested_capability
+        path = request.output_dir / f"{name}.md"
+        path.write_text(
+            _GENERATED_AGENT_TEMPLATE.format(name=name, title=name.replace("-", " ").title()),
+            encoding="utf-8",
+        )
+        return DispatchOutcome(success=True, candidate_paths=[path])
+
+
+class TestPlannerTalentFactoryDispatch:
+    """End-to-end: capability gap -> generated, installed, re-planned step.
+
+    This is the P5.2 behavioral contract: "A permitted, real capability gap
+    triggers one scoped talent-builder run whose validated artifact is
+    atomically installed, loaded, and used to re-plan the unresolved work;
+    disabled or skipped initialization never generates talent."
+    """
+
+    def test_generation_success_resolves_and_installs(self, tmp_path) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        plan = planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+        )
+
+        assert dispatcher.call_count == 1, "exactly one bounded dispatch attempt"
+
+        outcomes = plan.plan_diagnostics["talent_factory_outcomes"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "generated"
+        assert outcomes[0]["resolved_agent_name"] == "archive-retention-specialist"
+
+        # The generated agent's name replaces the unresolved request in the
+        # final roster -- every step re-plans onto the resolved name.
+        step_agents = {s.agent_name for p in plan.phases for s in p.steps}
+        assert "archive-retention-specialist" in step_agents
+
+        installed = tmp_path / ".claude" / "agents" / "archive-retention-specialist.md"
+        assert installed.is_file()
+
+        # No leftover scratch state.
+        scratch_root = tmp_path / ".claude" / "team-context" / "talent-builder"
+        if scratch_root.is_dir():
+            assert list(scratch_root.iterdir()) == []
+
+    def test_skip_init_never_generates_talent(self, tmp_path) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+            skip_init=True,
+        )
+
+        assert dispatcher.call_count == 0, "skip_init must never dispatch talent-builder"
+        assert not (tmp_path / ".claude" / "agents").exists()
+
+    def test_disabled_policy_never_generates_talent(self, tmp_path) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+            allow_talent_builder=False,
+        )
+
+        assert dispatcher.call_count == 0, "allow_talent_builder=False must never dispatch"
+        assert not (tmp_path / ".claude" / "agents").exists()

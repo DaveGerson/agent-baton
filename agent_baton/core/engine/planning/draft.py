@@ -133,6 +133,14 @@ class PlanDraft:
     allow_talent_builder: bool = True
     capability_gaps: list = field(default_factory=list)
     talent_lifecycle_decisions: list = field(default_factory=list)
+    # Populated by IntelligentPlanner._run_talent_factory (post-RosterStage,
+    # pre-DecompositionStage) -- one dict per gap, recording what actually
+    # happened when a DISPATCH_TALENT_BUILDER (or fallback/queue/clarify)
+    # decision was acted on: dispatch outcome, validation result, and the
+    # resolved agent name (if any) substituted into ``resolved_agents``
+    # before phase construction. See
+    # agent_baton.core.engine.planning.talent_factory.TalentFactoryOutcome.
+    talent_factory_outcomes: list = field(default_factory=list)
 
     @classmethod
     def from_inputs(
