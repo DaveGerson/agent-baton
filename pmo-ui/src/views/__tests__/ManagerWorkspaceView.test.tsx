@@ -411,4 +411,166 @@ describe('ManagerWorkspaceView', () => {
     expect(await screen.findByLabelText('Choose a plan')).toBeInTheDocument();
     expect(screen.getByLabelText('Or open by task ID')).toBeInTheDocument();
   });
+
+  it('denies (rejects) a pending decision with a rationale', async () => {
+    mockNonManagerDefaults({ ...baseCard, column: 'awaiting_human' });
+    vi.spyOn(api, 'listExecutionDecisions').mockResolvedValue({
+      count: 1,
+      decisions: [
+        {
+          request_id: 'req-2',
+          task_id: baseCard.card_id,
+          decision_type: 'approval',
+          summary: 'Approve the deploy step?',
+          options: ['approve', 'reject'],
+          deadline: null,
+          context_files: [],
+          created_at: '2026-07-05T00:00:00Z',
+          status: 'pending',
+        },
+      ],
+    });
+    const resolveSpy = vi.spyOn(api, 'resolveExecutionDecision').mockResolvedValue({
+      resolved: true,
+      execution_resumed: false,
+    });
+
+    const user = await openCard();
+    const form = await screen.findByTestId('execution-decision-form');
+
+    await user.click(within(form).getByLabelText('reject'));
+    await user.type(within(form).getByLabelText('Rationale (optional)'), 'Needs another security pass.');
+    await user.click(within(form).getByRole('button', { name: /resolve decision/i }));
+
+    expect(resolveSpy).toHaveBeenCalledWith(baseCard.card_id, 'req-2', {
+      option: 'reject',
+      rationale: 'Needs another security pass.',
+    });
+    // A rejection that does not resume execution must not show "Resuming".
+    expect(await screen.findByTestId('execution-status-badge')).not.toHaveTextContent('Resuming');
+  });
+
+  it('denies a scope-expansion decision', async () => {
+    mockManagerDefaults();
+    vi.spyOn(api, 'listManagerDecisions').mockResolvedValue({
+      task_id: baseCard.card_id,
+      count: 1,
+      decisions: [
+        {
+          decision_id: 'dec-2',
+          decision_type: 'scope_expansion',
+          task_id: baseCard.card_id,
+          summary: 'Step 1.1 touched files outside its contract',
+          context: 'Diff touched pmo-ui/src/api/client.ts',
+          options: ['approve', 'reject'],
+          recommended_option: 'approve',
+          created_at: '2026-07-05T00:00:00Z',
+          resolved_at: null,
+          resolution: null,
+          markdown: '',
+        },
+      ],
+    });
+    const resolveSpy = vi.spyOn(api, 'resolveManagerDecision').mockResolvedValue({
+      applied: true,
+      resolution: 'reject',
+      step_id: '1.1',
+      decision_id: 'dec-2',
+      new_allowed_paths: [],
+      error: null,
+    });
+
+    const user = await openCard();
+    const decisionCard = await screen.findByTestId('scope-expansion-decision');
+
+    await user.click(within(decisionCard).getByRole('button', { name: /deny expansion/i }));
+
+    expect(resolveSpy).toHaveBeenCalledWith(baseCard.card_id, 'dec-2', {
+      resolution: 'reject',
+      additional_paths: undefined,
+    });
+  });
+
+  it('shows a stale-artifacts banner when published artifacts no longer match the current plan', async () => {
+    mockManagerDefaults();
+    vi.spyOn(api, 'getManagerValidation').mockResolvedValue({
+      task_id: baseCard.card_id,
+      published: true,
+      valid: false,
+      fingerprint_match: false,
+      revision: 3,
+      current_plan_fingerprint: 'fp-new',
+      published_plan_fingerprint: 'fp-old',
+      errors: ['published revision 3 was built from a different plan shape'],
+    });
+    await openCard();
+
+    const banner = await screen.findByTestId('stale-artifacts-banner');
+    expect(banner).toHaveTextContent(/stale/i);
+    expect(banner).toHaveTextContent(/revision 3/);
+  });
+
+  it('keeps the rest of the workspace usable when one manager artifact fails to load', async () => {
+    mockManagerDefaults();
+    vi.spyOn(api, 'getManagerCharter').mockRejectedValue(new Error('charter service unavailable'));
+    await openCard();
+
+    // The failing section surfaces its own error instead of crashing the page...
+    expect(await screen.findByText(/charter service unavailable/)).toBeInTheDocument();
+    // ...while an unrelated, successfully-loaded section still renders.
+    expect(screen.getByText('Console Squad')).toBeInTheDocument();
+    expect(screen.getByTestId('manager-workspace')).toBeInTheDocument();
+  });
+
+  it('does not leak one card artifacts into another when the operator switches plans', async () => {
+    const cardB: PmoCard = { ...baseCard, card_id: 'task-2', title: 'Ship the gadget' };
+    mockManagerDefaults();
+    vi.spyOn(api, 'getBoard').mockResolvedValue({
+      cards: [baseCard, cardB],
+      health: {},
+    } as BoardResponse);
+
+    const user = userEvent.setup();
+    renderWithToast(<ManagerWorkspaceView />);
+    const select = await screen.findByLabelText('Choose a plan');
+
+    await user.selectOptions(select, baseCard.card_id);
+    expect(await screen.findByText(/Objective: ship the widget on time/)).toBeInTheDocument();
+
+    // Second card has its own (empty) charter and a distinct title -- none
+    // of card A's manager-mode content should still be on screen.
+    vi.spyOn(api, 'getCardDetail').mockResolvedValue({ ...cardB, plan: null });
+    vi.spyOn(api, 'getManagerCharter').mockClear();
+
+    await user.selectOptions(select, cardB.card_id);
+    expect(await screen.findByRole('heading', { name: 'Ship the gadget' })).toBeInTheDocument();
+    expect(screen.getByTestId('not-manager-mode-banner')).toBeInTheDocument();
+    expect(screen.queryByText(/Objective: ship the widget on time/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Ship the widget')).not.toBeInTheDocument();
+  });
+
+  it('exposes accessible names, roles, and live regions for key operator controls', async () => {
+    mockManagerDefaults();
+    await openCard();
+
+    // Status badge is an ARIA live region so a status change is announced.
+    const badge = await screen.findByTestId('execution-status-badge');
+    expect(badge).toHaveAttribute('role', 'status');
+    expect(badge).toHaveAttribute('aria-live', 'polite');
+
+    // Step-completion progress bar carries real min/max/now values, not
+    // just a visual bar.
+    const progress = screen.getByRole('progressbar', { name: 'Plan step completion' });
+    expect(progress).toHaveAttribute('aria-valuemin', '0');
+    expect(progress).toHaveAttribute('aria-valuemax', String(baseCard.steps_total));
+    expect(progress).toHaveAttribute('aria-valuenow', String(baseCard.steps_completed));
+
+    // Primary action buttons all have accessible (non-empty) names.
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
+
+    // Card picker + manual task-id input are both properly labeled.
+    expect(screen.getByLabelText('Choose a plan')).toBeInTheDocument();
+    expect(screen.getByLabelText('Or open by task ID')).toBeInTheDocument();
+  });
 });
