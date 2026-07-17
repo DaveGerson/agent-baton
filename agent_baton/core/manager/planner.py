@@ -103,20 +103,21 @@ class ManagerModePlanner:
     Calling convention (enforced by the caller, not this class): callers
     invoke :meth:`build_and_write` only when the plan itself is being
     persisted (``baton plan --save``); for a preview (``--dry-run``) they
-    call :meth:`build` alone so nothing is written to disk. ``build()``
-    never touches the filesystem -- as a consequence, a step's own scope
-    contract / role card have not been written yet when its context
-    bundle is assembled during a dry-run preview, so their ``must_read``
-    token estimates come back ``0`` with a "missing file" truncation
-    warning (truthful: those files genuinely do not exist yet in a
-    preview). :meth:`build_and_write` avoids this by writing each scope
-    contract's Markdown sidecar and each role card's Markdown -- the two
-    ``must_read`` entries every bundle carries for itself -- to disk
-    *before* building that step's bundle, so real-run token accounting is
-    accurate. ``write_all`` still performs the authoritative final write
-    pass (including the JSON contracts, which are never pre-written) --
-    the early write is a superset-safe, idempotent head start solely for
-    token-estimation accuracy.
+    call :meth:`build` alone so nothing is written to disk. Token
+    accounting is identical either way: each step's bundle estimates its
+    own scope-contract / role-card ``must_read`` tokens from the rendered
+    text in memory (``ContextBundleBuilder.build``'s ``contract_text`` /
+    ``role_card_text``), never by re-reading the file at the target path
+    -- so ``build()`` (dry-run previews, and the transactional
+    ``rebuild_and_publish`` path used by PMO Forge and runtime
+    amendments, which must not write anything before validation) produces
+    the same estimates as ``build_and_write()`` for the same input, and
+    an amendment rebuild never inherits a previous revision's stale file
+    sizes. :meth:`build_and_write` additionally writes each contract's
+    Markdown sidecar and each role card's Markdown early (a superset-safe,
+    idempotent head start); ``write_all`` still performs the
+    authoritative final write pass (including the JSON contracts, which
+    are never pre-written).
     """
 
     def __init__(
@@ -344,6 +345,17 @@ class ManagerModePlanner:
                     prior_handoff_paths,
                     role_card_path=role_card_path,
                     task_id=plan.task_id,
+                    # Estimate the contract/role-card must-read tokens from
+                    # the rendered text itself, never from re-reading the
+                    # file at the target path: during `build()` (dry-run
+                    # preview and the transactional rebuild_and_publish /
+                    # PMO-Forge path) those files do not exist yet, and
+                    # during an amendment rebuild the on-disk copy is the
+                    # PREVIOUS revision's bytes. The estimate is identical
+                    # to the published file's size once written (see
+                    # _text_token_estimate), so CLI and PMO bundles agree.
+                    contract_text=contract_md,
+                    role_card_text=artifacts.role_cards_md[role_card.role],
                 )
                 artifacts.context_bundles[step.step_id] = bundle
 

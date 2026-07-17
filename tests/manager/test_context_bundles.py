@@ -586,3 +586,77 @@ def test_bundle_round_trip(tmp_path) -> None:
     serialized = json.dumps(bundle.to_dict())
     reloaded = ContextBundle.from_dict(json.loads(serialized))
     assert reloaded == bundle
+
+
+# ---------------------------------------------------------------------------
+# In-memory text token estimation (phase 7 review regression)
+# ---------------------------------------------------------------------------
+
+
+def test_contract_and_role_card_text_estimates_without_files_on_disk(tmp_path) -> None:
+    """Regression (phase 7 review): when the caller supplies the rendered
+    ``contract_text`` / ``role_card_text``, must-read token estimates come
+    from that in-memory text and no "Missing file for token estimate"
+    warning fires -- even though neither file exists on disk yet. This is
+    the path ``ManagerModePlanner.build()`` (dry-run previews and
+    ``rebuild_and_publish`` -- the PMO/Forge and runtime-amendment publish
+    path) takes; before the fix those bundles all carried 0-token
+    estimates plus spurious missing-file warnings, diverging from the
+    CLI's ``build_and_write`` output for identical input."""
+    contract_path = tmp_path / "scope-contracts" / "2.1.md"
+    role_card_path = tmp_path / "role-cards" / "backend-engineer.md"
+    assert not contract_path.exists() and not role_card_path.exists()
+
+    contract_text = "x" * 400   # 400 utf-8 bytes -> 100 tokens
+    role_card_text = "y" * 200  # 200 utf-8 bytes -> 50 tokens
+
+    bundle = ContextBundleBuilder(ManagerConfig()).build(
+        _step(),
+        contract_path,
+        _role_card(),
+        _knowledge_plan(),
+        role_card_path=role_card_path,
+        contract_text=contract_text,
+        role_card_text=role_card_text,
+    )
+
+    by_reason = {ref.reason: ref for ref in bundle.must_read}
+    assert by_reason["scope contract"].token_estimate == 100
+    assert by_reason["role card"].token_estimate == 50
+    assert not any(
+        "Missing file for token estimate" in w for w in bundle.truncation_warnings
+    )
+
+    # Identical text written to disk produces the identical estimate --
+    # the two estimators can never disagree about the same content.
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_text(contract_text, encoding="utf-8")
+    role_card_path.parent.mkdir(parents=True)
+    role_card_path.write_text(role_card_text, encoding="utf-8")
+    from_disk = ContextBundleBuilder(ManagerConfig()).build(
+        _step(),
+        contract_path,
+        _role_card(),
+        _knowledge_plan(),
+        role_card_path=role_card_path,
+    )
+    disk_by_reason = {ref.reason: ref for ref in from_disk.must_read}
+    assert disk_by_reason["scope contract"].token_estimate == 100
+    assert disk_by_reason["role card"].token_estimate == 50
+
+
+def test_omitting_text_keeps_file_based_estimation_and_missing_warning(tmp_path) -> None:
+    """Control: with no ``contract_text``/``role_card_text`` the original
+    file-based behavior is unchanged -- a missing file still yields a
+    0-token estimate and a missing-file warning."""
+    contract_path = tmp_path / "does-not-exist.md"
+
+    bundle = ContextBundleBuilder(ManagerConfig()).build(
+        _step(), contract_path, _role_card(), _knowledge_plan()
+    )
+
+    contract_ref = next(r for r in bundle.must_read if r.reason == "scope contract")
+    assert contract_ref.token_estimate == 0
+    assert any(
+        "Missing file for token estimate" in w for w in bundle.truncation_warnings
+    )

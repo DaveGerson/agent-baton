@@ -284,6 +284,19 @@ def _file_token_estimate(path_str: str) -> tuple[int, bool]:
         return 0, False
 
 
+def _text_token_estimate(text: str) -> int:
+    """In-memory equivalent of :func:`_file_token_estimate` for content that
+    has been rendered but not (yet) written to disk.
+
+    ``len(utf-8 bytes) // 4`` -- byte-for-byte identical to what
+    :func:`_file_token_estimate` returns once the same *text* is written
+    via ``agent_baton.core.manager.artifacts.write_text`` (which persists
+    it verbatim), so estimating from the rendered text and estimating from
+    the published file can never disagree.
+    """
+    return len(text.encode("utf-8")) // 4
+
+
 class ContextBundleBuilder:
     """Builds a :class:`ContextBundle` for one nontrivial step.
 
@@ -308,12 +321,37 @@ class ContextBundleBuilder:
         *,
         role_card_path: "str | Path | None" = None,
         task_id: str = "",
+        contract_text: "str | None" = None,
+        role_card_text: "str | None" = None,
     ) -> ContextBundle:
+        """Build the bundle for *step*.
+
+        ``contract_text`` / ``role_card_text``: the already-rendered content
+        of the scope contract / role card the bundle's first two
+        ``must_read`` references point at. When provided, token estimates
+        for those references come from this in-memory text
+        (:func:`_text_token_estimate`) rather than from re-reading the file
+        at ``contract_path`` / ``role_card_path`` -- which may not exist yet
+        (``ManagerModePlanner.build()`` composes without touching the
+        filesystem: dry-run previews and the transactional
+        ``rebuild_and_publish`` path both estimate BEFORE anything is
+        written) or may still hold a previous revision's bytes. Estimating
+        from the rendered text keeps CLI-saved, PMO/Forge-saved, and
+        amendment-rebuilt bundles byte-identical for identical input (see
+        tests/e2e/test_manager_mode_cli_pmo_parity.py). When omitted, the
+        original file-based estimate (with its "Missing file" warning on
+        absence) applies unchanged.
+        """
         contract_path_str = str(contract_path)
         truncation_warnings: list[str] = []
 
         must_read = self._build_must_read(
-            step, contract_path_str, role_card_path, truncation_warnings
+            step,
+            contract_path_str,
+            role_card_path,
+            truncation_warnings,
+            contract_text=contract_text,
+            role_card_text=role_card_text,
         )
         reference_only = self._build_reference_only(step)
         knowledge_packs = self._build_knowledge_packs(
@@ -363,10 +401,16 @@ class ContextBundleBuilder:
         contract_path_str: str,
         role_card_path: "str | Path | None",
         truncation_warnings: list[str],
+        *,
+        contract_text: "str | None" = None,
+        role_card_text: "str | None" = None,
     ) -> list[ContextReference]:
         must_read: list[ContextReference] = []
 
-        contract_tokens, contract_found = _file_token_estimate(contract_path_str)
+        if contract_text is not None:
+            contract_tokens, contract_found = _text_token_estimate(contract_text), True
+        else:
+            contract_tokens, contract_found = _file_token_estimate(contract_path_str)
         if not contract_found:
             truncation_warnings.append(
                 f"Missing file for token estimate: {contract_path_str}"
@@ -382,7 +426,10 @@ class ContextBundleBuilder:
 
         if role_card_path is not None:
             role_card_path_str = str(role_card_path)
-            role_tokens, role_found = _file_token_estimate(role_card_path_str)
+            if role_card_text is not None:
+                role_tokens, role_found = _text_token_estimate(role_card_text), True
+            else:
+                role_tokens, role_found = _file_token_estimate(role_card_path_str)
             if not role_found:
                 truncation_warnings.append(
                     f"Missing file for token estimate: {role_card_path_str}"

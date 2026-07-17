@@ -17,26 +17,22 @@ Asserts that for the SAME deterministic plan input and the SAME (default)
 
 Deliberately excluded from the comparison: ``artifact-revision.json``
 (only the PMO path writes one -- ``rebuild_and_publish`` is a strict
-superset of ``build_and_write``, see that docstring), any field generated
-from a wall-clock timestamp, and per-reference ``token_estimate`` /
-``estimated_tokens`` / ``truncation_warnings`` in context bundles -- see
-``TestCliPmoManagerModeParity.test_context_bundle_token_estimates_are_a_
-known_pmo_vs_cli_gap`` below, which pins a CONFIRMED, currently-live
-discrepancy this test file discovered rather than silently masking it:
-``ManagerModePlanner.build()`` (used by ``rebuild_and_publish`` /
-PMO) runs with ``persist_sidecars_early=False``, so
-``ContextBundleBuilder`` estimates must-read token counts for scope
-contracts and role cards BEFORE those files exist on disk -- every one
-comes back as a 0-token estimate plus a spurious "Missing file for token
-estimate" truncation warning. ``ManagerModePlanner.build_and_write()``
-(the CLI path) writes those same files early specifically so the
-estimator can read them, and never hits this. Net effect: a manager-mode
-plan created via Forge/PMO gets systematically worse context-bundle
-token accounting than the identical plan created via the CLI. Fixing
-this is out of scope for this test-authoring step (it requires editing
-``agent_baton/core/manager/planner.py`` / ``context_bundles.py``, outside
-this step's allowed paths) -- see this suite's structured report for the
-recommended follow-up.
+superset of ``build_and_write``, see that docstring) and any field
+generated from a wall-clock timestamp. Everything else -- including
+per-reference ``token_estimate`` / ``estimated_tokens`` /
+``truncation_warnings`` in context bundles and the manager brief -- is
+compared byte-for-byte. An earlier revision of this suite discovered
+(and pinned) a live CLI-vs-PMO divergence here: ``ManagerModePlanner.
+build()`` (the ``rebuild_and_publish`` / PMO path) estimated must-read
+token counts by re-reading scope-contract/role-card files that had not
+been written yet, so every PMO bundle carried a 0-token estimate plus a
+spurious "Missing file for token estimate" truncation warning. That was
+fixed in the Phase 7 review: ``ContextBundleBuilder.build`` now
+estimates those references from the rendered in-memory text
+(``contract_text`` / ``role_card_text``), which is byte-identical to
+the published file's size, on both paths.
+``test_context_bundle_token_estimates_match_and_are_nonzero`` below is
+the regression test for that fix.
 
 Hermetic: ``Path.home()`` is redirected by the autouse ``tests/e2e/
 conftest.py::fake_home`` fixture; ``IntelligentPlanner`` is mocked (never
@@ -285,21 +281,12 @@ class TestCliPmoManagerModeParity:
         cli_paths, pmo_paths = built
         assert _read_json(cli_paths.knowledge_plan) == _read_json(pmo_paths.knowledge_plan)
 
-    def test_manager_brief_is_identical_modulo_known_token_estimate_gap(self, built) -> None:
-        """Byte-identical except for the "Missing file for token estimate"
-        truncation-warning lines the PMO path spuriously emits -- see the
-        module docstring and ``test_context_bundle_token_estimates_are_a_
-        known_pmo_vs_cli_gap`` below for the confirmed root cause."""
+    def test_manager_brief_is_identical(self, built) -> None:
         cli_paths, pmo_paths = built
-        cli_lines = [
-            ln for ln in cli_paths.manager_brief.read_text(encoding="utf-8").splitlines()
-            if "Missing file for token estimate" not in ln
-        ]
-        pmo_lines = [
-            ln for ln in pmo_paths.manager_brief.read_text(encoding="utf-8").splitlines()
-            if "Missing file for token estimate" not in ln
-        ]
-        assert cli_lines == pmo_lines
+        assert (
+            cli_paths.manager_brief.read_text(encoding="utf-8")
+            == pmo_paths.manager_brief.read_text(encoding="utf-8")
+        )
 
     def test_role_cards_are_identical(self, built) -> None:
         cli_paths, pmo_paths = built
@@ -326,28 +313,12 @@ class TestCliPmoManagerModeParity:
             pmo_md = (pmo_paths.scope_contracts_dir / f"{stem}.md").read_text(encoding="utf-8")
             assert cli_md == pmo_md, f"scope contract {stem!r} Markdown diverged"
 
-    @staticmethod
-    def _strip_token_estimate_gap(bundle: dict) -> dict:
-        """Return *bundle* with the fields known to diverge due to the
-        ``persist_sidecars_early`` ordering gap (see module docstring)
-        zeroed/cleared out, so the REST of the bundle's structure and
-        content can still be compared for genuine equivalence."""
-        out = dict(bundle)
-        out["estimated_tokens"] = None
-        # Keep unrelated warnings (e.g. "Phantom knowledge pack ...", which
-        # is identical on both sides and IS part of the genuine structural
-        # comparison) -- only strip the ones caused by the known gap.
-        out["truncation_warnings"] = [
-            w for w in bundle.get("truncation_warnings", [])
-            if "Missing file for token estimate" not in w
-        ]
-        for key in ("must_read", "reference_only"):
-            out[key] = [{**ref, "token_estimate": None} for ref in bundle.get(key, [])]
-        return out
-
-    def test_every_context_bundle_is_structurally_identical(self, built) -> None:
-        """Same step ids, same reference paths/reasons/kinds -- everything
-        except the known token-estimate/truncation-warning gap (see below)."""
+    def test_every_context_bundle_is_identical(self, built) -> None:
+        """Byte-equivalent bundles (modulo the tmp-dir root prefix in
+        absolute paths): same step ids, same reference paths/reasons/kinds,
+        AND the same token estimates / truncation warnings -- the
+        token-accounting divergence an earlier revision of this suite had
+        to strip out was fixed (see the module docstring)."""
         cli_paths, pmo_paths = built
         cli_stems = {p.stem for p in cli_paths.context_bundles_dir.glob("*.json")}
         pmo_stems = {p.stem for p in pmo_paths.context_bundles_dir.glob("*.json")}
@@ -356,32 +327,34 @@ class TestCliPmoManagerModeParity:
         for stem in cli_stems:
             cli_json = _normalize_root(_read_json(cli_paths.context_bundles_dir / f"{stem}.json"), str(cli_paths.root))
             pmo_json = _normalize_root(_read_json(pmo_paths.context_bundles_dir / f"{stem}.json"), str(pmo_paths.root))
-            assert self._strip_token_estimate_gap(cli_json) == self._strip_token_estimate_gap(pmo_json), (
-                f"context bundle {stem!r} diverged beyond the known token-estimate gap"
-            )
+            assert cli_json == pmo_json, f"context bundle {stem!r} diverged between CLI and PMO"
 
-    def test_context_bundle_token_estimates_are_a_known_pmo_vs_cli_gap(self, built) -> None:
-        """Pins the CONFIRMED, currently-live discrepancy this parity
-        suite discovered: the PMO path's context bundles come back with
-        0 token estimates and a "Missing file for token estimate"
-        truncation warning for every must-read scope-contract/role-card
-        reference, while the CLI path's do not, purely because of write
-        ordering (``persist_sidecars_early``) -- not any real difference
-        in plan/config input. This test intentionally asserts the
-        CURRENT (undesirable) behavior so it is visible and tracked
-        rather than silently normalized away; it should be deleted (not
-        loosened) the day ``ManagerModePlanner.build()`` is fixed to
-        either persist sidecars early too or estimate tokens from the
-        in-memory rendered text instead of re-reading from disk."""
+    def test_context_bundle_token_estimates_match_and_are_nonzero(self, built) -> None:
+        """Regression test (phase 7 review): the PMO/``rebuild_and_publish``
+        path used to estimate must-read tokens by re-reading
+        scope-contract/role-card files that had not been written yet, so
+        every PMO bundle carried ``token_estimate == 0`` plus a spurious
+        "Missing file for token estimate" warning, while the CLI path's did
+        not. Both paths now estimate from the rendered in-memory text
+        (``ContextBundleBuilder.build``'s ``contract_text`` /
+        ``role_card_text``), so both must produce real, matching,
+        nonzero estimates and no missing-file noise."""
         cli_paths, pmo_paths = built
         cli_bundle = _read_json(cli_paths.context_bundles_dir / "1.1.json")
         pmo_bundle = _read_json(pmo_paths.context_bundles_dir / "1.1.json")
 
-        assert not any("Missing file for token estimate" in w for w in cli_bundle["truncation_warnings"])
-        assert all(ref["token_estimate"] > 0 for ref in cli_bundle["must_read"])
+        for side, bundle in (("cli", cli_bundle), ("pmo", pmo_bundle)):
+            assert not any(
+                "Missing file for token estimate" in w for w in bundle["truncation_warnings"]
+            ), f"{side} bundle carries spurious missing-file warnings"
+            assert all(ref["token_estimate"] > 0 for ref in bundle["must_read"]), (
+                f"{side} bundle has zeroed must-read token estimates"
+            )
 
-        assert any("Missing file for token estimate" in w for w in pmo_bundle["truncation_warnings"])
-        assert all(ref["token_estimate"] == 0 for ref in pmo_bundle["must_read"])
+        assert [r["token_estimate"] for r in cli_bundle["must_read"]] == [
+            r["token_estimate"] for r in pmo_bundle["must_read"]
+        ]
+        assert cli_bundle["estimated_tokens"] == pmo_bundle["estimated_tokens"] > 0
 
     def test_pmo_records_a_revision_manifest_cli_does_not(self, built) -> None:
         """Documents the one intentional asymmetry (see module docstring
