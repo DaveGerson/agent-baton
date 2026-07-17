@@ -36,6 +36,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_baton.cli.commands.execution import plan_cmd
+from agent_baton.core.config.manager import TalentFactoryConfig
 from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
 
 
@@ -182,6 +183,45 @@ def _run_handler(
     return capsys.readouterr().out
 
 
+def _run_handler_capturing_planner_mock(
+    args: argparse.Namespace,
+    plan: MachinePlan,
+) -> MagicMock:
+    """Like ``_run_handler`` but returns the mocked ``IntelligentPlanner``
+    instance instead of stdout, so a test can inspect
+    ``create_plan.call_args`` -- used for talent-factory config-wiring
+    assertions (P5, docs/internal/talent-factory-contract.md)."""
+    mock_planner = MagicMock()
+    mock_planner.create_plan.return_value = plan
+    mock_planner.explain_plan.return_value = "Why this plan."
+
+    patches = [
+        patch(
+            "agent_baton.cli.commands.execution.plan_cmd.IntelligentPlanner",
+            return_value=mock_planner,
+        ),
+        patch(
+            "agent_baton.cli.commands.execution.plan_cmd.RetrospectiveEngine",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "agent_baton.cli.commands.execution.plan_cmd.DataClassifier",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "agent_baton.cli.commands.execution.plan_cmd.PolicyEngine",
+            return_value=MagicMock(),
+        ),
+    ]
+
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        plan_cmd.handler(args)
+
+    return mock_planner
+
+
 # ---------------------------------------------------------------------------
 # --manager-mode --save (no --explain): PRD §20 "Artifacts:" block
 # ---------------------------------------------------------------------------
@@ -258,3 +298,70 @@ def test_manager_mode_dry_run_preview_writes_nothing(
 
     ctx_dir = tmp_path / ".claude" / "team-context"
     assert not ctx_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# --manager-mode still threads talent-factory policy through create_plan()
+# ---------------------------------------------------------------------------
+#
+# ManagerConfig loading was moved earlier in plan_cmd.handler() (P5.2, see
+# docs/internal/talent-factory-contract.md §11 item 1) so `--skip-init` /
+# `team.allow_talent_builder` / `talent_factory` could reach
+# IntelligentPlanner.create_plan(). tests/cli/test_plan_cmd_talent_factory.py
+# covers that wiring for a plain (non-manager-mode) `baton plan`; the tests
+# below pin the same wiring when `--manager-mode` is also requested, since
+# manager mode is the other consumer of the same (now earlier) config load
+# and a regression here would silently re-order the two without either
+# suite catching it.
+
+
+class TestManagerModeStillThreadsTalentFactoryConfig:
+    def test_manager_mode_save_passes_default_talent_factory_config(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        plan = _plan(task_id="2026-07-02-reporting-endpoint-tf000001")
+
+        mock_planner = _run_handler_capturing_planner_mock(
+            _make_args(save=True, manager_mode=True), plan,
+        )
+
+        kwargs = mock_planner.create_plan.call_args.kwargs
+        assert kwargs["skip_init"] is False
+        assert kwargs["allow_talent_builder"] is True
+        assert isinstance(kwargs["talent_factory_config"], TalentFactoryConfig)
+        assert kwargs["talent_factory_config"].retry_budget == 1
+
+    def test_manager_mode_save_honors_project_talent_factory_overrides(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "baton.yaml").write_text(
+            "team:\n  allow_talent_builder: false\n"
+            "talent_factory:\n  retry_budget: 4\n  name_collision_policy: manual_review\n",
+            encoding="utf-8",
+        )
+        plan = _plan(task_id="2026-07-02-reporting-endpoint-tf000002")
+
+        mock_planner = _run_handler_capturing_planner_mock(
+            _make_args(save=True, manager_mode=True), plan,
+        )
+
+        kwargs = mock_planner.create_plan.call_args.kwargs
+        assert kwargs["allow_talent_builder"] is False
+        config = kwargs["talent_factory_config"]
+        assert config.retry_budget == 4
+        assert config.name_collision_policy == "manual_review"
+
+    def test_manager_mode_save_honors_skip_init(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        plan = _plan(task_id="2026-07-02-reporting-endpoint-tf000003")
+        args = _make_args(save=True, manager_mode=True)
+        args.skip_init = True
+
+        mock_planner = _run_handler_capturing_planner_mock(args, plan)
+
+        kwargs = mock_planner.create_plan.call_args.kwargs
+        assert kwargs["skip_init"] is True

@@ -527,3 +527,123 @@ class TestPlannerTalentFactoryDispatch:
 
         assert dispatcher.call_count == 0, "allow_talent_builder=False must never dispatch"
         assert not (tmp_path / ".claude" / "agents").exists()
+
+
+# ---------------------------------------------------------------------------
+# Registry reload + causal re-plan use of a newly generated capability
+# ---------------------------------------------------------------------------
+
+
+class TestPlannerTalentFactoryRegistryReloadAndReplan:
+    """``talent_factory.registry_reload: immediate`` (the default) means the
+    *same* in-process AgentRegistry a plan is built against picks up a
+    freshly generated agent right away. The behavioral proof is causal: a
+    second ``create_plan()`` call on the same planner instance, requesting
+    the same capability, must resolve it directly from the roster -- no
+    second capability gap, no second talent-builder dispatch -- because
+    re-planning now has the capability it previously had to generate.
+    See docs/internal/talent-factory-contract.md §4 (registry_reload) and
+    §11 item 5.
+    """
+
+    def test_second_plan_call_reuses_generated_agent_without_redispatch(self, tmp_path) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        first_plan = planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+        )
+        assert dispatcher.call_count == 1
+        first_outcomes = first_plan.plan_diagnostics["talent_factory_outcomes"]
+        assert len(first_outcomes) == 1
+        assert first_outcomes[0]["status"] == "generated"
+
+        # Re-plan: the *same* capability is requested again. The gap no
+        # longer exists -- the in-process registry already has the agent
+        # from the first call's install -- so this must resolve directly,
+        # never re-dispatching talent-builder for work already done.
+        second_plan = planner.create_plan(
+            "Extend the data-retention audit workflow with a new report",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+        )
+
+        assert dispatcher.call_count == 1, (
+            "a capability the registry already has must be reused, not regenerated"
+        )
+        assert second_plan.plan_diagnostics.get("capability_gaps", []) == []
+        assert second_plan.plan_diagnostics.get("talent_factory_outcomes", []) == []
+        step_agents = {s.agent_name for p in second_plan.phases for s in p.steps}
+        assert "archive-retention-specialist" in step_agents
+
+
+# ---------------------------------------------------------------------------
+# Telemetry: routing notes + plan_diagnostics shape for a talent-factory run
+# ---------------------------------------------------------------------------
+
+
+class TestPlannerTalentFactoryTelemetry:
+    def test_generation_outcome_is_recorded_in_routing_notes_and_diagnostics(
+        self, tmp_path
+    ) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        plan = planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+        )
+
+        assert any(
+            note.startswith("[talent-factory]") and "generated" in note
+            for note in planner._last_routing_notes
+        ), planner._last_routing_notes
+
+        outcomes = plan.plan_diagnostics["talent_factory_outcomes"]
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
+        assert set(outcome) >= {
+            "requested_capability", "kind", "action", "status",
+            "resolved_agent_name", "detail", "validation_errors",
+        }
+        assert outcome["requested_capability"] == "archive-retention-specialist"
+        assert outcome["kind"] == "missing_role"
+        assert outcome["action"] == "dispatch_talent_builder"
+        assert outcome["status"] == "generated"
+        assert outcome["resolved_agent_name"] == "archive-retention-specialist"
+        assert outcome["validation_errors"] == []
+
+        # The explanation surface (baton plan --explain) must also carry
+        # the talent-factory note -- not just the raw diagnostics dict.
+        explanation = planner.explain_plan(plan)
+        assert "[talent-factory]" in explanation
+
+    def test_fallback_outcome_is_recorded_with_nonempty_detail(self, tmp_path) -> None:
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+        from agent_baton.core.engine.planning.talent_factory import (
+            NullTalentBuilderDispatcher,
+        )
+
+        planner = IntelligentPlanner(talent_builder_dispatcher=NullTalentBuilderDispatcher())
+        plan = planner.create_plan(
+            "Add retry logic to the payment webhook handler",
+            agents=["database-whisperer"],
+            project_root=tmp_path,
+        )
+
+        outcomes = plan.plan_diagnostics["talent_factory_outcomes"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "generation_failed_fallback"
+        assert outcomes[0]["detail"]  # never a silent/blank explanation
+        assert any(
+            note.startswith("[talent-factory]") for note in planner._last_routing_notes
+        )
