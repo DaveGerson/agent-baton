@@ -470,13 +470,37 @@ class ContextBundleBuilder:
                     )
 
         packs_by_name = {pack.name: pack for pack in knowledge_plan.selected_packs}
+        missing_pack_names = {mp.name for mp in knowledge_plan.missing_packs}
         required = set(role_card.required_knowledge_packs)
         packs: list[KnowledgePackReference] = []
         for name in kept_names:
             if name in packs_by_name:
                 packs.append(packs_by_name[name])
             else:
+                # Phase 6, 6.3 -- "surface missing/phantom pack
+                # diagnostics": this pack was named (by the role card's
+                # own required_knowledge_packs, or by the resolver's
+                # per-step attachment) but never landed in
+                # ``knowledge_plan.selected_packs`` -- the reference this
+                # bundle is about to carry has no ``path``/``documents``
+                # to actually deliver. Distinguish "confirmed absent from
+                # the registry" (already flagged plan-wide in
+                # ``knowledge_plan.missing_packs``) from "present
+                # somewhere but never selected for this plan" -- both are
+                # phantom from THIS bundle's perspective, but the message
+                # differs so a human debugging a thin dispatch knows
+                # whether to fix the pack manifest or the plan-level
+                # selection logic.
                 reason = "required" if name in required else "step attachment"
+                if name in missing_pack_names:
+                    truncation_warnings.append(
+                        f"Phantom knowledge pack (confirmed missing from registry): {name}"
+                    )
+                else:
+                    truncation_warnings.append(
+                        "Phantom knowledge pack (not in this plan's selected "
+                        f"packs -- reference carries no content): {name}"
+                    )
                 packs.append(KnowledgePackReference(name=name, reason=reason))
         return packs
 

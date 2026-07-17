@@ -411,3 +411,31 @@ class TestResolveScopeExpansion:
 
         updated = json.loads(contract_path.read_text(encoding="utf-8"))
         assert "infra/deploy.yml" in updated["allowed_paths"]
+
+    def test_approve_also_publishes_a_full_manager_artifact_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 6, 6.3: approving a scope-expansion decision widens the
+        specific step's contract (Phase 3, unchanged, asserted above) AND
+        triggers a best-effort full rebuild-and-publish of every manager
+        sidecar so the rest of the artifact set (scope map, blueprint,
+        knowledge plan, every other bundle) doesn't drift stale relative
+        to the widened plan."""
+        task_id = "task-resolve-approve-revision"
+        engine, decision_id = _trigger_diff_violation(tmp_path, task_id, monkeypatch)
+        paths = _paths(tmp_path, task_id)
+        assert not paths.revision_manifest.exists()
+
+        result = engine.resolve_scope_expansion(decision_id, "approve")
+
+        assert result["applied"] is True
+        assert paths.revision_manifest.is_file()
+        manifest = json.loads(paths.revision_manifest.read_text(encoding="utf-8"))
+        assert manifest["revision"] == 1
+        assert manifest["trigger"] == "scope_expansion_resolved"
+        # The step's widened allowed_paths flow through to the freshly
+        # rebuilt scope contract too (not just the earlier narrow patch).
+        contract = json.loads(
+            paths.scope_contract("1.1", ext="json").read_text(encoding="utf-8")
+        )
+        assert "infra/deploy.yml" in contract["allowed_paths"]

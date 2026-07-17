@@ -126,6 +126,62 @@ def test_record_outcome_inserts_when_no_prior_row(store: KnowledgeTelemetryStore
 
 
 # ---------------------------------------------------------------------------
+# record_dispatch_outcome (Phase 6, 6.3 -- dispatch-linked telemetry)
+# ---------------------------------------------------------------------------
+
+def test_record_dispatch_outcome_correlates_every_doc_for_the_step(
+    store: KnowledgeTelemetryStore, db: Path,
+) -> None:
+    """A single dispatch typically used more than one document -- all of
+    them must be correlated together by (task_id, step_id), not just the
+    most recent row (that's what :meth:`record_outcome` does)."""
+    store.record_used(doc_name="doc-a", pack_name="pack-a", task_id="task-1", step_id="1.1")
+    store.record_used(doc_name="doc-b", pack_name="pack-a", task_id="task-1", step_id="1.1")
+    # A different step in the same task must NOT be touched.
+    store.record_used(doc_name="doc-c", pack_name="pack-a", task_id="task-1", step_id="1.2")
+
+    updated = store.record_dispatch_outcome(task_id="task-1", step_id="1.1", status="complete")
+
+    assert updated == 2
+    conn = sqlite3.connect(str(db))
+    rows = {
+        row[0]: row[1]
+        for row in conn.execute(
+            "SELECT doc_name, outcome_correlation FROM knowledge_telemetry WHERE task_id='task-1'"
+        ).fetchall()
+    }
+    conn.close()
+    assert rows["doc-a"] == pytest.approx(1.0)
+    assert rows["doc-b"] == pytest.approx(1.0)
+    assert rows["doc-c"] is None  # different step_id, untouched
+
+
+def test_record_dispatch_outcome_failed_status_correlates_zero(
+    store: KnowledgeTelemetryStore, db: Path,
+) -> None:
+    store.record_used(doc_name="doc-a", pack_name="pack-a", task_id="task-2", step_id="1.1")
+
+    store.record_dispatch_outcome(task_id="task-2", step_id="1.1", status="failed")
+
+    conn = sqlite3.connect(str(db))
+    row = conn.execute(
+        "SELECT outcome_correlation FROM knowledge_telemetry WHERE task_id='task-2'"
+    ).fetchone()
+    conn.close()
+    assert row[0] == pytest.approx(0.0)
+
+
+def test_record_dispatch_outcome_non_terminal_status_is_a_noop(
+    store: KnowledgeTelemetryStore,
+) -> None:
+    store.record_used(doc_name="doc-a", pack_name="pack-a", task_id="task-3", step_id="1.1")
+
+    for status in ("dispatched", "interrupted", "interacting", "bogus"):
+        updated = store.record_dispatch_outcome(task_id="task-3", step_id="1.1", status=status)
+        assert updated == 0
+
+
+# ---------------------------------------------------------------------------
 # upsert_doc_meta
 # ---------------------------------------------------------------------------
 

@@ -801,6 +801,212 @@ class TestPlanAmendments:
 
 
 # ===========================================================================
+# TestManagerModeAmendmentPublish (Phase 6, 6.3 -- transactional manager
+# artifact regeneration + rollback-safe amendment publishing)
+# ===========================================================================
+
+def _manager_plan(
+    task_id: str = "task-mm-001",
+    phases: list[PlanPhase] | None = None,
+) -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Build a thing",
+        manager_mode=True,
+        phases=phases if phases is not None else [_phase()],
+    )
+
+
+class TestManagerModeAmendmentPublish:
+    """``amend_plan()`` on a ``manager_mode`` plan must publish a fresh,
+    internally-consistent sidecar set alongside the mutated plan, and must
+    roll everything back -- plan included -- when that publish fails."""
+
+    def test_amend_publishes_sidecars_for_the_new_phase(self, tmp_path: Path) -> None:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        plan = _manager_plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        new_phase = PlanPhase(
+            phase_id=99,
+            name="Extra",
+            steps=[_step("99.1", agent_name="test-engineer")],
+        )
+        engine.amend_plan(description="Add extra phase", new_phases=[new_phase])
+
+        state = engine._load_state()
+        # New phase landed (renumbered to phase 2; phase 1 unchanged).
+        assert len(state.plan.phases) == 2
+        added_phase = state.plan.phases[1]
+        added_step_ids = [s.step_id for s in added_phase.steps]
+        assert "2.1" in added_step_ids  # the caller's own step, renumbered
+
+        paths = ManagerArtifactPaths(tmp_path, state.task_id)
+        assert paths.charter.is_file()
+        assert paths.scope_map.is_file()
+        assert paths.team_blueprint.is_file()
+        assert paths.revision_manifest.is_file()
+        # Every nontrivial step in the FINAL plan (both phases) got a
+        # contract + bundle -- including the newly amended one.
+        for phase in state.plan.phases:
+            for step in phase.steps:
+                if step.agent_name and step.step_type != "gate" and not step.command:
+                    assert paths.scope_contract(step.step_id, ext="json").is_file()
+                    assert paths.context_bundle(step.step_id).is_file()
+
+    def test_amend_publish_failure_rolls_back_plan_and_amendments(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from agent_baton.core.manager.rebuild import (
+            ManagerArtifactPublishError,
+            ManagerArtifactRebuildResult,
+        )
+
+        plan = _manager_plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        def _always_fails(self, _plan, *, trigger):
+            return ManagerArtifactRebuildResult(ok=False, errors=["forced failure for test"])
+
+        monkeypatch.setattr(
+            "agent_baton.core.engine.executor.ExecutionEngine._publish_manager_artifacts",
+            _always_fails,
+        )
+
+        new_phase = PlanPhase(
+            phase_id=99,
+            name="Extra",
+            steps=[_step("99.1", agent_name="test-engineer")],
+        )
+        with pytest.raises(ManagerArtifactPublishError):
+            engine.amend_plan(description="Add extra phase", new_phases=[new_phase])
+
+        state = engine._load_state()
+        # Nothing persisted: still the original single phase, no amendment
+        # recorded, on-disk state untouched by the failed attempt.
+        assert len(state.plan.phases) == 1
+        assert state.plan.phases[0].phase_id == 0
+        assert state.amendments == []
+
+    def test_amend_publish_failure_files_a_warning_bead(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from agent_baton.core.manager.rebuild import ManagerArtifactRebuildResult
+
+        plan = _manager_plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        recorded: list = []
+
+        class _FakeBeadStore:
+            def query(self, **kwargs):
+                return []
+
+            def write(self, bead):
+                recorded.append(bead)
+
+        engine._bead_store = _FakeBeadStore()
+
+        def _always_fails(self, _plan, *, trigger):
+            return ManagerArtifactRebuildResult(ok=False, errors=["forced failure for test"])
+
+        monkeypatch.setattr(
+            "agent_baton.core.engine.executor.ExecutionEngine._publish_manager_artifacts",
+            _always_fails,
+        )
+
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+        new_phase = PlanPhase(phase_id=99, name="Extra", steps=[_step("99.1", agent_name="b")])
+        with pytest.raises(ManagerArtifactPublishError):
+            engine.amend_plan(description="Add extra phase", new_phases=[new_phase])
+
+        assert len(recorded) == 1
+        assert "manager-artifacts" in recorded[0].tags
+
+    def test_non_manager_mode_plan_amend_unaffected(self, tmp_path: Path) -> None:
+        """A non-``manager_mode`` plan's amend_plan behavior (and its
+        return type -- always a PlanAmendment, never an exception) is
+        completely unchanged: no rebuild is even attempted."""
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        engine = _engine(tmp_path)
+        engine.start(plan)
+
+        new_phase = PlanPhase(phase_id=99, name="Extra", steps=[_step("99.1", agent_name="b")])
+        amendment = engine.amend_plan(description="Add", new_phases=[new_phase])
+
+        assert amendment.phases_added == [99]
+        state = engine._load_state()
+        assert len(state.plan.phases) == 2
+
+    def test_record_feedback_result_publishes_sidecars_for_dispatched_phase(
+        self, tmp_path: Path,
+    ) -> None:
+        """record_feedback_result's own amend_plan() call (trigger=
+        "feedback") is manager-mode wired the same way -- the phase it
+        inserts to dispatch the chosen option gets a real contract +
+        bundle, not a stale sidecar set."""
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        plan = _manager_plan(
+            task_id="task-mm-feedback",
+            phases=[_phase_with_feedback(phase_id=0)],
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # consume FEEDBACK action
+
+        engine.record_feedback_result(phase_id=0, question_id="q1", chosen_index=0)
+
+        state = engine._load_state()
+        fb = state.feedback_results[0]
+        assert fb.dispatched_step_id, "feedback dispatch must have landed"
+
+        paths = ManagerArtifactPaths(tmp_path, state.task_id)
+        assert paths.revision_manifest.is_file()
+        assert paths.scope_contract(fb.dispatched_step_id, ext="json").is_file()
+        assert paths.context_bundle(fb.dispatched_step_id).is_file()
+
+    def test_record_feedback_result_publish_failure_records_no_dispatch(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """When the sidecar rebuild fails, record_feedback_result must not
+        pretend a dispatch happened -- the feedback answer stays recorded
+        (so it isn't lost) but dispatched_step_id stays empty and the plan
+        is left exactly as amend_plan() rolled it back to."""
+        from agent_baton.core.manager.rebuild import ManagerArtifactRebuildResult
+
+        plan = _manager_plan(
+            task_id="task-mm-feedback-fail",
+            phases=[_phase_with_feedback(phase_id=0)],
+        )
+        engine = _engine(tmp_path)
+        engine.start(plan)
+        engine.record_step_result("1.1", "backend-engineer")
+        engine.next_action()  # consume FEEDBACK action
+
+        monkeypatch.setattr(
+            "agent_baton.core.engine.executor.ExecutionEngine._publish_manager_artifacts",
+            lambda self, _plan, *, trigger: ManagerArtifactRebuildResult(
+                ok=False, errors=["forced failure for test"],
+            ),
+        )
+
+        engine.record_feedback_result(phase_id=0, question_id="q1", chosen_index=0)
+
+        state = engine._load_state()
+        assert len(state.plan.phases) == 1  # no dispatch phase was added
+        fb = next(r for r in state.feedback_results if r.question_id == "q1")
+        assert fb.chosen_option == "Grid"  # the answer itself is preserved
+        assert fb.dispatched_step_id == ""
+
+
+# ===========================================================================
 # TestSerializationCompat
 # ===========================================================================
 
@@ -1215,6 +1421,28 @@ def _reach_feedback_gate(
     engine.record_step_result("1.1", "backend-engineer")
     engine.next_action()  # consume FEEDBACK action
     return engine
+
+
+class TestFeedbackResultDispatchedStepIdRegression:
+    """Regression found while adding Phase 6, 6.3 coverage:
+    ``record_feedback_result`` never actually recorded
+    ``dispatched_step_id`` for the phases_added branch (the common case --
+    it always inserts a brand new phase) because ``amendment.phases_added``
+    holds the pre-renumber placeholder id, which can never match a
+    post-renumber ``PlanPhase.phase_id`` once the amendment is reloaded
+    from disk. Independent of manager_mode -- this is a plain plan."""
+
+    def test_dispatched_step_id_is_recorded(self, tmp_path: Path) -> None:
+        engine = _reach_feedback_gate(tmp_path)
+
+        engine.record_feedback_result(phase_id=0, question_id="q1", chosen_index=0)
+
+        state = engine._load_state()
+        fb = next(r for r in state.feedback_results if r.question_id == "q1")
+        assert fb.dispatched_step_id != ""
+        # The recorded step actually exists in the amended plan.
+        all_step_ids = {s.step_id for p in state.plan.phases for s in p.steps}
+        assert fb.dispatched_step_id in all_step_ids
 
 
 class TestFeedbackResultRaceRegression:

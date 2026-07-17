@@ -54,6 +54,19 @@ class ManagerArtifactPaths:
     def decision_log(self) -> Path:
         return self.root / "decision-log.jsonl"
 
+    @property
+    def revision_manifest(self) -> Path:
+        """Monotonic version record for the transactional artifact rebuild
+        (Phase 6, step 6.3 -- ``agent_baton.core.manager.rebuild``).
+
+        Distinct from ``decision_log`` (an append-only, immutable audit
+        trail of human decisions): this file is *overwritten* on every
+        successful publish and records which plan revision the currently
+        published sidecar set corresponds to, so a caller can detect a
+        stale/partial publish without re-parsing every sidecar.
+        """
+        return self.root / "artifact-revision.json"
+
     # ------------------------------------------------------------------
     # Directories holding per-entity artifacts
     # ------------------------------------------------------------------

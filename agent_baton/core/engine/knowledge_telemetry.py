@@ -128,6 +128,49 @@ class KnowledgeTelemetryStore:
             conn.commit()
         return cur.rowcount
 
+    def record_dispatch_outcome(
+        self,
+        *,
+        task_id: str,
+        step_id: str,
+        status: str,
+    ) -> int:
+        """Correlate every ``KnowledgeUsed`` row already recorded for
+        ``(task_id, step_id)`` with this dispatch's terminal outcome (Phase
+        6, 6.3 — "connect knowledge resolution telemetry ... to actual
+        dispatch outcomes").
+
+        Unlike :meth:`record_outcome` (keyed by a single ``doc_name`` +
+        ``pack_name`` + ``task_id``, used by the retrospective engine to
+        backfill one document's score after the fact), this updates EVERY
+        row this exact step's dispatch actually used in one pass — the
+        natural join key is the dispatch itself, not any one document.
+
+        Args:
+            task_id: Execution task ID.
+            step_id: Plan step whose dispatch just reached a terminal state.
+            status: ``"complete"`` or ``"failed"`` — anything else is not a
+                terminal dispatch outcome and is a no-op (returns 0) rather
+                than writing a meaningless correlation value.
+
+        Returns:
+            Number of ``knowledge_telemetry`` rows updated.
+        """
+        outcome_correlation = {"complete": 1.0, "failed": 0.0}.get(status)
+        if outcome_correlation is None:
+            return 0
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE knowledge_telemetry
+                SET outcome_correlation = ?
+                WHERE task_id = ? AND step_id = ?
+                """,
+                (outcome_correlation, task_id, step_id),
+            )
+            conn.commit()
+        return cur.rowcount
+
     def upsert_doc_meta(
         self,
         doc_name: str,

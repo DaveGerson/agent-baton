@@ -2580,6 +2580,32 @@ class ExecutionEngine:
         if step_worktrees.pop(step_id, None) is not None:
             state.step_worktrees = step_worktrees
         state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
+
+        # Best-effort full-consistency pass (Phase 6, 6.3): the widened
+        # step's own scope-contract sidecar is ALREADY durably correct
+        # (apply_scope_amendment above patched it under the same
+        # atomicity guarantee this rebuild uses), so a failure here never
+        # blocks or rolls back the approval that already happened and was
+        # appended to the immutable decision log -- it only means the
+        # REST of the artifact set (scope map / blueprint / knowledge plan
+        # / every other step's bundle) may lag one revision behind until
+        # the next amendment. Logged as a bead so it's never silent.
+        if state.plan is not None and state.plan.manager_mode:
+            publish = self._publish_manager_artifacts(
+                state.plan, trigger="scope_expansion_resolved"
+            )
+            if not publish.ok:
+                logger.warning(
+                    "resolve_scope_expansion: full manager-artifact "
+                    "rebuild failed after approving decision %r (step "
+                    "%r's own contract sidecar is already durably "
+                    "widened; other artifacts may be stale): %s",
+                    decision_id, step_id, "; ".join(publish.errors),
+                )
+                self._file_manager_rebuild_failure_bead(
+                    state, "scope_expansion_resolved", publish.errors
+                )
+
         self._save_execution(state)
 
         return {
@@ -3751,6 +3777,34 @@ class ExecutionEngine:
                 # Observability must never crash the executor.
                 _log.debug("OTel step.dispatch span emission failed", exc_info=True)
 
+        # ── Phase 6, 6.3 — knowledge telemetry ↔ dispatch outcome ─────────────
+        # Every KnowledgeUsed row KnowledgeResolver.resolve() recorded for
+        # this (task_id, step_id) — at plan time via the resolver's
+        # planning-stage call, or via the knowledge-gap auto-resolve path
+        # below — carries outcome_correlation=NULL until now. This is the
+        # "connect knowledge resolution telemetry ... to actual dispatch
+        # outcomes" half of the deliverable (agent_baton.core.knowledge.
+        # ab_testing's docstring flags the sibling A/B-assignment hookup as
+        # a still-open follow-up — this only wires the resolver's own
+        # KnowledgeTelemetryStore, reused from the engine's optional
+        # KnowledgeResolver rather than opening a second connection).
+        # Best-effort: a telemetry failure must never affect the recorded
+        # step result, which has already been persisted above.
+        if status in ("complete", "failed"):
+            _telemetry = getattr(
+                getattr(self, "_knowledge_resolver", None), "_telemetry", None
+            )
+            if _telemetry is not None:
+                try:
+                    _telemetry.record_dispatch_outcome(
+                        task_id=state.task_id, step_id=step_id, status=status,
+                    )
+                except Exception as _tel_exc:  # noqa: BLE001 — never break dispatch
+                    _log.debug(
+                        "record_dispatch_outcome(%s, %s) failed (non-fatal): %s",
+                        state.task_id, step_id, _tel_exc,
+                    )
+
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
 
@@ -4122,6 +4176,17 @@ class ExecutionEngine:
         # Inline the amendment so we mutate the same state object the
         # caller holds — calling self.amend_plan() would reload state
         # from disk, causing the caller's reference to go stale.
+        #
+        # manager_mode plans additionally need a transactional
+        # rebuild-and-publish of every sidecar (Phase 6, 6.3) so the
+        # round-out phases get scope contracts / context bundles / a
+        # knowledge plan just like every other phase. Snapshot state.plan
+        # BEFORE mutating it so a failed publish can restore it exactly —
+        # this mirrors ExecutionEngine.amend_plan's rollback, but inline
+        # (the docstring above explains why this can't just call
+        # amend_plan()).
+        manager_mode = bool(state.plan is not None and state.plan.manager_mode)
+        plan_snapshot = state.plan.model_copy(deep=True) if manager_mode else None
         try:
             amendment = PlanAmendment(
                 amendment_id=f"amend-{len(state.amendments) + 1}",
@@ -4144,6 +4209,25 @@ class ExecutionEngine:
             for i, phase in enumerate(new_phases):
                 state.plan.phases.insert(insert_idx + i, phase)
                 amendment.phases_added.append(phase.phase_id)
+
+            if manager_mode:
+                publish = self._publish_manager_artifacts(
+                    state.plan, trigger="goal_round_out"
+                )
+                if not publish.ok:
+                    state.plan = plan_snapshot
+                    logger.warning(
+                        "Goal round-out manager-artifact rebuild failed "
+                        "(%s); round-out phases discarded, plan left "
+                        "unchanged, marking goal_status='active'.",
+                        "; ".join(publish.errors),
+                    )
+                    self._file_manager_rebuild_failure_bead(
+                        state, "goal_round_out", publish.errors
+                    )
+                    state.goal_status = "active"
+                    return
+
             state.amendments.append(amendment)
             if self._trace is not None:
                 self._tracer.record_event(
@@ -4168,6 +4252,8 @@ class ExecutionEngine:
                 len(new_phases), passed_phase_id,
             )
         except Exception as exc:  # noqa: BLE001
+            if manager_mode and plan_snapshot is not None:
+                state.plan = plan_snapshot
             logger.warning(
                 "Goal round-out amendment failed (%s); marking "
                 "goal_status='active' and continuing.",
@@ -5669,6 +5755,74 @@ class ExecutionEngine:
 
         self._save_execution(state)
 
+    def _publish_manager_artifacts(
+        self, plan: "MachinePlan", *, trigger: str
+    ) -> "ManagerArtifactRebuildResult":
+        """Rebuild + atomically publish every manager-mode sidecar for
+        *plan* (Phase 6, 6.3). Thin executor-side wiring around
+        ``agent_baton.core.manager.rebuild.rebuild_and_publish`` -- resolves
+        ``ManagerConfig``/``ManagerArtifactPaths`` the same way every other
+        manager-mode hook in this module already does (see
+        ``resolve_scope_expansion``, the phase-completion hook).
+
+        Callers MUST NOT adopt any plan mutation into ``state.plan`` (or
+        persist ``ExecutionState``) unless ``result.ok`` is ``True`` -- see
+        :meth:`amend_plan` for the reference caller.
+        """
+        from agent_baton.core.config.manager import ManagerConfig
+        from agent_baton.core.manager.rebuild import rebuild_and_publish
+
+        try:
+            mgr_config = ManagerConfig.load(self._project_root())
+        except Exception:  # noqa: BLE001 — never let config load block an amendment
+            mgr_config = ManagerConfig()
+
+        return rebuild_and_publish(
+            plan,
+            plan.task_summary,
+            config=mgr_config,
+            project_root=self._project_root(),
+            team_context_dir=self._root,
+            trigger=trigger,
+        )
+
+    def _file_manager_rebuild_failure_bead(
+        self, state: "ExecutionState", trigger: str, errors: list[str]
+    ) -> None:
+        """Autonomous incident handling (root CLAUDE.md): a failed
+        transactional manager-artifact rebuild is a real defect (a plan
+        mutation that could not be published), never silently discarded.
+        Best-effort — a bead-store failure must never mask the original
+        rebuild failure the caller is already handling.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.models.bead import Bead as _BeadCls
+            from agent_baton.models.bead import _generate_bead_id as _gen_id
+            from agent_baton.utils.time import utcnow_zulu as _utc
+
+            _ts = _utc()
+            _summary = "; ".join(errors)[:2000]
+            _bc = len(self._bead_store.query(task_id=state.task_id, limit=10000))
+            self._bead_store.write(_BeadCls(
+                bead_id=_gen_id(state.task_id, "manager-rebuild", _summary, _ts, _bc),
+                task_id=state.task_id,
+                step_id="manager-artifacts",
+                agent_name="engine",
+                bead_type="warning",
+                content=(
+                    f"Manager-artifact rebuild failed for trigger={trigger!r}; "
+                    f"amendment discarded, plan left unchanged: {_summary}"
+                ),
+                scope="task",
+                tags=["manager-artifacts", "rebuild-failed", trigger],
+                created_at=_ts,
+                source="engine",
+            ))
+        except Exception as exc:  # noqa: BLE001 — telemetry must never mask the real failure
+            _log.debug("_file_manager_rebuild_failure_bead failed (non-fatal): %s", exc)
+
     def amend_plan(
         self,
         description: str,
@@ -5685,6 +5839,25 @@ class ExecutionEngine:
         The plan inside ``ExecutionState`` is mutated in place.  An audit
         record (:class:`PlanAmendment`) is appended to ``state.amendments``.
 
+        For a ``manager_mode`` plan, a real phase/step mutation (adding
+        phases, or adding steps to an existing phase) also triggers a
+        transactional rebuild-and-publish of every manager-mode sidecar
+        (Phase 6, 6.3 -- see
+        ``agent_baton.core.manager.rebuild.rebuild_and_publish``) so the
+        charter, scope map, blueprint, role cards, knowledge plan, scope
+        contracts, and context bundles never go stale relative to the
+        amended plan. Before mutating, ``state.plan`` (and ``gate_results``
+        / ``approval_results`` / ``feedback_results``, which
+        ``_renumber_phases`` may also touch) is deep-copy snapshotted; the
+        mutation then proceeds against ``state.plan`` directly (as always)
+        so ``_renumber_phases`` and every other pre-existing code path
+        needs no changes. Only once the rebuild reports ``ok=True`` does
+        this amendment get recorded/persisted. On failure, every snapshotted
+        field is restored verbatim and
+        :class:`~agent_baton.core.manager.rebuild.ManagerArtifactPublishError`
+        is raised — the caller sees no partial amendment and no partial
+        sidecar publish.
+
         Args:
             description: Human-readable explanation of the amendment.
             new_phases: New :class:`PlanPhase` objects to insert.
@@ -5698,6 +5871,11 @@ class ExecutionEngine:
 
         Returns:
             The :class:`PlanAmendment` record.
+
+        Raises:
+            ManagerArtifactPublishError: A ``manager_mode`` plan's mutation
+                could not be published as an internally-consistent sidecar
+                set. Nothing was mutated or persisted.
         """
         state = self._require_execution("amend_plan")
 
@@ -5708,6 +5886,20 @@ class ExecutionEngine:
             description=description,
             feedback=feedback,
         )
+
+        plan_mutated = bool(new_phases) or bool(new_steps and add_steps_to_phase is not None)
+        manager_mode = bool(state.plan is not None and state.plan.manager_mode)
+        transactional = manager_mode and plan_mutated
+
+        plan_snapshot = None
+        gate_results_snapshot = None
+        approval_results_snapshot = None
+        feedback_results_snapshot = None
+        if transactional:
+            plan_snapshot = state.plan.model_copy(deep=True)
+            gate_results_snapshot = [r.model_copy(deep=True) for r in state.gate_results]
+            approval_results_snapshot = [r.model_copy(deep=True) for r in state.approval_results]
+            feedback_results_snapshot = [r.model_copy(deep=True) for r in state.feedback_results]
 
         if new_phases:
             # Determine insertion index.
@@ -5736,6 +5928,30 @@ class ExecutionEngine:
                 for step in new_steps:
                     target.steps.append(step)
                     amendment.steps_added.append(step.step_id)
+
+        if transactional:
+            publish = self._publish_manager_artifacts(state.plan, trigger=trigger)
+            if not publish.ok:
+                # Roll back every field this method (and _renumber_phases)
+                # may have mutated -- state must look exactly as it did
+                # before this call, per the "failed rebuild leaves the
+                # prior plan and sidecars intact" contract.
+                state.plan = plan_snapshot
+                state.gate_results = gate_results_snapshot
+                state.approval_results = approval_results_snapshot
+                state.feedback_results = feedback_results_snapshot
+                logger.warning(
+                    "amend_plan: manager-artifact rebuild failed for "
+                    "trigger=%r; amendment discarded, plan left unchanged: %s",
+                    trigger, "; ".join(publish.errors),
+                )
+                self._file_manager_rebuild_failure_bead(state, trigger, publish.errors)
+                from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+                raise ManagerArtifactPublishError(
+                    f"amend_plan: manager-artifact rebuild failed for "
+                    f"trigger={trigger!r}: {'; '.join(publish.errors)}"
+                )
 
         state.amendments.append(amendment)
 
@@ -5772,6 +5988,7 @@ class ExecutionEngine:
             check_expansion_guardrails,
             generate_expansion_phase,
         )
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
 
         _amended_step_count = sum(len(a.steps_added) for a in state.amendments)
         original_step_count = max(
@@ -5818,17 +6035,52 @@ class ExecutionEngine:
                 trigger_phase_id=trigger_phase,
             )
 
-            self.amend_plan(
-                description=f"Scope expansion: {desc[:200]}",
-                new_phases=[new_phase],
-                insert_after_phase=(
-                    state.current_phase_obj.phase_id
-                    if state.current_phase_obj
-                    else None
-                ),
-                trigger="scope_expansion",
-                trigger_phase_id=trigger_phase,
-            )
+            try:
+                self.amend_plan(
+                    description=f"Scope expansion: {desc[:200]}",
+                    new_phases=[new_phase],
+                    insert_after_phase=(
+                        state.current_phase_obj.phase_id
+                        if state.current_phase_obj
+                        else None
+                    ),
+                    trigger="scope_expansion",
+                    trigger_phase_id=trigger_phase,
+                )
+            except ManagerArtifactPublishError as exc:
+                # amend_plan() already rolled state.plan back to its
+                # pre-call snapshot and filed a warning bead — this
+                # particular expansion is dropped (not retried; consistent
+                # with the guardrail-blocked branch above), and processing
+                # continues with the next pending expansion.
+                _log.warning(
+                    "Scope expansion dropped (manager-artifact rebuild "
+                    "failed): %s (%s)", desc[:80], exc,
+                )
+                continue
+
+            # amend_plan() has no `state` parameter -- it reloads its OWN
+            # copy internally (see its docstring) and persists the
+            # amendment against THAT copy, not this loop's `state`. Left
+            # unaddressed, this loop's *own* trailing `_save_execution(state)`
+            # below would overwrite disk with this now-stale pre-amendment
+            # `state.plan`, silently reverting every expansion this call
+            # just applied (a pre-existing bug this transactional-publish
+            # work surfaced: it defeats the "prior plan and sidecars stay
+            # consistent" guarantee just as surely as a failed publish
+            # would). Pull the freshly-amended fields back onto THIS same
+            # `state` object (attribute mutation, not rebinding `state` --
+            # this function's callers hold the identical reference and
+            # must see the refresh too) so every subsequent guardrail
+            # check/expansion in this same loop, and the trailing save,
+            # both see the real, amended plan.
+            _reloaded = self._load_execution()
+            if _reloaded is not None:
+                state.plan = _reloaded.plan
+                state.amendments = _reloaded.amendments
+                state.gate_results = _reloaded.gate_results
+                state.approval_results = _reloaded.approval_results
+                state.feedback_results = _reloaded.feedback_results
 
             state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
             processed += 1
@@ -8728,16 +8980,31 @@ class ExecutionEngine:
         state.feedback_results.append(fb_result)
         self._save_execution(state)
 
-        amendment = self.amend_plan(
-            description=(
-                f"Feedback dispatch for question '{question_id}' on phase {phase_id}: "
-                f"user chose '{chosen_option}'"
-            ),
-            new_phases=[new_phase],
-            trigger="feedback",
-            trigger_phase_id=phase_id,
-            feedback=chosen_option,
-        )
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+        try:
+            amendment = self.amend_plan(
+                description=(
+                    f"Feedback dispatch for question '{question_id}' on phase {phase_id}: "
+                    f"user chose '{chosen_option}'"
+                ),
+                new_phases=[new_phase],
+                trigger="feedback",
+                trigger_phase_id=phase_id,
+                feedback=chosen_option,
+            )
+        except ManagerArtifactPublishError as exc:
+            # amend_plan() already rolled the plan back and filed a warning
+            # bead. The feedback answer itself (fb_result, saved above) is
+            # kept — this leaves the execution in "feedback_pending" rather
+            # than silently dispatching against an inconsistent sidecar
+            # set. A human/operator sees the bead and can retry.
+            logger.warning(
+                "record_feedback_result: dispatch amendment failed for "
+                "question %r on phase %s (%s); feedback recorded, no "
+                "step dispatched.", question_id, phase_id, exc,
+            )
+            return
 
         # Reload to pick up the amendment's renumbered state (including
         # updated phase_ids on feedback_results).  Do NOT fall back to the
@@ -8763,9 +9030,24 @@ class ExecutionEngine:
         )
         if reloaded_fb is not None:
             # Record the dispatched step_id.
+            #
+            # Regression (found while adding Phase 6, 6.3 manager-mode
+            # coverage for this method): ``amendment.phases_added`` holds
+            # the PRE-renumber placeholder phase_id (``amend_plan``'s
+            # documented contract -- see
+            # ``TestPlanAmendments.test_amendment_records_phases_added``),
+            # but ``state`` here was just reloaded fresh from disk AFTER
+            # ``_renumber_phases`` ran, so every phase's ``.phase_id`` is
+            # already the renumbered value. ``p.phase_id in
+            # amendment.phases_added`` can therefore never match (unless
+            # the placeholder id -9999 coincidentally survived
+            # renumbering, which it never does) -- this always left
+            # ``dispatched_step_id`` empty. ``new_phase.name`` is stable
+            # across renumbering (only phase_id/step_id are rewritten) and
+            # unique per question_id, so match on that instead.
             if amendment.phases_added:
                 for p in state.plan.phases:
-                    if p.phase_id in amendment.phases_added and p.steps:
+                    if p.name == new_phase.name and p.steps:
                         reloaded_fb.dispatched_step_id = p.steps[0].step_id
                         break
             elif amendment.steps_added:
