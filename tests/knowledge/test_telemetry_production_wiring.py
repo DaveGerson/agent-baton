@@ -343,3 +343,107 @@ def test_attached_docs_assembled_from_plan(fake_home: Path) -> None:
         assert by_doc[name]["total_uses"] >= 1
         assert by_doc[name]["avg_outcome_score"] is not None
         assert by_doc[name]["avg_outcome_score"] == pytest.approx(0.5, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# 6. Phase 6.4 -- record_step_result's own dispatch-outcome wiring (Phase
+# 6.3 added ExecutionEngine.record_step_result -> KnowledgeTelemetryStore.
+# record_dispatch_outcome, called on every terminal StepResult; this only
+# had isolated KnowledgeTelemetryStore-level coverage in
+# tests/knowledge/test_lifecycle_telemetry.py -- these tests drive it
+# through a real ExecutionEngine, the production call site).
+# ---------------------------------------------------------------------------
+
+def test_record_step_result_complete_correlates_dispatch_outcome(fake_home: Path) -> None:
+    """A terminal ``status="complete"`` StepResult must correlate every
+    KnowledgeUsed row for that (task_id, step_id) to outcome=1.0 -- not
+    just when KnowledgeTelemetryStore.record_dispatch_outcome is called
+    directly, but as a real side effect of the production dispatch path."""
+    from agent_baton.cli.commands.execution import execute as exec_mod
+
+    plan = _make_plan_with_attachment(
+        task_id="task-dispatch-outcome-complete", doc_name="design.md", pack_name="core",
+    )
+    resolver = exec_mod._build_knowledge_resolver(plan)
+    assert resolver is not None and resolver._telemetry is not None
+
+    engine = ExecutionEngine(
+        team_context_root=fake_home / "team-ctx", knowledge_resolver=resolver,
+    )
+    engine.start(plan)
+    # Dispatch-time telemetry: the KnowledgeUsed row this correlates.
+    engine._emit_knowledge_used(plan.task_id, plan.phases[0].steps[0])
+
+    db = fake_home / ".baton" / "central.db"
+    before = _read_view(db)
+    assert before[0]["doc_name"] == "design.md"
+    assert before[0]["avg_outcome_score"] is None
+
+    engine.record_step_result(
+        "1.1", "backend-engineer", status="complete",
+        outcome="Implemented the endpoint.",
+    )
+
+    after = _read_view(db)
+    assert after[0]["doc_name"] == "design.md"
+    assert after[0]["avg_outcome_score"] == pytest.approx(1.0)
+
+
+def test_record_step_result_failed_correlates_zero(fake_home: Path) -> None:
+    from agent_baton.cli.commands.execution import execute as exec_mod
+
+    plan = _make_plan_with_attachment(
+        task_id="task-dispatch-outcome-failed", doc_name="design2.md", pack_name="core",
+    )
+    resolver = exec_mod._build_knowledge_resolver(plan)
+    engine = ExecutionEngine(
+        team_context_root=fake_home / "team-ctx", knowledge_resolver=resolver,
+    )
+    engine.start(plan)
+    engine._emit_knowledge_used(plan.task_id, plan.phases[0].steps[0])
+
+    engine.record_step_result(
+        "1.1", "backend-engineer", status="failed", error="boom",
+    )
+
+    after = _read_view(fake_home / ".baton" / "central.db")
+    assert after[0]["doc_name"] == "design2.md"
+    assert after[0]["avg_outcome_score"] == pytest.approx(0.0)
+
+
+def test_record_step_result_non_terminal_status_leaves_outcome_null(
+    fake_home: Path,
+) -> None:
+    """An in-flight status (e.g. "dispatched", recorded by mark_dispatched
+    callers that go through record_step_result) must not prematurely
+    correlate an outcome -- only "complete"/"failed" are terminal."""
+    from agent_baton.cli.commands.execution import execute as exec_mod
+
+    plan = _make_plan_with_attachment(
+        task_id="task-dispatch-outcome-inflight", doc_name="design3.md", pack_name="core",
+    )
+    resolver = exec_mod._build_knowledge_resolver(plan)
+    engine = ExecutionEngine(
+        team_context_root=fake_home / "team-ctx", knowledge_resolver=resolver,
+    )
+    engine.start(plan)
+    engine._emit_knowledge_used(plan.task_id, plan.phases[0].steps[0])
+
+    engine.record_step_result("1.1", "backend-engineer", status="dispatched")
+
+    after = _read_view(fake_home / ".baton" / "central.db")
+    assert after[0]["doc_name"] == "design3.md"
+    assert after[0]["avg_outcome_score"] is None
+
+
+def test_record_step_result_without_knowledge_resolver_is_noop(fake_home: Path) -> None:
+    """No knowledge_resolver at all (the common non-manager-mode,
+    non-knowledge-aware case) -- record_step_result must not raise; the
+    dispatch-outcome wiring is entirely best-effort."""
+    plan = _make_plan_with_attachment(task_id="task-dispatch-outcome-no-resolver")
+    engine = ExecutionEngine(team_context_root=fake_home / "team-ctx")
+    engine.start(plan)
+
+    engine.record_step_result(
+        "1.1", "backend-engineer", status="complete", outcome="ok",
+    )  # must not raise

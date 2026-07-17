@@ -22,6 +22,7 @@ These tests pin the resume contract:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import json
 import os
@@ -36,6 +37,8 @@ from agent_baton.cli.commands.execution.execute import _handle_run
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.persistence import StatePersistence
 from agent_baton.core.runtime.decisions import DecisionManager, deterministic_decision_id
+from agent_baton.core.runtime.launcher import DryRunLauncher
+from agent_baton.core.runtime.worker import TaskWorker
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
@@ -936,3 +939,358 @@ class TestResumeUnknownStrictBackend:
         assert "Unknown BATON_TEAMS_BACKEND" in out
         # No traceback leaked to the user.
         assert "Traceback" not in out
+
+
+# ===========================================================================
+# Phase 6, 6.4 -- CHECKPOINT threshold / dedup / restart
+#
+# 6.2 implemented CHECKPOINT (ExecutionEngine._checkpoint_trigger /
+# _emit_checkpoint) but explicitly shipped without test coverage ("tests/ is
+# outside this step's allowed_paths" -- see its commit message). These tests
+# close that gap across all three consumers: the bare engine, `baton execute
+# run` (via _handle_run, matching the rest of this file), and TaskWorker.
+# ===========================================================================
+
+_CHECKPOINT_PLAN: dict[str, Any] = {
+    "task_id": "checkpoint-base-task",
+    "task_summary": "Checkpoint threshold/dedup/restart test",
+    "risk_level": "LOW",
+    "budget_tier": "lean",
+    "execution_mode": "phased",
+    "git_strategy": "commit-per-agent",
+    "phases": [
+        {
+            "phase_id": 1,
+            "name": "Phase 1",
+            "steps": [
+                {
+                    "step_id": "1.1",
+                    "agent_name": "architect",
+                    "task_description": "Design",
+                    "model": "sonnet",
+                }
+            ],
+        },
+        {
+            "phase_id": 2,
+            "name": "Phase 2",
+            "steps": [
+                {
+                    "step_id": "2.1",
+                    "agent_name": "backend-engineer",
+                    "task_description": "Build",
+                    "model": "sonnet",
+                }
+            ],
+        },
+    ],
+}
+
+
+def _checkpoint_plan(task_id: str) -> "MachinePlan":
+    data = json.loads(json.dumps(_CHECKPOINT_PLAN))
+    data["task_id"] = task_id
+    return MachinePlan.from_dict(data)
+
+
+class TestCheckpointEngineThresholdsAndDedup:
+    """Direct-engine coverage of the three independent checkpoint triggers
+    and the dedup guard that makes a single phase boundary un-checkpointable
+    twice -- the foundation the CLI/TaskWorker tests below build on."""
+
+    def test_phase_interval_threshold_triggers_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-phase"))
+        engine.record_step_result("1.1", "architect")
+
+        action = engine.next_action()
+
+        assert action.action_type == ActionType.CHECKPOINT
+        assert action.checkpoint_handoff is not None
+        assert action.checkpoint_handoff["trigger"] == "phase_interval"
+        assert action.checkpoint_handoff["phase_id"] == 2
+        assert "baton execute resume" in action.checkpoint_handoff["resume_command"]
+
+    def test_checkpoint_is_durably_persisted_on_execution_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        task_id = "checkpoint-engine-persist"
+        # Both engine instances are constructed with an explicit task_id so
+        # StatePersistence resolves the SAME namespaced path
+        # (<root>/executions/<task_id>/execution-state.json) on both sides
+        # -- constructing the first engine without one leaves persistence
+        # pinned to the legacy flat path instead (see ExecutionEngine.start's
+        # file-mode docstring), which a task_id-bearing reload would then
+        # never find.
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        engine.start(_checkpoint_plan(task_id))
+        engine.record_step_result("1.1", "architect")
+        engine.next_action()
+
+        reloaded = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        state = reloaded._load_state()
+        assert state is not None
+        assert state.checkpoint_count == 1
+        assert len(state.checkpoints) == 1
+        assert state.checkpoints[0].trigger == "phase_interval"
+        assert state.last_checkpoint_phase == 1  # advanced phase index
+
+    def test_same_boundary_is_never_checkpointed_twice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedup guard: calling next_action() again at the SAME boundary
+        must proceed straight to DISPATCH, never emit a second CHECKPOINT
+        -- including across what would otherwise look like a retry."""
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-dedup"))
+        engine.record_step_result("1.1", "architect")
+
+        first = engine.next_action()
+        assert first.action_type == ActionType.CHECKPOINT
+
+        second = engine.next_action()
+
+        assert second.action_type == ActionType.DISPATCH
+        assert second.step_id == "2.1"
+        state = engine._load_state()
+        assert state.checkpoint_count == 1
+        assert len(state.checkpoints) == 1
+
+    def test_turn_threshold_triggers_independent_of_phase_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A phase_interval too high to trip on its own must not suppress
+        the (independently deterministic) turn-count trigger."""
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "100")
+        monkeypatch.setenv("BATON_CHECKPOINT_TURN_THRESHOLD", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_TOKEN_THRESHOLD", "100000000")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-turns"))
+        engine.record_step_result("1.1", "architect")  # bumps turn_count to 1
+
+        action = engine.next_action()
+
+        assert action.action_type == ActionType.CHECKPOINT
+        assert action.checkpoint_handoff["trigger"] == "turn_threshold"
+
+    def test_token_threshold_triggers_independent_of_phase_interval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "100")
+        monkeypatch.setenv("BATON_CHECKPOINT_TURN_THRESHOLD", "100000")
+        monkeypatch.setenv("BATON_CHECKPOINT_TOKEN_THRESHOLD", "10")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-tokens"))
+        engine.record_step_result("1.1", "architect", estimated_tokens=50)
+
+        action = engine.next_action()
+
+        assert action.action_type == ActionType.CHECKPOINT
+        assert action.checkpoint_handoff["trigger"] == "token_threshold"
+
+    def test_checkpoint_disabled_via_env_never_emits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "0")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-disabled"))
+        engine.record_step_result("1.1", "architect")
+
+        action = engine.next_action()
+
+        assert action.action_type == ActionType.DISPATCH
+        assert action.step_id == "2.1"
+
+    def test_next_actions_plural_withholds_batch_when_checkpoint_due(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """next_actions() (plural -- TaskWorker/PMO/`--all`) must return an
+        empty batch at a due-but-unemitted checkpoint boundary so every
+        caller falls back to next_action(), the only method that actually
+        persists the checkpoint (docstring contract in executor.py)."""
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_checkpoint_plan("checkpoint-engine-plural"))
+        engine.record_step_result("1.1", "architect")
+
+        assert engine.next_actions() == []
+
+        action = engine.next_action()
+        assert action.action_type == ActionType.CHECKPOINT
+
+
+class TestCheckpointCLIRunAndResume:
+    """`baton execute run` (via _handle_run) must stop cleanly at a
+    CHECKPOINT and a later, independent invocation against the same
+    on-disk state must resume past it without redispatching phase 1 or
+    re-emitting the checkpoint."""
+
+    def test_checkpoint_stops_run_cleanly_with_resume_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+
+        plan_dict = json.loads(json.dumps(_CHECKPOINT_PLAN))
+        plan_dict["task_id"] = "checkpoint-cli-stop"
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan_dict), encoding="utf-8")
+        _seed_partial_state(
+            context_root=tmp_path,
+            plan_dict=plan_dict,
+            completed_step_ids=["1.1"],
+            status="running",
+            current_phase=0,
+        )
+
+        args = _make_args(str(plan_path), task_id=None, dry_run=True)
+        patches = _patches_for_run(tmp_path)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            _handle_run(args)
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "CHECKPOINT" in out
+        assert "Resume in a fresh session with" in out
+        assert "baton execute resume" in out
+        assert "COMPLETE" not in out
+        assert "FAILED" not in out
+
+        sp = StatePersistence(tmp_path, task_id=plan_dict["task_id"])
+        final = sp.load()
+        assert final is not None
+        assert final.checkpoint_count == 1
+        assert final.current_phase == 1
+        assert "2.1" not in final.dispatched_step_ids
+
+    def test_fresh_invocation_resumes_past_checkpoint_without_recheckpointing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+
+        plan_dict = json.loads(json.dumps(_CHECKPOINT_PLAN))
+        plan_dict["task_id"] = "checkpoint-cli-restart"
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan_dict), encoding="utf-8")
+        _seed_partial_state(
+            context_root=tmp_path,
+            plan_dict=plan_dict,
+            completed_step_ids=["1.1"],
+            status="running",
+            current_phase=0,
+        )
+        args = _make_args(str(plan_path), task_id=None, dry_run=True)
+
+        # First invocation: hits the checkpoint boundary and stops.
+        patches1 = _patches_for_run(tmp_path)
+        with patches1[0], patches1[1], patches1[2], patches1[3], patches1[4], patches1[5], patches1[6]:
+            _handle_run(args)
+        capsys.readouterr()  # discard first invocation's output
+
+        # Second, wholly independent invocation ("fresh session" / restart)
+        # against the SAME on-disk state must resume past the already-
+        # checkpointed boundary straight into phase 2.
+        patches2 = _patches_for_run(tmp_path)
+        with patches2[0], patches2[1], patches2[2], patches2[3], patches2[4], patches2[5], patches2[6]:
+            _handle_run(args)
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "Resuming execution" in out
+        assert "CHECKPOINT" not in out
+        assert "2.1" in out
+        assert "backend-engineer" in out
+
+        sp = StatePersistence(tmp_path, task_id=plan_dict["task_id"])
+        final = sp.load()
+        assert final is not None
+        assert final.checkpoint_count == 1  # dedup held across the restart
+
+
+class TestCheckpointTaskWorker:
+    """TaskWorker must treat CHECKPOINT as a non-terminal, paused-for-
+    refresh stop (never COMPLETE/FAILED), and a fresh worker/engine pair
+    resuming the same persisted execution must not redispatch completed
+    work or re-checkpoint the boundary a prior worker already crossed."""
+
+    def test_worker_stops_cleanly_at_checkpoint_without_redispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+
+        async def _run() -> None:
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(_checkpoint_plan("checkpoint-worker-stop"))
+            launcher = DryRunLauncher()
+            worker = TaskWorker(engine=engine, launcher=launcher)
+
+            summary = await worker.run()
+
+            assert "checkpoint" in summary.lower()
+            assert "baton execute resume" in summary
+            assert not worker.is_running
+            launched_ids = {launch["step_id"] for launch in launcher.launches}
+            assert "1.1" in launched_ids
+            # The worker must have stopped BEFORE ever asking the launcher
+            # to dispatch phase 2's step.
+            assert "2.1" not in launched_ids
+
+        asyncio.run(_run())
+
+    def test_fresh_worker_resumes_past_checkpoint_and_completes_without_redoubling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+        task_id = "checkpoint-worker-restart"
+
+        async def _first_run() -> None:
+            # Constructed with an explicit task_id (matching the resumed
+            # engine below) so StatePersistence resolves the same
+            # namespaced path on both sides -- see the sibling engine-level
+            # test's comment for why this matters.
+            engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            engine.start(_checkpoint_plan(task_id))
+            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
+            summary = await worker.run()
+            assert "checkpoint" in summary.lower()
+
+        async def _second_run() -> None:
+            # A brand-new engine + worker instance against the SAME
+            # persisted state on disk -- simulates a fresh process resuming
+            # after the checkpoint (no in-memory state carried over).
+            resumed_engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            launcher = DryRunLauncher()
+            worker = TaskWorker(engine=resumed_engine, launcher=launcher)
+
+            summary = await worker.run()
+
+            assert "complete" in summary.lower()
+            launched_ids = {launch["step_id"] for launch in launcher.launches}
+            # Phase 1's step must NOT be redispatched by the resumed worker
+            # -- only phase 2's step is genuinely new work for it.
+            assert "1.1" not in launched_ids
+            assert "2.1" in launched_ids
+
+            state = resumed_engine._load_state()
+            assert state is not None
+            assert state.checkpoint_count == 1  # dedup held across the restart
+
+        asyncio.run(_first_run())
+        asyncio.run(_second_run())

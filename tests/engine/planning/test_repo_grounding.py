@@ -184,3 +184,101 @@ class TestGroundPhasesInRepository:
         )
         assert "1.1" in test_step.depends_on
         assert "2.1" not in impl_step.depends_on
+
+
+# ---------------------------------------------------------------------------
+# Full-pipeline snapshot: create_plan() for a heavy task against a real,
+# synthetic repository (Phase 6, 6.4). The unit-level tests above exercise
+# gather_repo_findings/ground_phases_in_repository directly; this exercises
+# the whole seven-stage pipeline (DecompositionStage -> ... -> assembly ->
+# ValidationStage) the way `baton plan` actually calls it, and pins that the
+# assembled plan's steps carry concrete, repository-grounded content -- no
+# placeholder markers, no bare "(as <agent>)" template text left unfilled --
+# for every step ValidationStage's shallow-decomposition check would flag.
+# ---------------------------------------------------------------------------
+
+
+class TestFullPipelineHeavyPlanGroundingSnapshot:
+    @staticmethod
+    def _build_repo(tmp_path: Path) -> None:
+        # Basenames must overlap the task summary's keyword tokens
+        # (gather_repo_findings matches on _basename_tokens(), not full
+        # path) -- "report_service.py" tokenizes to {"report", "service"}.
+        app_dir = tmp_path / "app" / "reporting"
+        app_dir.mkdir(parents=True)
+        (app_dir / "report_service.py").write_text(
+            "def generate_report():\n    return 'report'\n",
+            encoding="utf-8",
+        )
+        tests_dir = tmp_path / "tests" / "reporting"
+        tests_dir.mkdir(parents=True)
+        (tests_dir / "test_report_service.py").write_text(
+            "def test_generate_report():\n    pass\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _planner(tmp_path: Path):
+        from agent_baton.core.engine.planner import IntelligentPlanner
+        from agent_baton.core.orchestration.registry import AgentRegistry
+        from agent_baton.core.orchestration.router import AgentRouter
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "backend-engineer.md").write_text(
+            "---\nname: backend-engineer\ndescription: backend specialist.\n"
+            "model: sonnet\npermissionMode: default\ntools: Read, Write\n---\n",
+            encoding="utf-8",
+        )
+        planner = IntelligentPlanner(team_context_root=tmp_path / "team-context")
+        reg = AgentRegistry()
+        reg.load_directory(agents_dir)
+        planner._registry = reg
+        planner._router = AgentRouter(reg)
+        return planner
+
+    def test_heavy_plan_is_grounded_not_generic(self, tmp_path: Path) -> None:
+        self._build_repo(tmp_path)
+        planner = self._planner(tmp_path)
+
+        plan = planner.create_plan(
+            "Add a generate_report endpoint to the reporting module, "
+            "with tests",
+            complexity="heavy",
+            project_root=tmp_path,
+            phases=[{"name": "Implement", "agents": ["backend-engineer"]}],
+        )
+
+        assert plan.complexity == "heavy"
+        assert plan.phases, "heavy plan must have at least one phase"
+
+        _PLACEHOLDER_MARKERS = ("tbd", "todo", "placeholder", "lorem ipsum")
+        for phase in plan.phases:
+            for step in phase.steps:
+                haystack = (
+                    step.task_description + " " + step.expected_outcome
+                ).lower()
+                for marker in _PLACEHOLDER_MARKERS:
+                    assert marker not in haystack, (
+                        f"step {step.step_id} carries placeholder marker "
+                        f"{marker!r}: {haystack!r}"
+                    )
+
+        # At least one step must show concrete, repository-grounded
+        # evidence -- the whole point of repo_grounding.py -- not just the
+        # generic per-agent/per-phase template text.
+        grounded_steps = [
+            step
+            for phase in plan.phases
+            for step in phase.steps
+            if any("report_service.py" in f for f in step.context_files)
+        ]
+        assert grounded_steps, (
+            "expected at least one step grounded on app/reporting/report_service.py; "
+            f"got phases: {[(p.name, [s.task_description for s in p.steps]) for p in plan.phases]}"
+        )
+        grounded = grounded_steps[0]
+        assert grounded.allowed_paths, "grounded step must carry concrete allowed_paths"
+        assert grounded.deliverables, "grounded step must carry concrete deliverables"
+        assert "Repository scope" in grounded.task_description
+        assert grounded.expected_outcome != ""

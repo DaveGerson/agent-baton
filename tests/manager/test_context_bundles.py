@@ -481,6 +481,102 @@ def test_knowledge_pack_cap_warns_when_required_pack_dropped(tmp_path) -> None:
     assert any("testing-strategy" in w for w in bundle.truncation_warnings)
 
 
+# ---------------------------------------------------------------------------
+# Missing/phantom knowledge-pack diagnostics (Phase 6, 6.4)
+#
+# ``_build_knowledge_packs`` distinguishes two distinct "this bundle names a
+# pack it can't actually deliver" cases -- a pack confirmed absent from the
+# registry (``knowledge_plan.missing_packs``) vs. one that exists somewhere
+# but was simply never selected for THIS plan -- and surfaces a differently
+# worded truncation warning for each rather than silently attaching a
+# content-less reference either way.
+# ---------------------------------------------------------------------------
+
+
+def test_phantom_pack_confirmed_missing_from_registry_is_diagnosed(tmp_path) -> None:
+    from agent_baton.models.manager import MissingKnowledgePack
+
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("contract", encoding="utf-8")
+
+    step = _step()
+    role_card = _role_card(required_knowledge_packs=["coding-conventions", "ghost-pack"])
+    knowledge_plan = _knowledge_plan(
+        selected_packs=[
+            KnowledgePackReference(name="coding-conventions", token_estimate=10),
+        ],
+        per_step_packs={},
+        missing_packs=[
+            MissingKnowledgePack(name="ghost-pack", reason="not found in registry"),
+        ],
+    )
+    config = ManagerConfig()
+
+    bundle = ContextBundleBuilder(config).build(
+        step, contract_path, role_card, knowledge_plan
+    )
+
+    pack_names = {p.name for p in bundle.knowledge_packs}
+    assert "ghost-pack" in pack_names
+    assert any(
+        "confirmed missing from registry" in w and "ghost-pack" in w
+        for w in bundle.truncation_warnings
+    )
+    # The distinct "not selected" wording must NOT also fire for this case.
+    assert not any(
+        "not in this plan's selected" in w and "ghost-pack" in w
+        for w in bundle.truncation_warnings
+    )
+
+
+def test_phantom_pack_not_selected_for_plan_is_diagnosed_distinctly(tmp_path) -> None:
+    """A required pack that is present nowhere in ``missing_packs`` either
+    (i.e. it exists in the registry generally, it just wasn't chosen for
+    this task's knowledge plan) gets the OTHER phantom-pack message -- a
+    human debugging a thin dispatch needs to know whether to fix the pack
+    manifest or the plan-level selection logic, and this is how the bundle
+    tells them apart."""
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("contract", encoding="utf-8")
+
+    step = _step()
+    role_card = _role_card(required_knowledge_packs=["coding-conventions", "unselected-pack"])
+    knowledge_plan = _knowledge_plan(
+        selected_packs=[
+            KnowledgePackReference(name="coding-conventions", token_estimate=10),
+        ],
+        per_step_packs={},
+    )
+    config = ManagerConfig()
+
+    bundle = ContextBundleBuilder(config).build(
+        step, contract_path, role_card, knowledge_plan
+    )
+
+    pack_names = {p.name for p in bundle.knowledge_packs}
+    assert "unselected-pack" in pack_names
+    assert any(
+        "not in this plan's selected" in w and "unselected-pack" in w
+        for w in bundle.truncation_warnings
+    )
+    assert not any(
+        "confirmed missing from registry" in w for w in bundle.truncation_warnings
+    )
+
+
+def test_non_phantom_pack_has_no_diagnostic(tmp_path) -> None:
+    """Control case: a pack that IS selected for the plan gets no phantom
+    warning at all -- the diagnostics above must not fire spuriously."""
+    contract_path = tmp_path / "contract.md"
+    contract_path.write_text("contract", encoding="utf-8")
+
+    bundle = ContextBundleBuilder(ManagerConfig()).build(
+        _step(), contract_path, _role_card(), _knowledge_plan()
+    )
+
+    assert not any("Phantom knowledge pack" in w for w in bundle.truncation_warnings)
+
+
 def test_bundle_round_trip(tmp_path) -> None:
     contract_path = tmp_path / "contract.md"
     contract_path.write_text("contract", encoding="utf-8")
