@@ -528,6 +528,63 @@ class TestPlannerTalentFactoryDispatch:
         assert dispatcher.call_count == 0, "allow_talent_builder=False must never dispatch"
         assert not (tmp_path / ".claude" / "agents").exists()
 
+    def test_retry_budget_zero_never_generates_talent(self, tmp_path) -> None:
+        """Phase 5 review regression: ``talent_factory.retry_budget: 0``
+        means "no generation attempts permitted" and must actually reach
+        the lifecycle decision — previously the config was parsed and
+        threaded into create_plan but RosterStage decided with hardcoded
+        defaults, so a zero budget still dispatched and installed."""
+        from agent_baton.core.config.manager import TalentFactoryConfig
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        plan = planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist"],
+            talent_factory_config=TalentFactoryConfig(retry_budget=0),
+        )
+
+        assert dispatcher.call_count == 0, "retry_budget=0 must never dispatch"
+        assert not (tmp_path / ".claude" / "agents").exists()
+        outcomes = plan.plan_diagnostics["talent_factory_outcomes"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "queued_for_manager"
+
+    def test_duplicate_requests_generate_once_and_keep_the_generated_agent(
+        self, tmp_path
+    ) -> None:
+        """Phase 5 review regression: a duplicated ``--agents`` entry must
+        not create two gaps for the same capability — previously the
+        second dispatch collided with the first's freshly installed
+        artifact and its collision-fallback substitution rewrote the
+        successful resolution back out of the roster, so the generated
+        agent was installed but never causally used."""
+        from agent_baton.core.engine.planning.planner import IntelligentPlanner
+
+        dispatcher = _FakeSuccessDispatcher()
+        planner = IntelligentPlanner(talent_builder_dispatcher=dispatcher)
+        (tmp_path / ".claude").mkdir()
+
+        plan = planner.create_plan(
+            "Design a data-retention audit workflow for legacy archives",
+            project_root=tmp_path,
+            agents=["archive-retention-specialist", "archive-retention-specialist"],
+        )
+
+        assert dispatcher.call_count == 1, "one bounded attempt per distinct capability"
+        outcomes = plan.plan_diagnostics["talent_factory_outcomes"]
+        assert [o["status"] for o in outcomes] == ["generated"]
+
+        step_agents = {s.agent_name for p in plan.phases for s in p.steps}
+        assert "archive-retention-specialist" in step_agents, (
+            "the generated agent must remain the one the plan actually uses"
+        )
+        assert (tmp_path / ".claude" / "agents" / "archive-retention-specialist.md").is_file()
+
 
 # ---------------------------------------------------------------------------
 # Registry reload + causal re-plan use of a newly generated capability

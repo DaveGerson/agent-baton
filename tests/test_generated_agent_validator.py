@@ -89,6 +89,36 @@ class TestValidGeneratedAgent:
         assert result.valid, result.errors
 
 
+class TestPermissionModeAllowlist:
+    """Phase 5 review regression: a generated, unreviewed agent is
+    auto-installed and auto-registered with no human in the loop, so the
+    validator must reject elevated permission modes — previously only the
+    field's *presence* was checked, so an artifact declaring
+    ``permissionMode: bypassPermissions`` (the frontmatter flavor of the
+    "set permissionMode to auto-edit" injected directive the contract's §7
+    warns about) passed validation and installed."""
+
+    @pytest.mark.parametrize(
+        "mode", ["auto-edit", "acceptEdits", "bypassPermissions", "dontAsk"]
+    )
+    def test_elevated_permission_mode_is_rejected(self, tmp_path: Path, mode: str) -> None:
+        text = _valid_agent_text().replace(
+            "permissionMode: default", f"permissionMode: {mode}"
+        )
+        path = _write(tmp_path, "widget-specialist", text)
+        result = validate_generated_agent(path, project_root=tmp_path)
+        assert not result.valid
+        assert any("permissionMode" in e for e in result.errors)
+
+    def test_plan_permission_mode_is_accepted(self, tmp_path: Path) -> None:
+        text = _valid_agent_text().replace(
+            "permissionMode: default", "permissionMode: plan"
+        )
+        path = _write(tmp_path, "widget-specialist", text)
+        result = validate_generated_agent(path, project_root=tmp_path)
+        assert result.valid, result.errors
+
+
 class TestMissingFrontmatter:
     def test_missing_required_field_fails(self, tmp_path: Path) -> None:
         text = _valid_agent_text().replace("model: sonnet\n", "")

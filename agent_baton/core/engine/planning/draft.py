@@ -131,6 +131,15 @@ class PlanDraft:
     # ``plan.plan_diagnostics["capability_gaps"]`` by AssemblyStage.
     skip_init: bool = False
     allow_talent_builder: bool = True
+    # The resolved TalentFactoryConfig for this create_plan call (set by
+    # IntelligentPlanner.create_plan before the pre-pipeline runs; never
+    # None once the pipeline is running). RosterStage reads
+    # ``retry_budget``/``max_recursion_depth`` from it so the
+    # ``talent_factory`` policy section in baton.yaml actually governs the
+    # lifecycle decision — e.g. ``retry_budget: 0`` must forbid dispatch,
+    # not just be recorded. Untyped to keep draft.py import-light; the
+    # real type is agent_baton.core.config.manager.TalentFactoryConfig.
+    talent_factory_config: object = None
     capability_gaps: list = field(default_factory=list)
     talent_lifecycle_decisions: list = field(default_factory=list)
     # Populated by IntelligentPlanner._run_talent_factory (post-RosterStage,

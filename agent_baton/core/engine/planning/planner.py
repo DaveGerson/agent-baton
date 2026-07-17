@@ -374,6 +374,18 @@ class IntelligentPlanner:
             datetime.now(timezone.utc) if draft.otel_exporter else None
         )
 
+        # Resolve the talent-factory lifecycle policy once, BEFORE the
+        # pre-pipeline runs: RosterStage's decide_talent_lifecycle call
+        # reads retry_budget/max_recursion_depth from the draft, so the
+        # ``talent_factory`` section of baton.yaml must be on the draft by
+        # the time gaps are detected — otherwise a policy like
+        # ``retry_budget: 0`` ("no generation attempts") would be recorded
+        # in config but silently ignored by the decision.
+        from agent_baton.core.config.manager import TalentFactoryConfig
+
+        resolved_tf_config = talent_factory_config or TalentFactoryConfig()
+        draft.talent_factory_config = resolved_tf_config
+
         services = self._build_services(
             knowledge_registry=self._resolve_knowledge_registry(project_root)
         )
@@ -387,7 +399,7 @@ class IntelligentPlanner:
         # construction, so a resolved gap's agent name (generated or
         # generic-fallback) is what DecompositionStage actually builds
         # phases/steps for. No-op when no gaps were detected.
-        self._run_talent_factory(draft, services, talent_factory_config)
+        self._run_talent_factory(draft, services, resolved_tf_config)
 
         # Continue with risk .. assembly using the (possibly talent-factory
         # -resolved) roster.

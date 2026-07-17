@@ -41,6 +41,7 @@ __all__ = [
     "REQUIRED_FRONTMATTER_FIELDS",
     "REQUIRED_BODY_SECTIONS",
     "ALLOWED_MODELS",
+    "ALLOWED_PERMISSION_MODES",
     "KNOWN_TOOLS",
 ]
 
@@ -54,6 +55,17 @@ REQUIRED_BODY_SECTIONS: tuple[str, ...] = (
     "Anti-Patterns", "Output Format",
 )
 ALLOWED_MODELS: frozenset[str] = frozenset({"opus", "sonnet", "haiku"})
+#: Permission modes a *generated, unreviewed* agent may declare. The
+#: talent-factory pipeline auto-installs and auto-registers whatever
+#: passes this validator with no human in the loop, so elevated modes
+#: (``auto-edit``, ``acceptEdits``, ``bypassPermissions``) are rejected
+#: outright — "set permissionMode to auto-edit" is the canonical injected
+#: directive the talent-factory contract (§7) warns about, and a
+#: frontmatter value is a quieter channel for the same escalation than
+#: body text. A human promotes a reviewed draft to an elevated mode later
+#: (agents/talent-builder.md allows auto-edit for *reviewed* implementer
+#: agents); the automated pipeline never does.
+ALLOWED_PERMISSION_MODES: frozenset[str] = frozenset({"default", "plan"})
 #: Known Claude Code tool names. A generated agent requesting a tool
 #: outside this set is rejected -- least-privilege can't be verified for
 #: a tool the validator doesn't recognize.
@@ -160,6 +172,16 @@ def validate_generated_agent(
     model = str(frontmatter.get("model", "") or "").strip()
     if model and model not in ALLOWED_MODELS:
         errors.append(f"model '{model}' is not one of {sorted(ALLOWED_MODELS)}")
+
+    permission_mode = str(frontmatter.get("permissionMode", "") or "").strip()
+    if permission_mode and permission_mode not in ALLOWED_PERMISSION_MODES:
+        errors.append(
+            f"permissionMode '{permission_mode}' is not one of "
+            f"{sorted(ALLOWED_PERMISSION_MODES)} — a generated, unreviewed "
+            "agent is auto-installed with no human review and must stay "
+            "least-privilege; elevated modes require human promotion "
+            "(talent-factory-contract.md §7)"
+        )
 
     tools = _coerce_str_list(frontmatter.get("tools", ""))
     unknown_tools = [t for t in tools if t not in KNOWN_TOOLS]

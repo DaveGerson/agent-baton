@@ -172,9 +172,15 @@ one-line human-readable explanation of which check fired) — both round-trip th
 ### 3.3 What "bounded" means at plan time vs. execution time
 
 This step's pipeline integration (`RosterStage`) calls `decide_talent_lifecycle` once,
-at plan-construction time, with `recursion_depth=0`, `max_recursion_depth=0`,
-`attempts_used=0`, `retry_budget=1` (the function's defaults) — i.e. "is this a
-first-generation gap and is generation policy-permitted at all." The decision is
+at plan-construction time, with `recursion_depth=0` and `attempts_used=0` (a
+first-generation gap with no attempts yet spent), and with `retry_budget` /
+`max_recursion_depth` taken from the resolved `talent_factory` config section
+(`PlanDraft.talent_factory_config`, set by `IntelligentPlanner.create_plan` before the
+pre-pipeline runs; function defaults `retry_budget=1` / `max_recursion_depth=0` apply
+when no config is supplied). In particular `talent_factory.retry_budget: 0` means "no
+generation attempts permitted" and resolves every dispatchable gap to
+`queue_for_manager` — the policy knob genuinely governs the decision, it is not merely
+recorded. The decision is
 **diagnostic only**: it is recorded on `plan.plan_diagnostics["capability_gaps"]` /
 `["talent_lifecycle_decisions"]` and as a routing note; it does not mutate
 `draft.resolved_agents`, so a caller's explicit `--agents` list is preserved as given
@@ -372,6 +378,14 @@ runaway loop from the outside. Sites that want more attempts set
 ---
 
 ## 11. Follow-up work (explicitly deferred, not done in this step)
+
+> **Status update (step 5.2):** items 1, 2, and 5 below were subsequently delivered by
+> step 5.2 — `baton plan` threads `--skip-init` / `team.allow_talent_builder` /
+> `talent_factory` into `create_plan()` (`plan_cmd.py`), a `DISPATCH_TALENT_BUILDER`
+> decision is acted on between roster assembly and phase construction
+> (`IntelligentPlanner._run_talent_factory` + `talent_factory.py`, one bounded attempt
+> per gap), and `registry_reload: immediate` is real
+> (`AgentRegistry.register_generated_agent`). Items 3, 4, and 6 remain open.
 
 This step delivers the **model and policy** (`capability_gap.py`, `TalentFactoryConfig`,
 the `RosterStage` diagnostic-only integration, and the updated `talent-builder.md`

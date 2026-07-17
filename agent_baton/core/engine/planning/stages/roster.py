@@ -156,7 +156,27 @@ class RosterStage:
         if not draft.agents:
             return
         known_base_names = {name.split("--", 1)[0] for name in services.registry.names}
+        # Lifecycle policy from the resolved ``talent_factory`` config
+        # section (set on the draft by IntelligentPlanner.create_plan).
+        # Without this, ``retry_budget: 0`` in baton.yaml would be parsed,
+        # threaded, and then silently ignored by the decision — a policy
+        # knob that does nothing. ``getattr`` defaults keep this stage
+        # working for tests/callers that build a bare PlanDraft directly.
+        tf_config = draft.talent_factory_config
+        retry_budget = getattr(tf_config, "retry_budget", 1)
+        max_recursion_depth = getattr(tf_config, "max_recursion_depth", 0)
+        seen_capabilities: set[str] = set()
         for requested in draft.agents:
+            # One gap (and therefore at most one bounded generation
+            # attempt) per distinct requested capability. Duplicate
+            # entries in an explicit --agents list would otherwise create
+            # two gaps for the same capability: the second dispatch
+            # collides with the first's freshly installed artifact and
+            # its collision-fallback substitution rewrites the *first*
+            # (successful) resolution back out of the roster.
+            if requested in seen_capabilities:
+                continue
+            seen_capabilities.add(requested)
             gap = detect_missing_role_gap(requested, known_agents=known_base_names)
             if gap is None:
                 continue
@@ -164,6 +184,8 @@ class RosterStage:
                 gap,
                 allow_talent_builder=draft.allow_talent_builder,
                 skip_init=draft.skip_init,
+                retry_budget=retry_budget,
+                max_recursion_depth=max_recursion_depth,
             )
             draft.capability_gaps.append(gap)
             draft.talent_lifecycle_decisions.append(decision)
