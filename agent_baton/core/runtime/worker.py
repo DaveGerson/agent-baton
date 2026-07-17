@@ -146,6 +146,25 @@ class TaskWorker:
             if action.action_type == ActionType.FAILED:
                 return action.message
 
+            if action.action_type == ActionType.CHECKPOINT:
+                # Phase 6.2: a checkpoint is a paused-for-refresh boundary,
+                # NOT completion or failure -- the engine already persisted
+                # the handoff and advanced the dedup markers before
+                # returning this action (see
+                # ExecutionEngine._emit_checkpoint).  Stop this worker's
+                # loop cleanly (mirroring the --max-steps ceiling above) so
+                # a fresh daemon/CLI session can pick the execution back up
+                # via the handoff's resume_command without redispatching
+                # completed work or losing decisions/context.
+                resume_cmd = (
+                    (action.checkpoint_handoff or {}).get("resume_command")
+                    or f"baton execute resume --task-id {self._engine.status().get('task_id', '')}"
+                )
+                return (
+                    f"Execution checkpointed (paused for refresh): "
+                    f"{action.message} Resume with: {resume_cmd}"
+                )
+
             if action.action_type == ActionType.WAIT:
                 # Parallel steps are still in-flight (from a previous
                 # iteration).  Sleep briefly and re-check.

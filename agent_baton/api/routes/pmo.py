@@ -36,6 +36,7 @@ from agent_baton.api.deps import get_bus, get_central_store, get_forge_session, 
 from agent_baton.api.planner_errors import plan_quality_error_detail
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.engine.planning.stages.validation import PlanQualityError
+from agent_baton.models.execution import ActionType
 from agent_baton.core.runtime.decisions import (
     DecisionManager,
     apply_decision_resolution,
@@ -2033,6 +2034,13 @@ async def list_pending_gates(
                 storage=storage,
             )
             action = engine.next_action()
+            if action.action_type == ActionType.CHECKPOINT:
+                # Phase 6.2: a checkpoint is a paused-for-refresh boundary,
+                # not a pending gate/approval the PMO reviewer needs to act
+                # on.  The dedup guard already advanced when this fired, so
+                # a second call surfaces the real pending item (if any)
+                # instead of leaving this card's approval fields empty.
+                action = engine.next_action()
             action_dict = action.to_dict()
         except Exception:
             action_dict = {}

@@ -1451,6 +1451,64 @@ class ConsolidationResult(ExecutionRecord):
     # nested type annotation.
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint handoff (Phase 6.2 — context-rot mitigation)
+# ---------------------------------------------------------------------------
+
+class CheckpointHandoff(ExecutionRecord):
+    """Compact, persisted summary emitted alongside a ``CHECKPOINT`` action.
+
+    Built by ``ExecutionEngine._build_checkpoint_handoff`` at a safe,
+    already-persisted phase boundary (after ``advance_phase`` and before
+    anything in the new phase is dispatched) and appended to
+    ``ExecutionState.checkpoints``.  Intentionally lean -- it is a pointer
+    into the already-persisted ``ExecutionState`` (step_results,
+    gate_results, approval_results, pending_gaps, ...) rather than a copy
+    of it, so a fresh CLI or daemon session gets *just enough* context to
+    orient itself before calling ``baton execute resume`` and letting the
+    engine's own exactly-once dispatch bookkeeping take over.
+
+    Attributes:
+        checkpoint_id: Monotonic id for this checkpoint (``"cp1"``, ...).
+        created_at: ISO 8601 timestamp; auto-stamped via ``default_factory``.
+        phase_id: The plan ``phase_id`` execution resumes at (the phase that
+            just became current after the boundary advance).
+        trigger: Which deterministic threshold tripped -- one of
+            ``"phase_interval"``, ``"turn_threshold"``, ``"token_threshold"``.
+        goal: The task's completion condition (goal-driven execution) or
+            its ``task_summary`` when no explicit goal was set.
+        completed_outcomes: One-line ``step_id (agent): outcome`` summaries
+            for steps completed since the previous checkpoint (or since the
+            start of execution, for the first checkpoint).
+        decisions: One-line summaries of gate/approval decisions recorded
+            since the previous checkpoint.
+        scope: Deduplicated ``allowed_paths`` across every step dispatched
+            so far -- the sandbox footprint of the work completed to date.
+        changed_files: Deduplicated ``files_changed`` across every
+            completed step to date.
+        unresolved_risks: Free-text notes -- open knowledge gaps, recorded
+            step deviations, and pending scope expansions -- that a fresh
+            session should be aware of before continuing.
+        next_actions: One-line description of what the engine will dispatch
+            next (the phase about to run).
+        resume_command: The exact CLI invocation a fresh session should run
+            to continue this execution without redispatching completed work.
+    """
+
+    checkpoint_id: str
+    created_at: str = Field(default_factory=_now_iso_seconds)
+    phase_id: int
+    trigger: str = ""
+    goal: str = ""
+    completed_outcomes: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list)
+    changed_files: list[str] = Field(default_factory=list)
+    unresolved_risks: list[str] = Field(default_factory=list)
+    next_actions: str = ""
+    resume_command: str = ""
+
+
 class ExecutionState(BaseModel):
     """Persistent state of a running execution, saved between CLI calls.
 
@@ -1534,6 +1592,19 @@ class ExecutionState(BaseModel):
     amend_cycles_used: int = 0
     goal_status: str = ""
     turn_count: int = 0
+
+    # Phase 6.2: CHECKPOINT policy state.  ``checkpoints`` is the audit
+    # trail of compact handoffs emitted so far; the three ``last_checkpoint_*``
+    # markers are the dedup guard -- ``_checkpoint_trigger`` compares the
+    # current phase/turn_count/token-total against these so the SAME phase
+    # boundary can never checkpoint twice.  Defaults preserve back-compat
+    # for state files that predate this field (``-1`` for the phase marker
+    # so phase 0 is always eligible to trip the first checkpoint).
+    checkpoints: list[CheckpointHandoff] = Field(default_factory=list)
+    last_checkpoint_phase: int = -1
+    last_checkpoint_turn_count: int = 0
+    last_checkpoint_tokens: int = 0
+    checkpoint_count: int = 0
 
     # SQLite Phase C (slice 14): transient OCC version observed at load
     # time.  PrivateAttr so it does NOT appear in model_dump / to_dict —
@@ -1851,7 +1922,7 @@ class ExecutionState(BaseModel):
         self.status = "running"
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "task_id": self.task_id,
             "plan": self.plan.to_dict(),
             "current_phase": self.current_phase,
@@ -1896,6 +1967,29 @@ class ExecutionState(BaseModel):
                 else None
             ),
         }
+        # turn_count previously had no to_dict()/from_dict() support at all
+        # (silently dropped on every file-backed save/load roundtrip).  The
+        # CHECKPOINT turn-count threshold (Phase 6.2) depends on this value
+        # surviving a reload, so close the gap here.  Lean-payload
+        # convention: omitted when zero so pre-existing golden fixtures
+        # (which predate turn_count entirely) still roundtrip byte-identical.
+        if getattr(self, "turn_count", 0):
+            d["turn_count"] = self.turn_count
+        # Phase 6.2: lean-payload convention — checkpoint fields are omitted
+        # when at their default (no checkpoint has fired yet) so byte-identical
+        # golden-fixture roundtrips for state files that predate this field
+        # are unaffected.
+        if self.checkpoints:
+            d["checkpoints"] = [c.to_dict() for c in self.checkpoints]
+        if getattr(self, "last_checkpoint_phase", -1) != -1:
+            d["last_checkpoint_phase"] = self.last_checkpoint_phase
+        if getattr(self, "last_checkpoint_turn_count", 0):
+            d["last_checkpoint_turn_count"] = self.last_checkpoint_turn_count
+        if getattr(self, "last_checkpoint_tokens", 0):
+            d["last_checkpoint_tokens"] = self.last_checkpoint_tokens
+        if getattr(self, "checkpoint_count", 0):
+            d["checkpoint_count"] = self.checkpoint_count
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> ExecutionState:
@@ -1956,6 +2050,17 @@ class ExecutionState(BaseModel):
                 if data.get("pending_approval_request") is not None
                 else None
             ),
+            # See to_dict(): turn_count previously had no roundtrip support.
+            turn_count=int(data.get("turn_count", 0)),
+            # Phase 6.2: checkpoint policy state — defaults preserve back-compat
+            # for state files that predate CHECKPOINT emission.
+            checkpoints=[
+                CheckpointHandoff.from_dict(c) for c in data.get("checkpoints", [])
+            ],
+            last_checkpoint_phase=int(data.get("last_checkpoint_phase", -1)),
+            last_checkpoint_turn_count=int(data.get("last_checkpoint_turn_count", 0)),
+            last_checkpoint_tokens=int(data.get("last_checkpoint_tokens", 0)),
+            checkpoint_count=int(data.get("checkpoint_count", 0)),
         )
 
 
@@ -2053,6 +2158,15 @@ class ExecutionAction:
     worktree_path: str = ""            # absolute path to isolated worktree; "" = no worktree
     worktree_branch: str = ""          # git branch inside the worktree
 
+    # Phase 6.2 — For CHECKPOINT actions: the compact persisted handoff
+    # (CheckpointHandoff.to_dict()) — goal, completed outcomes, decisions,
+    # scope, changed files, unresolved risks, next actions, and the exact
+    # resume command.  ``phase_id`` (above) doubles as the checkpoint's
+    # boundary phase; ``summary`` carries the resume command alone for
+    # thinner consumers (e.g. the REST API's ActionResponse, which has no
+    # dedicated checkpoint field).
+    checkpoint_handoff: dict[str, Any] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         # action_type is serialised as a plain string so CLI / Claude output
         # is unaffected by the internal enum representation.
@@ -2120,6 +2234,12 @@ class ExecutionAction:
             })
         elif self.action_type in (ActionType.COMPLETE, ActionType.FAILED):
             d["summary"] = self.summary
+        elif self.action_type == ActionType.CHECKPOINT:
+            d.update({
+                "phase_id": self.phase_id,
+                "summary": self.summary,
+                "checkpoint_handoff": dict(self.checkpoint_handoff),
+            })
         if self.parallel_actions:
             d["parallel_actions"] = [a.to_dict() for a in self.parallel_actions]
         return d

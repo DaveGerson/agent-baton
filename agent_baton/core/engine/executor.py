@@ -149,6 +149,7 @@ def _phase_gate_additions(state: "ExecutionState", phase_id: int) -> list[str]:
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
+    CheckpointHandoff,
     ExecutionAction,
     ExecutionState,
     FeedbackQuestion,
@@ -275,6 +276,69 @@ def _souls_enabled() -> bool:
     When disabled, BeadStore signing is a no-op and SoulRouter is never constructed.
     """
     return _env_flag("BATON_SOULS_ENABLED", "0")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.2 — CHECKPOINT policy (context-rot mitigation).
+#
+# Deterministic thresholds that decide when the engine emits a CHECKPOINT
+# action instead of silently walking into the next phase.  All three
+# thresholds are independent (any one tripping is sufficient) and are
+# evaluated ONLY at a safe persisted boundary -- immediately after a phase
+# has fully advanced (``PHASE_ADVANCE_OK`` / ``EMPTY_PHASE_ADVANCE``) and
+# before anything in the new phase has been dispatched.  See
+# ``ExecutionEngine._checkpoint_trigger`` / ``_emit_checkpoint``.
+# ---------------------------------------------------------------------------
+
+def _checkpoint_enabled() -> bool:
+    """Return True when CHECKPOINT emission is enabled.
+
+    Default: enabled.  Set ``BATON_CHECKPOINT_ENABLED=0`` to restore the
+    pre-6.2 behavior (CHECKPOINT is a declared ``ActionType`` but never
+    emitted).
+    """
+    return _env_flag("BATON_CHECKPOINT_ENABLED", "1")
+
+
+def _checkpoint_int_env(name: str, default: int) -> int:
+    """Parse a positive-int checkpoint threshold env var, falling back to
+    *default* on any missing/invalid value (never raises)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _checkpoint_phase_interval() -> int:
+    """Number of *completed* phases between checkpoints.
+
+    Override via ``BATON_CHECKPOINT_PHASE_INTERVAL`` (default 3).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_PHASE_INTERVAL", 3)
+
+
+def _checkpoint_turn_threshold() -> int:
+    """Number of recorded turns (``ExecutionState.turn_count``) since the
+    last checkpoint that trips a checkpoint even if the phase-interval
+    threshold has not been reached.  Catches a single very long phase.
+
+    Override via ``BATON_CHECKPOINT_TURN_THRESHOLD`` (default 40).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_TURN_THRESHOLD", 40)
+
+
+def _checkpoint_token_threshold() -> int:
+    """Cumulative ``estimated_tokens`` since the last checkpoint that trips
+    a checkpoint independent of phase count or turn count -- a proxy for
+    accumulated orchestrator context size.
+
+    Override via ``BATON_CHECKPOINT_TOKEN_THRESHOLD`` (default 150,000).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_TOKEN_THRESHOLD", 150_000)
 
 
 # bd-fcntl-win: process-wide flag for the one-time Windows fail-closed warning.
@@ -2113,6 +2177,17 @@ class ExecutionEngine:
             return []
 
         if state.current_phase >= len(state.plan.phases):
+            return []
+
+        # Phase 6.2: a due-but-not-yet-emitted checkpoint boundary withholds
+        # the dispatchable batch here (read-only check; no mutation) so the
+        # caller falls back to next_action() (singular), which is the only
+        # place that actually builds + persists the CHECKPOINT action and
+        # advances the dedup markers.  Every existing caller of
+        # next_actions() (TaskWorker, the REST API's _collect_next_actions,
+        # `baton execute next --all`) already falls back to next_action()
+        # when this returns an empty list.
+        if self._checkpoint_trigger(state) is not None:
             return []
 
         phase_obj = state.current_phase_obj
@@ -6319,6 +6394,206 @@ class ExecutionEngine:
             f"work.\n\n{member_outcomes_block}"
         )
 
+    # ── Phase 6.2: CHECKPOINT policy (context-rot mitigation) ───────────────
+
+    def _checkpoint_trigger(self, state: ExecutionState) -> str | None:
+        """Return the name of the tripped checkpoint threshold, or ``None``.
+
+        Pure / read-only -- never mutates *state*.  Called from two places:
+
+        1. :meth:`next_actions` (plural), to withhold a dispatchable batch
+           and force the caller back onto :meth:`next_action` (singular),
+           which is the only place that actually emits and persists the
+           CHECKPOINT action (see :meth:`_emit_checkpoint`).
+        2. :meth:`_apply_resolver_decision`'s ``PHASE_ADVANCE_OK`` /
+           ``EMPTY_PHASE_ADVANCE`` arms, immediately after the phase has
+           advanced and before anything in the new phase is dispatched --
+           the only safe, already-persisted boundary a checkpoint may land
+           on.
+
+        A checkpoint is due when the phase just advanced past a boundary
+        that has not already been checkpointed (dedup guard via
+        ``state.last_checkpoint_phase``) AND at least one of three
+        independent, deterministic thresholds has tripped since the
+        previous checkpoint (or since the start of execution, for the
+        first one):
+
+        - ``phase_interval``: ``BATON_CHECKPOINT_PHASE_INTERVAL`` or more
+          phases have completed.
+        - ``turn_threshold``: ``BATON_CHECKPOINT_TURN_THRESHOLD`` or more
+          turns (``state.turn_count``) have been recorded -- catches a
+          single phase with many steps even before the phase-interval
+          would trip.
+        - ``token_threshold``: ``BATON_CHECKPOINT_TOKEN_THRESHOLD`` or more
+          cumulative ``estimated_tokens`` have accrued across step results
+          -- a proxy for accumulated orchestrator context size.
+        """
+        if not _checkpoint_enabled():
+            return None
+        if state.current_phase >= len(state.plan.phases):
+            # About to COMPLETE on the next resolver pass -- no boundary to
+            # pause at.
+            return None
+        last_phase = getattr(state, "last_checkpoint_phase", -1)
+        if state.current_phase == last_phase:
+            # Dedup: this exact boundary already checkpointed.
+            return None
+
+        phases_since = state.current_phase - max(last_phase, 0)
+        turns_since = state.turn_count - getattr(state, "last_checkpoint_turn_count", 0)
+        tokens_total = sum(r.estimated_tokens for r in state.step_results)
+        tokens_since = tokens_total - getattr(state, "last_checkpoint_tokens", 0)
+
+        if phases_since >= _checkpoint_phase_interval():
+            return "phase_interval"
+        if turns_since >= _checkpoint_turn_threshold():
+            return "turn_threshold"
+        if tokens_since >= _checkpoint_token_threshold():
+            return "token_threshold"
+        return None
+
+    def _build_checkpoint_handoff(
+        self, state: ExecutionState, trigger: str,
+    ) -> CheckpointHandoff:
+        """Build the compact handoff record for a checkpoint at *state*'s
+        (already-advanced) current phase.
+
+        Slices ``step_results`` / ``gate_results`` / ``approval_results``
+        by count-since-last-checkpoint markers so the record stays compact
+        (a delta, not a full history dump) while ``changed_files`` and
+        ``scope`` are cumulative -- a fresh session needs the full
+        footprint of work already done, not just the most recent slice.
+        """
+        phase_obj = state.current_phase_obj
+        phase_id = phase_obj.phase_id if phase_obj is not None else state.current_phase
+
+        # Compact-by-construction: cap to the most recent 10 completed steps
+        # rather than tracking a separate "since last checkpoint" index on
+        # ExecutionState (which would add another persisted field).  A
+        # fresh session reads the full step_results history from the
+        # persisted ExecutionState itself if it needs more than this
+        # summary -- the handoff exists to orient, not to be the source of
+        # truth for resume.
+        completed_outcomes = [
+            f"{r.step_id} ({r.agent_name}): {(r.outcome or '').strip()[:140]}"
+            for r in state.step_results
+            if r.status == "complete"
+        ][-10:]
+
+        decisions: list[str] = []
+        for g in state.gate_results:
+            decisions.append(
+                f"Phase {g.phase_id} gate '{g.gate_type}': "
+                f"{'passed' if g.passed else 'failed'}"
+            )
+        for a in state.approval_results:
+            decisions.append(f"Phase {a.phase_id} approval: {a.result}")
+        decisions = decisions[-10:]
+
+        scope: list[str] = []
+        for p in state.plan.phases[: state.current_phase]:
+            for s in p.steps:
+                for path in s.allowed_paths:
+                    if path not in scope:
+                        scope.append(path)
+
+        changed_files: list[str] = []
+        for r in state.step_results:
+            for f in r.files_changed:
+                if f not in changed_files:
+                    changed_files.append(f)
+
+        unresolved_risks: list[str] = [
+            f"knowledge gap: {getattr(g, 'question', '') or getattr(g, 'summary', str(g))}"
+            for g in state.pending_gaps
+        ]
+        for r in state.step_results:
+            for dev in r.deviations:
+                unresolved_risks.append(f"deviation ({r.step_id}): {dev[:140]}")
+        if getattr(state, "pending_scope_expansions", None):
+            unresolved_risks.append(
+                f"{len(state.pending_scope_expansions)} pending scope expansion(s)"
+            )
+        unresolved_risks = unresolved_risks[-10:]
+
+        if phase_obj is not None and phase_obj.steps:
+            next_actions = (
+                f"Phase {phase_obj.phase_id} ({phase_obj.name}): "
+                f"{len(phase_obj.steps)} step(s) pending."
+            )
+        elif phase_obj is not None:
+            next_actions = f"Phase {phase_obj.phase_id} ({phase_obj.name}): no steps; will advance."
+        else:
+            next_actions = "No phases remain; execution will complete."
+
+        goal = state.plan.completion_condition or state.plan.task_summary
+
+        return CheckpointHandoff(
+            checkpoint_id=f"cp{getattr(state, 'checkpoint_count', 0) + 1}",
+            phase_id=phase_id,
+            trigger=trigger,
+            goal=goal,
+            completed_outcomes=completed_outcomes,
+            decisions=decisions,
+            scope=scope,
+            changed_files=changed_files,
+            unresolved_risks=unresolved_risks,
+            next_actions=next_actions,
+            resume_command=f"baton execute resume --task-id {state.task_id}",
+        )
+
+    def _emit_checkpoint(self, state: ExecutionState, trigger: str) -> ExecutionAction:
+        """Build + persist a checkpoint at *state*'s current (advanced) phase
+        and return the ``CHECKPOINT`` action.
+
+        Mutates *state*: appends the handoff to ``state.checkpoints`` and
+        advances the dedup markers (``last_checkpoint_phase``,
+        ``last_checkpoint_turn_count``, ``last_checkpoint_tokens``,
+        ``checkpoint_count``) so the SAME phase boundary cannot checkpoint
+        again -- even across an investigative-archetype ``retry_phase``
+        loop that re-completes the identical ``current_phase``.  The caller
+        (``next_action`` / ``resume``) persists *state* immediately after
+        this method returns, so the dedup guard is durable before the
+        action ever reaches the caller.
+        """
+        handoff = self._build_checkpoint_handoff(state, trigger)
+        state.checkpoints.append(handoff)
+        state.last_checkpoint_phase = state.current_phase
+        state.last_checkpoint_turn_count = state.turn_count
+        state.last_checkpoint_tokens = sum(
+            r.estimated_tokens for r in state.step_results
+        )
+        state.checkpoint_count += 1
+
+        _log.info(
+            "Checkpoint %s emitted for task %s at phase %s (trigger=%s).",
+            handoff.checkpoint_id, state.task_id, handoff.phase_id, trigger,
+        )
+        try:
+            self._publish(Event.create(
+                topic="checkpoint.emitted",
+                task_id=state.task_id,
+                payload={
+                    "checkpoint_id": handoff.checkpoint_id,
+                    "phase_id": handoff.phase_id,
+                    "trigger": trigger,
+                },
+            ))
+        except Exception as _cp_exc:  # noqa: BLE001 — event publish must never block checkpointing
+            _log.debug("checkpoint.emitted event publish failed (non-fatal): %s", _cp_exc)
+
+        return ExecutionAction(
+            action_type=ActionType.CHECKPOINT,
+            message=(
+                f"Safe checkpoint at phase {handoff.phase_id} "
+                f"(trigger: {trigger}). Persisted — start a fresh session "
+                "and resume with the command below to avoid context rot."
+            ),
+            phase_id=handoff.phase_id,
+            checkpoint_handoff=handoff.to_dict(),
+            summary=handoff.resume_command,
+        )
+
     def _check_token_budget(self, state: ExecutionState) -> str | None:
         """Return a warning string if cumulative tokens exceed the budget limit.
 
@@ -7417,6 +7692,9 @@ class ExecutionEngine:
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=False)
             self._publish_phase_started(state)
+            checkpoint_trigger = self._checkpoint_trigger(state)
+            if checkpoint_trigger is not None:
+                return self._emit_checkpoint(state, checkpoint_trigger)
             return None  # loop
 
         # ── A failed step in this phase short-circuits to FAILED ────────────
@@ -7607,6 +7885,9 @@ class ExecutionEngine:
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=True)
             self._publish_phase_started(state)
+            checkpoint_trigger = self._checkpoint_trigger(state)
+            if checkpoint_trigger is not None:
+                return self._emit_checkpoint(state, checkpoint_trigger)
             return None  # loop
 
         # ── RETRY_PHASE: investigative archetype loop-back ─────────────────

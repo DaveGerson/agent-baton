@@ -616,6 +616,24 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
         ACTION: FAILED
           <failure summary>
 
+    **CHECKPOINT** -- Safe, already-persisted pause point to avoid context
+    rot (Phase 6.2).  NOT completion or failure -- start a fresh session
+    and resume with the printed command; the engine's dedup guard ensures
+    the same boundary is never checkpointed twice and no completed work is
+    redispatched::
+
+        ACTION: CHECKPOINT
+          Phase:   <phase_id>
+          Trigger: <phase_interval|turn_threshold|token_threshold>
+          Message: <description>
+
+        --- Handoff ---
+        <goal, completed outcomes, decisions, scope, changed files,
+         unresolved risks, next actions>
+        --- End Handoff ---
+
+        <exact 'baton execute resume --task-id ...' command>
+
     Note:
         ``CANCELLED`` is **not** an action type emitted by ``next``.  It is a
         status transition applied directly to :class:`ExecutionState` by the
@@ -780,6 +798,42 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
     elif atype == ActionType.FAILED.value:
         print(f"ACTION: FAILED")
         print(f"  {action.get('summary', msg)}")
+
+    elif atype == ActionType.CHECKPOINT.value:
+        handoff = action.get("checkpoint_handoff", {}) or {}
+        resume_cmd = handoff.get("resume_command") or action.get("summary", "")
+        print(f"ACTION: CHECKPOINT")
+        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Trigger: {handoff.get('trigger', '')}")
+        print(f"  Message: {msg}")
+        print()
+        print("--- Handoff ---")
+        print(f"  Goal: {handoff.get('goal', '')}")
+        if handoff.get("completed_outcomes"):
+            print("  Completed outcomes:")
+            for o in handoff["completed_outcomes"]:
+                print(f"    - {o}")
+        if handoff.get("decisions"):
+            print("  Decisions:")
+            for d in handoff["decisions"]:
+                print(f"    - {d}")
+        if handoff.get("scope"):
+            print(f"  Scope: {', '.join(handoff['scope'])}")
+        if handoff.get("changed_files"):
+            print(f"  Changed files: {', '.join(handoff['changed_files'])}")
+        if handoff.get("unresolved_risks"):
+            print("  Unresolved risks:")
+            for r in handoff["unresolved_risks"]:
+                print(f"    - {r}")
+        print(f"  Next actions: {handoff.get('next_actions', '')}")
+        print("--- End Handoff ---")
+        print()
+        print(
+            "This execution has reached a safe checkpoint boundary to avoid "
+            "context rot. Completed work and decisions are persisted -- "
+            "start a FRESH session and resume with:"
+        )
+        print(f"  {resume_cmd}")
 
     elif atype == ActionType.INTERACT.value:
         step_id = action.get("interact_step_id", "")
@@ -2632,6 +2686,22 @@ def _run_loop(
             print(f"\n{color_error('FAILED')}: {action_dict.get('summary', action_dict.get('message', ''))}", file=sys.stderr)
             sys.exit(1)
 
+        if atype == ActionType.CHECKPOINT.value:
+            # Phase 6.2: a safe, already-persisted pause point -- not
+            # completion, not failure.  Exit cleanly (code 0) so a fresh
+            # invocation of 'baton execute run' / 'baton execute resume'
+            # continues without redispatching completed work; the dedup
+            # guard on the engine side means this exact boundary will not
+            # checkpoint again.
+            handoff = action_dict.get("checkpoint_handoff", {}) or {}
+            resume_cmd = handoff.get("resume_command") or action_dict.get("summary", "")
+            print(f"\n{color_info('CHECKPOINT')}: {action_dict.get('message', '')}", file=sys.stderr)
+            print(f"  Safe boundary persisted at phase {action_dict.get('phase_id', '')}.", file=sys.stderr)
+            if handoff.get("next_actions"):
+                print(f"  Next: {handoff['next_actions']}", file=sys.stderr)
+            print(f"  Resume in a fresh session with: {resume_cmd}", file=sys.stderr)
+            return
+
         if steps_executed >= max_steps:
             print(f"\n{warning('ABORTED')}: reached max-steps limit ({max_steps})", file=sys.stderr)
             sys.exit(1)
@@ -3420,6 +3490,7 @@ _HANDOFF_NUDGE_TYPES = frozenset({
     ActionType.COMPLETE.value,
     ActionType.APPROVAL.value,
     ActionType.FAILED.value,
+    ActionType.CHECKPOINT.value,
     "gate_fail",
     "complete",
 })
