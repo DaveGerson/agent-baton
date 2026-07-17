@@ -99,6 +99,159 @@ class TestDefectDetection:
         assert len(plan.phases) >= 1
 
 
+class TestShallowDecompositionDetection:
+    """Phase 6 6.1: generic placeholder language and empty deliverables/
+    scope are validated for heavy-complexity plans. See
+    ``planning.utils.repo_grounding`` for the grounding pipeline this
+    validation is checking the output of.
+    """
+
+    def _heavy_draft(self, steps: list[PlanStep], phase_name: str = "Implement") -> PlanDraft:
+        draft = PlanDraft.from_inputs("Redesign the whole subsystem", complexity="heavy")
+        draft.inferred_complexity = "heavy"
+        draft.plan_phases = [PlanPhase(phase_id=1, name=phase_name, steps=steps)]
+        draft.review_result = None
+        return draft
+
+    def test_bare_agent_template_suffix_is_warning_not_critical(self) -> None:
+        """The literal "(as <agent>)" fallback is a real signal worth
+        surfacing, but STEP_TEMPLATES coverage gaps make it a legitimate
+        outcome for some agent/phase pairs on an otherwise-fine plan (see
+        ``tests/test_engine_planner.py::
+        TestOriginalProblemScenario::test_multi_concern_task_decomposes_correctly``
+        for a real example) -- so it must not block.
+        """
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="Implement: redesign the whole subsystem (as backend-engineer)",
+            deliverables=["Working implementation with tests"],
+            allowed_paths=["app"],
+        )
+        draft = self._heavy_draft([step])
+        defects = ValidationStage()._detect_defects(draft)
+        matches = [d for d in defects if d.code == "bare_agent_template"]
+        assert matches
+        assert all(d.severity == "warning" for d in matches)
+        assert "generic_placeholder" not in [d.code for d in defects]
+
+    def test_tbd_placeholder_marker_is_critical(self) -> None:
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="TBD — figure out scope later",
+            deliverables=["x"],
+            allowed_paths=["app"],
+        )
+        draft = self._heavy_draft([step])
+        defects = ValidationStage()._detect_defects(draft)
+        assert "generic_placeholder" in [d.code for d in defects]
+
+    def test_concrete_description_is_not_flagged(self) -> None:
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description=(
+                "Implement render_widget in app/widget.py. Repository scope — "
+                "files: app/widget.py; existing tests: tests/test_widget.py."
+            ),
+            deliverables=["Concrete change in app/widget.py"],
+            allowed_paths=["app"],
+        )
+        draft = self._heavy_draft([step])
+        defects = ValidationStage()._detect_defects(draft)
+        assert "generic_placeholder" not in [d.code for d in defects]
+        assert "empty_deliverables" not in [d.code for d in defects]
+        assert "empty_scope" not in [d.code for d in defects]
+
+    def test_empty_deliverables_on_implement_phase_is_warning_not_critical(self) -> None:
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="Implement: a concrete grounded change",
+            deliverables=[],
+            allowed_paths=["app"],
+        )
+        draft = self._heavy_draft([step])
+        defects = ValidationStage()._detect_defects(draft)
+        matches = [d for d in defects if d.code == "empty_deliverables"]
+        assert matches
+        assert all(d.severity == "warning" for d in matches)
+
+    def test_empty_scope_on_write_capable_step_is_warning_not_critical(self) -> None:
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="Implement: a concrete grounded change",
+            deliverables=["Concrete change in app/widget.py"],
+            allowed_paths=[],
+        )
+        draft = self._heavy_draft([step])
+        defects = ValidationStage()._detect_defects(draft)
+        matches = [d for d in defects if d.code == "empty_scope"]
+        assert matches
+        assert all(d.severity == "warning" for d in matches)
+
+    def test_review_only_step_missing_scope_is_not_flagged(self) -> None:
+        step = PlanStep(
+            step_id="2.1",
+            agent_name="code-reviewer",
+            task_description="Review the change",
+            step_type="reviewing",
+            allowed_paths=[],
+        )
+        draft = self._heavy_draft([step], phase_name="Review")
+        defects = ValidationStage()._detect_defects(draft)
+        assert "empty_scope" not in [d.code for d in defects]
+
+    def test_light_complexity_plan_is_not_checked(self) -> None:
+        step = PlanStep(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            task_description="Implement: foo (as backend-engineer)",
+        )
+        draft = PlanDraft.from_inputs("Add foo")
+        draft.inferred_complexity = "light"
+        draft.plan_phases = [PlanPhase(phase_id=1, name="Implement", steps=[step])]
+        draft.review_result = None
+        defects = ValidationStage()._detect_defects(draft)
+        codes = [d.code for d in defects]
+        assert "generic_placeholder" not in codes
+        assert "bare_agent_template" not in codes
+        assert "empty_deliverables" not in codes
+        assert "empty_scope" not in codes
+
+    def test_heavy_plan_with_placeholder_marker_blocks_create_plan(self, tmp_path) -> None:
+        """End-to-end: a heavy plan whose (hand-supplied) step description
+        contains a literal placeholder marker is rejected by the pipeline
+        -- not just detected by the unit-level defect check.
+        """
+        from agent_baton.core.orchestration.registry import AgentRegistry
+        from agent_baton.core.orchestration.router import AgentRouter
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "backend-engineer.md").write_text(
+            "---\nname: backend-engineer\ndescription: backend specialist.\n"
+            "model: sonnet\npermissionMode: default\ntools: Read, Write\n---\n",
+            encoding="utf-8",
+        )
+        planner = IntelligentPlanner(team_context_root=tmp_path / "team-context")
+        reg = AgentRegistry()
+        reg.load_directory(agents_dir)
+        planner._registry = reg
+        planner._router = AgentRouter(reg)
+
+        with pytest.raises(PlanQualityError) as ei:
+            planner.create_plan(
+                "Redesign the whole subsystem TODO: scope this properly",
+                complexity="heavy",
+                phases=[{"name": "Implement", "agents": ["backend-engineer"]}],
+            )
+        codes = [d.code for d in ei.value.defects]
+        assert "generic_placeholder" in codes
+
+
 class TestGatePolicy:
     def teardown_method(self) -> None:
         os.environ.pop("BATON_PLANNER_HARD_GATE", None)

@@ -54,6 +54,7 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     is_team_phase,
 )
 from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
+from agent_baton.core.engine.planning.scope_contract import diagnose_step_scope
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
     audit_coverage_requirement,
     assess_risk,
@@ -71,6 +72,31 @@ if TYPE_CHECKING:
     from agent_baton.models.execution import MachinePlan, PlanPhase
 
 logger = logging.getLogger(__name__)
+
+
+# Heavy-task-only shallow-decomposition signals (see
+# ValidationStage._detect_shallow_decomposition). Two independent tiers,
+# deliberately kept apart because they carry very different confidence:
+#
+# 1. _PLACEHOLDER_MARKER_RE -- a small, curated set of literal placeholder
+#    markers that are vanishingly unlikely to appear in genuine task
+#    content ("tbd", "todo", "placeholder", "lorem ipsum"). Unambiguous
+#    -- flagged critical (blocking).
+# 2. _BARE_TEMPLATE_SUFFIX_RE -- the literal bare fallback
+#    ``phase_builder.step_description`` emits when neither an
+#    "expert"-tier agent definition nor a STEP_TEMPLATES entry applies
+#    for a given agent/phase pair: ``f"{verb}: {scoped} (as
+#    {agent_name})"``. This IS a real signal of "the repository-grounded
+#    decomposition pipeline had nothing to work with" -- but
+#    STEP_TEMPLATES's per-agent/per-phase coverage has real, currently-
+#    legitimate gaps (e.g. frontend-engineer on a Test-type phase), so a
+#    real, otherwise-fine plan can legitimately hit it. Flagged warning
+#    (surfaced as a diagnostic, non-blocking) rather than critical for
+#    that reason -- see _detect_shallow_decomposition.
+_PLACEHOLDER_MARKER_RE = re.compile(
+    r"\btbd\b|\btodo\b|\bplaceholder\b|\blorem ipsum\b", re.IGNORECASE,
+)
+_BARE_TEMPLATE_SUFFIX_RE = re.compile(r"\(as [\w\-]+\)\s*$")
 
 
 def _collect_member_agent_names(member: object) -> list[str]:
@@ -527,6 +553,112 @@ class ValidationStage:
                                     "work to an engineering agent."
                                 ),
                             ))
+
+        defects.extend(self._detect_shallow_decomposition(draft))
+
+        return defects
+
+    def _detect_shallow_decomposition(self, draft: PlanDraft) -> list[PlanDefect]:
+        """Heavy-task-only: flag generic placeholder language and empty
+        deliverables/write-scope.
+
+        ``planning.utils.repo_grounding`` grounds heavy-task steps in
+        concrete repository evidence when it's available; when it isn't
+        (or a step's grounding produced nothing), the pre-existing
+        generic-template fallback in ``phase_builder`` fires unchanged.
+        That fallback is fine for light/medium tasks -- it's the wrong
+        outcome for a task the pipeline itself classified as heavy. This
+        surfaces that outcome as a blocking defect instead of silently
+        shipping a plan with N steps of "Implement: <same summary> (as
+        backend-engineer)" as their entire brief. Never runs for light or
+        medium plans -- template-only descriptions are the expected,
+        acceptable behavior there.
+        """
+        defects: list[PlanDefect] = []
+        if draft.inferred_complexity != "heavy":
+            return defects
+
+        for phase in draft.plan_phases:
+            phase_key = self._phase_key(phase.name)
+            is_implement_phase = phase_key in self._IMPLEMENT_PHASE_KEYS
+            for step in phase.steps:
+                desc = step.task_description or ""
+                if _PLACEHOLDER_MARKER_RE.search(desc):
+                    defects.append(PlanDefect(
+                        code="generic_placeholder",
+                        severity="critical",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task step description contains a literal "
+                            f"placeholder marker: {desc[:160]!r}. Remediation: "
+                            "replace the placeholder with the actual concrete "
+                            "work package before this plan is dispatched."
+                        ),
+                    ))
+                elif _BARE_TEMPLATE_SUFFIX_RE.search(desc):
+                    defects.append(PlanDefect(
+                        code="bare_agent_template",
+                        # Warning, not critical -- see module-level
+                        # _BARE_TEMPLATE_SUFFIX_RE docstring: STEP_TEMPLATES
+                        # coverage gaps make this a real, currently-
+                        # legitimate outcome for some agent/phase pairs, so
+                        # it's a diagnostic signal, not a blocking one.
+                        severity="warning",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task step description reads as a generic "
+                            f"template rather than a concrete work package: "
+                            f"{desc[:160]!r}. Remediation: ground the step in "
+                            "concrete repository artifacts (files, symbols, "
+                            "tests) — see planning.utils.repo_grounding — or "
+                            "supply an explicit phases/agents override with "
+                            "real task detail."
+                        ),
+                    ))
+
+                if is_implement_phase and not step.deliverables:
+                    defects.append(PlanDefect(
+                        code="empty_deliverables",
+                        # Warning, not critical: unlike generic_placeholder
+                        # (an unambiguous quality bug), an empty deliverable
+                        # list can be entirely legitimate for a heavy task
+                        # with no project_root to ground against (dry-run
+                        # planning, a brand-new repo, CLI callers that don't
+                        # pass --project-root). Still surfaced as a
+                        # diagnostic (score_warnings / plan_diagnostics) so
+                        # it's visible, just not blocking.
+                        severity="warning",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task implementation step has no "
+                            "deliverables. Remediation: populate concrete, "
+                            "file- or artifact-anchored deliverables for this "
+                            "step."
+                        ),
+                    ))
+
+                diag = diagnose_step_scope(step.step_id, step.step_type, step.allowed_paths)
+                if diag is not None and diag.code == "write_scope_missing":
+                    defects.append(PlanDefect(
+                        code="empty_scope",
+                        # Warning, not critical -- see empty_deliverables
+                        # above: ambiguous write scope is common and
+                        # legitimate whenever no project_root was supplied
+                        # to ground against, so this stays a surfaced
+                        # diagnostic rather than a blocking gate.
+                        severity="warning",
+                        message=self._with_remediation(
+                            f"task_id={draft.task_id} {diag.message}",
+                            "Remediation: populate step.allowed_paths from "
+                            "repository evidence (deliverables, context "
+                            "files, or confirmed repo topology) — see "
+                            "planning.utils.repo_grounding / "
+                            "planning.scope_contract.derive_allowed_paths.",
+                        ),
+                    ))
 
         return defects
 
