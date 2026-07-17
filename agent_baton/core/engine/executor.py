@@ -149,6 +149,7 @@ def _phase_gate_additions(state: "ExecutionState", phase_id: int) -> list[str]:
 from agent_baton.models.execution import (
     ActionType,
     ApprovalResult,
+    CheckpointHandoff,
     ExecutionAction,
     ExecutionState,
     FeedbackQuestion,
@@ -164,6 +165,7 @@ from agent_baton.models.execution import (
     PlanStep,
     StepResult,
     SynthesisSpec,
+    SynthesisState,
     TeamStepResult,
 )
 from agent_baton.models.events import Event
@@ -274,6 +276,69 @@ def _souls_enabled() -> bool:
     When disabled, BeadStore signing is a no-op and SoulRouter is never constructed.
     """
     return _env_flag("BATON_SOULS_ENABLED", "0")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.2 — CHECKPOINT policy (context-rot mitigation).
+#
+# Deterministic thresholds that decide when the engine emits a CHECKPOINT
+# action instead of silently walking into the next phase.  All three
+# thresholds are independent (any one tripping is sufficient) and are
+# evaluated ONLY at a safe persisted boundary -- immediately after a phase
+# has fully advanced (``PHASE_ADVANCE_OK`` / ``EMPTY_PHASE_ADVANCE``) and
+# before anything in the new phase has been dispatched.  See
+# ``ExecutionEngine._checkpoint_trigger`` / ``_emit_checkpoint``.
+# ---------------------------------------------------------------------------
+
+def _checkpoint_enabled() -> bool:
+    """Return True when CHECKPOINT emission is enabled.
+
+    Default: enabled.  Set ``BATON_CHECKPOINT_ENABLED=0`` to restore the
+    pre-6.2 behavior (CHECKPOINT is a declared ``ActionType`` but never
+    emitted).
+    """
+    return _env_flag("BATON_CHECKPOINT_ENABLED", "1")
+
+
+def _checkpoint_int_env(name: str, default: int) -> int:
+    """Parse a positive-int checkpoint threshold env var, falling back to
+    *default* on any missing/invalid value (never raises)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _checkpoint_phase_interval() -> int:
+    """Number of *completed* phases between checkpoints.
+
+    Override via ``BATON_CHECKPOINT_PHASE_INTERVAL`` (default 3).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_PHASE_INTERVAL", 3)
+
+
+def _checkpoint_turn_threshold() -> int:
+    """Number of recorded turns (``ExecutionState.turn_count``) since the
+    last checkpoint that trips a checkpoint even if the phase-interval
+    threshold has not been reached.  Catches a single very long phase.
+
+    Override via ``BATON_CHECKPOINT_TURN_THRESHOLD`` (default 40).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_TURN_THRESHOLD", 40)
+
+
+def _checkpoint_token_threshold() -> int:
+    """Cumulative ``estimated_tokens`` since the last checkpoint that trips
+    a checkpoint independent of phase count or turn count -- a proxy for
+    accumulated orchestrator context size.
+
+    Override via ``BATON_CHECKPOINT_TOKEN_THRESHOLD`` (default 150,000).
+    """
+    return _checkpoint_int_env("BATON_CHECKPOINT_TOKEN_THRESHOLD", 150_000)
 
 
 # bd-fcntl-win: process-wide flag for the one-time Windows fail-closed warning.
@@ -2114,6 +2179,17 @@ class ExecutionEngine:
         if state.current_phase >= len(state.plan.phases):
             return []
 
+        # Phase 6.2: a due-but-not-yet-emitted checkpoint boundary withholds
+        # the dispatchable batch here (read-only check; no mutation) so the
+        # caller falls back to next_action() (singular), which is the only
+        # place that actually builds + persists the CHECKPOINT action and
+        # advances the dedup markers.  Every existing caller of
+        # next_actions() (TaskWorker, the REST API's _collect_next_actions,
+        # `baton execute next --all`) already falls back to next_action()
+        # when this returns an empty list.
+        if self._checkpoint_trigger(state) is not None:
+            return []
+
         phase_obj = state.current_phase_obj
         if phase_obj is None or not phase_obj.steps:
             return []
@@ -2164,6 +2240,18 @@ class ExecutionEngine:
         actions: list[ExecutionAction] = []
         for step, is_in_flight_team in dispatchable_steps:
             if step.team:
+                if is_in_flight_team:
+                    # Phase 4, 4.3: an in-flight team step that has finished
+                    # collecting member results and is ready for
+                    # agent_synthesis dispatch takes priority over
+                    # re-evaluating _team_dispatch_action (which would just
+                    # return WAIT once every member is occupied).  Exactly-
+                    # once and a no-op for non-agent_synthesis steps — see
+                    # _pending_synthesis_dispatch.
+                    synth_action = self._pending_synthesis_dispatch(step, state)
+                    if synth_action is not None:
+                        actions.append(synth_action)
+                        continue
                 team_action = self._team_dispatch_action(
                     step, state, wave_isolation=wave_isolation,
                 )
@@ -2289,6 +2377,244 @@ class ExecutionEngine:
             f"full file: {spillover_rel} ({len(data)} bytes total)]\n\n"
             f"{head}"
         )
+
+    def _file_diff_scope_decision(
+        self,
+        state: "ExecutionState",
+        *,
+        step_id: str,
+        agent_name: str,
+        violations: list,
+        real_changed_files: list[str],
+    ) -> None:
+        """File a durable, evidence-backed ``ManagerDecision`` for a
+        diff-derived out-of-scope change (Phase 3 "Make scope contracts
+        authoritative", 3.2).
+
+        Always uses ``scope_expansion`` decision semantics regardless of
+        ``ManagerConfig.scoping.scope_expansion_policy`` -- see the caller
+        (``record_step_result``) for why. Persists the evidence (the
+        violated paths + the full independently-computed diff) to a JSON
+        sidecar (``ManagerArtifactPaths.scope_evidence``) keyed by the
+        decision id, via
+        :func:`agent_baton.core.manager.scope_amendment.write_scope_evidence`,
+        so a later :meth:`resolve_scope_expansion` call can locate exactly
+        what step/paths the decision concerns without re-parsing free text.
+        """
+        from agent_baton.core.config.manager import ManagerConfig
+        from agent_baton.core.manager.decisions import (
+            DecisionPacketBuilder,
+            compute_decision_id,
+        )
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.scope_amendment import write_scope_evidence
+        from agent_baton.core.runtime.decisions import DecisionManager
+        from agent_baton.models.manager import ManagerDecision
+        from agent_baton.utils.time import utcnow_zulu
+
+        try:
+            mgr_config = ManagerConfig.load(self._project_root())
+        except Exception:  # noqa: BLE001
+            mgr_config = ManagerConfig()
+
+        mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+        decision_mgr: DecisionManager | None = None
+        try:
+            decision_mgr = DecisionManager(decisions_dir=self._root / "decisions", bus=self._bus)
+        except Exception:  # noqa: BLE001
+            decision_mgr = None
+
+        created_at = utcnow_zulu()
+        paths_str = ", ".join(v.path for v in violations)
+        summary = f"Out-of-contract diff detected for step {step_id}: {paths_str}"
+        decision_id = compute_decision_id(summary, created_at)
+
+        decision = ManagerDecision(
+            decision_type="scope_expansion",
+            decision_id=decision_id,
+            task_id=state.task_id,
+            summary=summary,
+            context=(
+                f"Step {step_id} ({agent_name})'s actual git diff "
+                "(independently computed from the worktree's base_sha to "
+                "its own HEAD -- not self-reported) touched paths outside "
+                "its declared scope contract: "
+                + "; ".join(f"{v.path} ({v.reason})" for v in violations)
+                + f". Full independently-verified changed-file list: {real_changed_files}. "
+                "The step has been marked failed and its worktree retained "
+                "(never folded back) pending this decision."
+            ),
+            options=["approve", "reject"],
+            recommended_option="reject",
+            created_at=created_at,
+        )
+
+        builder = DecisionPacketBuilder(mgr_config, mgr_paths, decision_manager=decision_mgr)
+        builder.create(decision)
+
+        write_scope_evidence(
+            paths=mgr_paths,
+            decision_id=decision.decision_id,
+            step_id=step_id,
+            agent_name=agent_name,
+            violations=violations,
+            real_changed_files=real_changed_files,
+            created_at=created_at,
+        )
+
+    def resolve_scope_expansion(
+        self,
+        decision_id: str,
+        resolution: str,
+        *,
+        additional_paths: list[str] | None = None,
+    ) -> dict:
+        """Resolve a durable, evidence-backed scope-expansion decision
+        (Phase 3 "Make scope contracts authoritative", 3.2).
+
+        ``resolution="approve"``: atomically widens the failed step's
+        scope-contract sidecars via
+        :func:`agent_baton.core.manager.scope_amendment.apply_scope_amendment`
+        -- and only once that succeeds -- mutates the in-memory
+        ``PlanStep.allowed_paths``, drops the step's failed ``StepResult``
+        (so it is eligible for re-dispatch on the next ``next_actions()``
+        pass) and its stale worktree registry entry (the retained worktree
+        directory itself is left on disk for forensic recovery / eventual
+        ``gc_stale`` reclamation -- only the live pointer that would make
+        the next dispatch reuse it is cleared), and persists via
+        ``_save_execution``.
+
+        ``resolution="reject"``: marks the decision resolved and mutates
+        nothing else -- the failed ``StepResult`` and retained worktree
+        are left exactly as the violation left them, fully recoverable.
+
+        Returns a small status dict (rather than raising) for expected
+        "not found" / "already resolved" conditions, since the intended
+        callers (CLI/API decision-resolution surfaces) are outside this
+        step's allowed scope and must be able to surface a clean error.
+        """
+        if resolution not in ("approve", "reject"):
+            return {
+                "applied": False,
+                "error": f"invalid resolution {resolution!r}; must be 'approve' or 'reject'",
+            }
+
+        state = self._require_execution("resolve_scope_expansion")
+
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.scope_amendment import (
+            apply_scope_amendment,
+            deny_scope_amendment,
+            load_decision,
+            load_scope_evidence,
+        )
+
+        mgr_paths = ManagerArtifactPaths(self._root, state.task_id)
+        decision = load_decision(mgr_paths, decision_id)
+        if decision is None:
+            return {"applied": False, "error": f"no decision found for decision_id={decision_id!r}"}
+        if decision.resolved_at:
+            return {
+                "applied": False,
+                "error": (
+                    f"decision {decision_id!r} is already resolved "
+                    f"(resolved_at={decision.resolved_at!r})"
+                ),
+            }
+
+        evidence = load_scope_evidence(mgr_paths, decision_id)
+        step_id = (evidence or {}).get("step_id", "")
+        violated_paths = [v.get("path", "") for v in (evidence or {}).get("violations", [])]
+
+        if resolution == "reject":
+            deny_scope_amendment(paths=mgr_paths, decision=decision)
+            return {
+                "applied": True,
+                "resolution": "reject",
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        # resolution == "approve"
+        plan_step = self._find_step(state, step_id) if step_id else None
+        if plan_step is None:
+            return {
+                "applied": False,
+                "error": (
+                    f"step {step_id!r} referenced by decision {decision_id!r} "
+                    "not found in the current plan"
+                ),
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        widen = list(additional_paths) if additional_paths else violated_paths
+        amendment = apply_scope_amendment(
+            step_id=step_id,
+            current_allowed_paths=list(plan_step.allowed_paths),
+            additional_paths=widen,
+            paths=mgr_paths,
+            decision=decision,
+        )
+        if not amendment.applied:
+            return {
+                "applied": False,
+                "error": amendment.error,
+                "step_id": step_id,
+                "decision_id": decision_id,
+            }
+
+        # Only now -- after the sidecars/decision durably reflect the
+        # approval -- mutate the authoritative plan and persist.
+        plan_step.allowed_paths = list(amendment.new_allowed_paths)
+        existing_idx = next(
+            (i for i, r in enumerate(state.step_results) if r.step_id == step_id),
+            None,
+        )
+        if existing_idx is not None and state.step_results[existing_idx].status == "failed":
+            state.step_results.pop(existing_idx)
+        # Clear the retained worktree's live registry pointer so re-dispatch
+        # creates a fresh one; the old directory is left on disk (never
+        # deleted here) for forensic recovery.
+        step_worktrees = dict(getattr(state, "step_worktrees", {}))
+        if step_worktrees.pop(step_id, None) is not None:
+            state.step_worktrees = step_worktrees
+        state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
+
+        # Best-effort full-consistency pass (Phase 6, 6.3): the widened
+        # step's own scope-contract sidecar is ALREADY durably correct
+        # (apply_scope_amendment above patched it under the same
+        # atomicity guarantee this rebuild uses), so a failure here never
+        # blocks or rolls back the approval that already happened and was
+        # appended to the immutable decision log -- it only means the
+        # REST of the artifact set (scope map / blueprint / knowledge plan
+        # / every other step's bundle) may lag one revision behind until
+        # the next amendment. Logged as a bead so it's never silent.
+        if state.plan is not None and state.plan.manager_mode:
+            publish = self._publish_manager_artifacts(
+                state.plan, trigger="scope_expansion_resolved"
+            )
+            if not publish.ok:
+                logger.warning(
+                    "resolve_scope_expansion: full manager-artifact "
+                    "rebuild failed after approving decision %r (step "
+                    "%r's own contract sidecar is already durably "
+                    "widened; other artifacts may be stale): %s",
+                    decision_id, step_id, "; ".join(publish.errors),
+                )
+                self._file_manager_rebuild_failure_bead(
+                    state, "scope_expansion_resolved", publish.errors
+                )
+
+        self._save_execution(state)
+
+        return {
+            "applied": True,
+            "resolution": "approve",
+            "step_id": step_id,
+            "decision_id": decision_id,
+            "new_allowed_paths": amendment.new_allowed_paths,
+        }
 
     def record_step_result(
         self,
@@ -2483,6 +2809,35 @@ class ExecutionEngine:
             (i for i, r in enumerate(state.step_results) if r.step_id == step_id),
             None,
         )
+        existing_result = (
+            state.step_results[existing_idx] if existing_idx is not None else None
+        )
+
+        # ── Team-synthesis carry-forward (agent_synthesis dispatch) ────────
+        # A team step's ``agent_synthesis`` merge strategy dispatches the
+        # synthesis agent AGAINST THE SAME step_id as the parent team step
+        # (see _pending_synthesis_dispatch) so its own dispatch/record round
+        # trip flows through this exact method -- the same scope/commit/
+        # evidence verification pipeline ordinary steps already go through
+        # -- rather than a synthetic id that would need its own scope-
+        # resolution special-casing.  Without this carry-forward, the
+        # unconditional replace above would silently discard the team's
+        # member_results and in-flight synthesis_state the moment the
+        # synthesis agent is marked dispatched.  Guarded on the existing
+        # row actually carrying team/synthesis data so ordinary (non-team)
+        # steps -- ``record_step_result``'s overwhelming common case --
+        # take zero extra branches.
+        if existing_result is not None and (
+            existing_result.member_results or existing_result.synthesis_state
+        ):
+            result.member_results = existing_result.member_results
+            result.synthesis_state = existing_result.synthesis_state
+            result.synthesis_dispatched = existing_result.synthesis_dispatched
+            if existing_result.deviations:
+                result.deviations = list(existing_result.deviations) + list(
+                    result.deviations
+                )
+
         if existing_idx is not None:
             state.step_results[existing_idx] = result
         else:
@@ -2858,6 +3213,108 @@ class ExecutionEngine:
                             "(non-fatal): %s", _route_exc,
                         )
 
+        # ── Independent diff-derived scope-expansion evidence (Phase 3
+        # "Make scope contracts authoritative", 3.2) ──────────────────────
+        # The manager-mode block above only reacts to what the agent SAID
+        # ("SCOPE_EXPANSION: <path> — <reason>"). This block never trusts
+        # that -- and never trusts the files_changed/commit_hash arguments
+        # this call received either. It independently recomputes the real
+        # changed-file list from the worktree's own git history (base_sha
+        # -> its own current HEAD; see
+        # manager_scope_signal.independent_worktree_diff) and compares it
+        # to the step's scope contract. An out-of-contract diff can never
+        # be silently accepted regardless of manager_config.scoping.
+        # scope_expansion_policy (that policy governs how much trust to
+        # extend to an agent's own forward-looking marker; it has no
+        # bearing on independently-verified evidence that a step ALREADY
+        # wrote outside its contract): it always forces the step to
+        # "failed" -- so the Wave 1.3 fold-back block below (which only
+        # folds when status == "complete") retains the worktree instead of
+        # folding it -- and always files a durable, evidence-backed
+        # ManagerDecision via _file_diff_scope_decision().
+        if (
+            status == "complete"
+            and state.plan is not None
+            and state.plan.manager_mode
+            and _plan_step is not None
+            and (_plan_step.allowed_paths or _plan_step.blocked_paths)
+            and self._worktree_mgr is not None
+        ):
+            _diff_wt_dict = getattr(state, "step_worktrees", {}).get(step_id)
+            if _diff_wt_dict is not None:
+                _real_changed: list[str] | None = None
+                _diff_error = ""
+                try:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        independent_worktree_diff,
+                    )
+                    _real_changed = independent_worktree_diff(_diff_wt_dict)
+                except Exception as _diff_exc:  # noqa: BLE001
+                    _diff_error = str(_diff_exc)
+                    _log.warning(
+                        "Independent diff verification failed for step %s "
+                        "(fail-closed -- treating as a violation): %s",
+                        step_id, _diff_error,
+                    )
+
+                if _real_changed is None:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        ScopeExpansionSignal as _SES,
+                    )
+                    _diff_violations = [_SES(
+                        path="<diff-unavailable>",
+                        reason=(
+                            "[diff-verified] independent git diff "
+                            f"verification failed: {_diff_error}"
+                        ),
+                        step_id=step_id,
+                    )]
+                else:
+                    from agent_baton.core.engine.manager_scope_signal import (
+                        derive_scope_expansion_from_diff,
+                    )
+                    _diff_violations = derive_scope_expansion_from_diff(
+                        changed_files=_real_changed,
+                        allowed_paths=_plan_step.allowed_paths,
+                        blocked_paths=_plan_step.blocked_paths,
+                        step_id=step_id,
+                    )
+
+                if _diff_violations:
+                    _diff_msg = (
+                        f"OUT_OF_SCOPE_DIFF: step {step_id} ({agent_name})'s "
+                        "actual git diff (independently verified from "
+                        "worktree base_sha -> HEAD, not agent-reported) "
+                        "touched paths outside its scope contract: "
+                        + "; ".join(f"{v.path} ({v.reason})" for v in _diff_violations)
+                    )
+                    _log.warning("%s", _diff_msg)
+                    result.deviations.append(_diff_msg)
+                    result.status = "failed"
+                    status = "failed"
+                    result.error = _diff_msg
+
+                    try:
+                        self._file_diff_scope_decision(
+                            state,
+                            step_id=step_id,
+                            agent_name=agent_name,
+                            violations=_diff_violations,
+                            real_changed_files=_real_changed or [],
+                        )
+                    except Exception as _dec_exc:  # noqa: BLE001
+                        _log.debug(
+                            "Durable diff-derived scope-expansion decision "
+                            "filing failed (non-fatal): %s", _dec_exc,
+                        )
+
+                    if self._worktree_mgr._bead_store:
+                        self._worktree_mgr._file_bead_warning(
+                            task_id=state.task_id,
+                            step_id=step_id,
+                            content=f"BEAD_WARNING: {_diff_msg}",
+                        )
+
         # Determine phase + step index for trace context.
         phase_idx, step_idx = self._locate_step(state, step_id)
         if phase_idx == -1:
@@ -2979,6 +3436,7 @@ class ExecutionEngine:
                         WorktreeCleanupError,
                         WorktreeFoldError,
                         WorktreeHandle,
+                        WorktreeProvenanceError,
                     )
                     _handle = WorktreeHandle.from_dict(_handle_dict)
                     # Wire active trace for event emission
@@ -2994,6 +3452,32 @@ class ExecutionEngine:
                                 # consumers can reference the exact integrated
                                 # commit without re-running git.
                                 state.working_branch_head = new_head
+                            except WorktreeProvenanceError as prov_exc:
+                                # Fail closed: the reported commit could not be
+                                # verified as new work that actually exists in
+                                # this worktree (missing, or points at a commit
+                                # that predates the worktree — i.e. the parent
+                                # repository). Never fold or delete in this
+                                # state; the worktree stays in step_worktrees
+                                # for forensic recovery.
+                                _log.warning(
+                                    "Commit provenance check failed for step %s: %s",
+                                    step_id, prov_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-provenance-missing "
+                                            f"step={step_id} reason={prov_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = f"WorktreeProvenanceError: {prov_exc}"
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(prov_exc)
+                                )
                             except WorktreeFoldError as fold_exc:
                                 _log.warning(
                                     "Fold-back conflict for step %s: %s",
@@ -3012,6 +3496,39 @@ class ExecutionEngine:
                                 result.status = "failed"
                                 result.error = f"WorktreeFoldError: {fold_exc}"
                                 self._emit_worktree_error(state, step_id, "fold", str(fold_exc))
+                            except Exception as unexpected_fold_exc:  # noqa: BLE001
+                                # Any OTHER exception from fold_back (e.g. the
+                                # git binary vanishing mid-operation, a
+                                # permissions error) must fail closed exactly
+                                # like a modeled WorktreeFoldError.  Without
+                                # this branch the exception would escape to
+                                # the outer handler below, which only logs a
+                                # warning and leaves `result.status` at
+                                # whatever the caller passed in (typically
+                                # "complete") -- silently claiming the step
+                                # succeeded when whether the commit actually
+                                # landed in the parent branch is unknown.
+                                _log.warning(
+                                    "Unexpected error during fold-back for "
+                                    "step %s: %s",
+                                    step_id, unexpected_fold_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-fold-unexpected-error "
+                                            f"step={step_id} reason={unexpected_fold_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = (
+                                    f"WorktreeFoldUnexpectedError: {unexpected_fold_exc}"
+                                )
+                                self._emit_worktree_error(
+                                    state, step_id, "fold", str(unexpected_fold_exc)
+                                )
                             else:
                                 # Success path: clean up the worktree.
                                 # bd-f2f7: retry with force=True if untracked
@@ -3035,22 +3552,82 @@ class ExecutionEngine:
                                 _step_worktrees.pop(step_id, None)
                                 state.step_worktrees = _step_worktrees
                         else:
-                            # No commit: clean up without fold.
-                            # bd-f2f7: retry with force=True on untracked-file
-                            # interference so the success path always reclaims
-                            # the worktree directory.
+                            # No commit reported: before permanently deleting
+                            # the worktree, independently re-verify (from the
+                            # worktree's own ground-truth git state — never
+                            # just trusting the "no commit" signal) that
+                            # nothing would be silently lost. This is the
+                            # fail-closed net for the case where the
+                            # commit_hash the launcher reported is wrong
+                            # (e.g. captured from the wrong directory).
                             try:
-                                self._worktree_mgr.cleanup(_handle, on_failure=False)
-                            except WorktreeCleanupError:
-                                try:
-                                    self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
-                                except WorktreeCleanupError as _force_exc:
-                                    _log.debug(
-                                        "Worktree force-cleanup failed for step %s (non-fatal): %s",
-                                        step_id, _force_exc,
+                                self._worktree_mgr._verify_safe_to_discard(_handle)
+                            except WorktreeProvenanceError as prov_exc:
+                                _log.warning(
+                                    "Refusing to discard worktree for step %s: %s",
+                                    step_id, prov_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-provenance-missing "
+                                            f"step={step_id} reason={prov_exc}"
+                                        ),
                                     )
-                            _step_worktrees.pop(step_id, None)
-                            state.step_worktrees = _step_worktrees
+                                result.status = "failed"
+                                result.error = f"WorktreeProvenanceError: {prov_exc}"
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(prov_exc)
+                                )
+                            except Exception as unexpected_discard_exc:  # noqa: BLE001
+                                # Any OTHER exception from the safety check
+                                # (e.g. git binary missing mid-run) must fail
+                                # closed exactly like WorktreeProvenanceError
+                                # -- never fall through to the outer handler,
+                                # which would leave `result.status` at
+                                # whatever the caller passed in without the
+                                # ground-truth safety check having actually
+                                # completed.
+                                _log.warning(
+                                    "Unexpected error verifying safe-to-discard "
+                                    "for step %s: %s",
+                                    step_id, unexpected_discard_exc,
+                                )
+                                if self._worktree_mgr._bead_store:
+                                    self._worktree_mgr._file_bead_warning(
+                                        task_id=state.task_id,
+                                        step_id=step_id,
+                                        content=(
+                                            f"BEAD_WARNING: worktree-discard-check-unexpected-error "
+                                            f"step={step_id} reason={unexpected_discard_exc}"
+                                        ),
+                                    )
+                                result.status = "failed"
+                                result.error = (
+                                    f"WorktreeDiscardCheckError: {unexpected_discard_exc}"
+                                )
+                                self._emit_worktree_error(
+                                    state, step_id, "provenance", str(unexpected_discard_exc)
+                                )
+                            else:
+                                # Clean up without fold.
+                                # bd-f2f7: retry with force=True on untracked-file
+                                # interference so the success path always reclaims
+                                # the worktree directory.
+                                try:
+                                    self._worktree_mgr.cleanup(_handle, on_failure=False)
+                                except WorktreeCleanupError:
+                                    try:
+                                        self._worktree_mgr.cleanup(_handle, on_failure=False, force=True)
+                                    except WorktreeCleanupError as _force_exc:
+                                        _log.debug(
+                                            "Worktree force-cleanup failed for step %s (non-fatal): %s",
+                                            step_id, _force_exc,
+                                        )
+                                _step_worktrees.pop(step_id, None)
+                                state.step_worktrees = _step_worktrees
                     elif status == "failed":
                         # Retain worktree for forensics / Wave 5.1 takeover
                         self._worktree_mgr.cleanup(_handle, on_failure=True)
@@ -3060,6 +3637,27 @@ class ExecutionEngine:
                         "Worktree lifecycle op failed for step %s (non-fatal): %s",
                         step_id, _wt_exc,
                     )
+
+        # ── Team-synthesis completion (agent_synthesis dispatch) ───────────
+        # When this StepResult carried forward member_results above AND its
+        # synthesis_state is still SYNTHESIZING (i.e. the synthesis agent's
+        # own dispatch is what just reported a terminal outcome, not a
+        # "dispatched" re-affirmation from mark_dispatched), derive the
+        # final SynthesisState from whatever the scope/commit/evidence
+        # verification above landed on -- it may have already flipped
+        # result.status to "failed" on an out-of-scope diff, which the
+        # VERIFYING -> SYNTHESIZED|FAILED edge must honour rather than
+        # trusting the agent's self-reported status.
+        if (
+            result.member_results
+            and result.synthesis_state == SynthesisState.SYNTHESIZING.value
+            and result.status in ("complete", "failed")
+        ):
+            result.synthesis_state = (
+                SynthesisState.SYNTHESIZED.value
+                if result.status == "complete"
+                else SynthesisState.FAILED.value
+            )
 
         self._save_execution(state)
 
@@ -3178,6 +3776,34 @@ class ExecutionEngine:
             except Exception:
                 # Observability must never crash the executor.
                 _log.debug("OTel step.dispatch span emission failed", exc_info=True)
+
+        # ── Phase 6, 6.3 — knowledge telemetry ↔ dispatch outcome ─────────────
+        # Every KnowledgeUsed row KnowledgeResolver.resolve() recorded for
+        # this (task_id, step_id) — at plan time via the resolver's
+        # planning-stage call, or via the knowledge-gap auto-resolve path
+        # below — carries outcome_correlation=NULL until now. This is the
+        # "connect knowledge resolution telemetry ... to actual dispatch
+        # outcomes" half of the deliverable (agent_baton.core.knowledge.
+        # ab_testing's docstring flags the sibling A/B-assignment hookup as
+        # a still-open follow-up — this only wires the resolver's own
+        # KnowledgeTelemetryStore, reused from the engine's optional
+        # KnowledgeResolver rather than opening a second connection).
+        # Best-effort: a telemetry failure must never affect the recorded
+        # step result, which has already been persisted above.
+        if status in ("complete", "failed"):
+            _telemetry = getattr(
+                getattr(self, "_knowledge_resolver", None), "_telemetry", None
+            )
+            if _telemetry is not None:
+                try:
+                    _telemetry.record_dispatch_outcome(
+                        task_id=state.task_id, step_id=step_id, status=status,
+                    )
+                except Exception as _tel_exc:  # noqa: BLE001 — never break dispatch
+                    _log.debug(
+                        "record_dispatch_outcome(%s, %s) failed (non-fatal): %s",
+                        state.task_id, step_id, _tel_exc,
+                    )
 
     def mark_dispatched(self, step_id: str, agent_name: str) -> None:
         """Record that a step has been dispatched (in-flight, not yet complete).
@@ -3550,6 +4176,17 @@ class ExecutionEngine:
         # Inline the amendment so we mutate the same state object the
         # caller holds — calling self.amend_plan() would reload state
         # from disk, causing the caller's reference to go stale.
+        #
+        # manager_mode plans additionally need a transactional
+        # rebuild-and-publish of every sidecar (Phase 6, 6.3) so the
+        # round-out phases get scope contracts / context bundles / a
+        # knowledge plan just like every other phase. Snapshot state.plan
+        # BEFORE mutating it so a failed publish can restore it exactly —
+        # this mirrors ExecutionEngine.amend_plan's rollback, but inline
+        # (the docstring above explains why this can't just call
+        # amend_plan()).
+        manager_mode = bool(state.plan is not None and state.plan.manager_mode)
+        plan_snapshot = state.plan.model_copy(deep=True) if manager_mode else None
         try:
             amendment = PlanAmendment(
                 amendment_id=f"amend-{len(state.amendments) + 1}",
@@ -3572,6 +4209,25 @@ class ExecutionEngine:
             for i, phase in enumerate(new_phases):
                 state.plan.phases.insert(insert_idx + i, phase)
                 amendment.phases_added.append(phase.phase_id)
+
+            if manager_mode:
+                publish = self._publish_manager_artifacts(
+                    state.plan, trigger="goal_round_out"
+                )
+                if not publish.ok:
+                    state.plan = plan_snapshot
+                    logger.warning(
+                        "Goal round-out manager-artifact rebuild failed "
+                        "(%s); round-out phases discarded, plan left "
+                        "unchanged, marking goal_status='active'.",
+                        "; ".join(publish.errors),
+                    )
+                    self._file_manager_rebuild_failure_bead(
+                        state, "goal_round_out", publish.errors
+                    )
+                    state.goal_status = "active"
+                    return
+
             state.amendments.append(amendment)
             if self._trace is not None:
                 self._tracer.record_event(
@@ -3596,6 +4252,8 @@ class ExecutionEngine:
                 len(new_phases), passed_phase_id,
             )
         except Exception as exc:  # noqa: BLE001
+            if manager_mode and plan_snapshot is not None:
+                state.plan = plan_snapshot
             logger.warning(
                 "Goal round-out amendment failed (%s); marking "
                 "goal_status='active' and continuing.",
@@ -4031,10 +4689,14 @@ class ExecutionEngine:
         4. If HEAD == last_known_head and no diff: refuse resume (no commit made).
         5. If HEAD differs: optionally append Co-Authored-By trailer.
         6. If *rerun_gate*: re-run the gate command; if fail → stay paused-takeover.
-        7. Record gate result, mark resolution, proceed.
+        7. Fold the worktree's commits back into the parent branch; only if
+           that succeeds, record gate result and mark resolution.
 
-        Returns True when execution can proceed (gate passed or rerun skipped).
-        Returns False when still failing or aborted.
+        Returns True when execution can proceed (gate passed and — if a
+        worktree was involved — its commits were folded into the parent
+        branch). Returns False when still failing, aborted, or when the
+        fold-back itself failed (the takeover record stays active and the
+        worktree is retained on disk for a retry).
         """
         from agent_baton.core.engine.takeover import TakeoverRecord, TakeoverSession
 
@@ -4169,48 +4831,96 @@ class ExecutionEngine:
                         "Fix the remaining issues and run 'baton execute resume' again."
                     )
 
-        # Update takeover record only when the gate has actually passed.
-        # If the gate is still failing the takeover stays "active" (the
-        # record keeps resumed_at empty) — this preserves I9: status
-        # remains "paused-takeover" iff at least one record is active.
+        # Update takeover record only when the gate has actually passed AND
+        # the developer's worktree commits actually fold back into the
+        # parent branch. Marking the record "resolved" (and cleaning up the
+        # worktree) before a fold that then fails would leave the operator
+        # believing the takeover succeeded while the isolated commits never
+        # reached the parent branch — and a "resolved" record with no
+        # retained worktree reference is exactly what later lifecycle code
+        # (straggler sweep, gc_stale) treats as safe to reclaim, which would
+        # permanently discard the developer's work. So: fold BEFORE marking
+        # resolved, and only mark resolved (and only clean up the worktree)
+        # once the fold has genuinely succeeded.
         records_raw = list(getattr(state, "takeover_records", []))
         if gate_passed:
-            for i, r in enumerate(records_raw):
-                if r.get("step_id") == step_id and not r.get("resumed_at"):
-                    r["resumed_at"] = _utcnow()
-                    r["resolution"] = "completed"
-                    records_raw[i] = r
-                    break
-            state.takeover_records = records_raw
-
-            # Fold back developer commits into parent branch.
+            fold_ok = True
             if self._worktree_mgr is not None and str(handle.path) != "/dev/null":
+                from agent_baton.core.engine.worktree_manager import (
+                    WorktreeCleanupError,
+                )
                 try:
                     self._worktree_mgr._trace = self._trace
                     self._worktree_mgr.fold_back(handle, commit_hash=new_head)
-                    self._worktree_mgr.cleanup(handle, on_failure=False)
-                except Exception as fold_exc:
+                except Exception as fold_exc:  # noqa: BLE001 — any fold failure fails closed
+                    fold_ok = False
                     _log.warning(
-                        "resume_from_takeover: fold-back failed for step=%s: %s",
+                        "resume_from_takeover: fold-back failed for step=%s: %s "
+                        "— takeover record NOT marked resolved; worktree "
+                        "retained on disk for retry.",
                         step_id, fold_exc,
                     )
+                    print(
+                        f"Fold-back failed for step {step_id}: {fold_exc}\n"
+                        f"The developer's commits in {handle.path} have NOT "
+                        "been folded into the parent branch, and the worktree "
+                        "has NOT been removed. Resolve the issue and run "
+                        "'baton execute resume' again, or abort with "
+                        "'baton execute resume --abort'."
+                    )
+                else:
+                    # Fold succeeded — the parent branch already has the
+                    # commit(s); safe to reclaim the worktree now.
+                    try:
+                        self._worktree_mgr.cleanup(handle, on_failure=False)
+                    except WorktreeCleanupError:
+                        try:
+                            self._worktree_mgr.cleanup(handle, on_failure=False, force=True)
+                        except WorktreeCleanupError as clean_exc:
+                            _log.warning(
+                                "resume_from_takeover: post-fold cleanup failed "
+                                "for step=%s (non-fatal, worktree retained on "
+                                "disk): %s",
+                                step_id, clean_exc,
+                            )
+                    # Drop the now-stale handle so later lifecycle code (e.g.
+                    # the task-completion straggler sweep) never mistakes an
+                    # already-folded-and-removed worktree for one still in
+                    # need of fold-back/cleanup.
+                    _step_worktrees = dict(getattr(state, "step_worktrees", {}))
+                    _step_worktrees.pop(step_id, None)
+                    state.step_worktrees = _step_worktrees
 
-            # Emit trace event.
-            if self._trace is not None:
-                self._tracer.record_event(
-                    self._trace,
-                    "takeover_resumed",
-                    agent_name=None,
-                    phase=state.current_phase,
-                    step=0,
-                    details={
-                        "task_id": state.task_id,
-                        "step_id": step_id,
-                        "resolution": "completed",
-                        "dev_commits": dev_commits,
-                        "gate_passed": True,
-                    },
-                )
+            if fold_ok:
+                for i, r in enumerate(records_raw):
+                    if r.get("step_id") == step_id and not r.get("resumed_at"):
+                        r["resumed_at"] = _utcnow()
+                        r["resolution"] = "completed"
+                        records_raw[i] = r
+                        break
+                state.takeover_records = records_raw
+
+                # Emit trace event.
+                if self._trace is not None:
+                    self._tracer.record_event(
+                        self._trace,
+                        "takeover_resumed",
+                        agent_name=None,
+                        phase=state.current_phase,
+                        step=0,
+                        details={
+                            "task_id": state.task_id,
+                            "step_id": step_id,
+                            "resolution": "completed",
+                            "dev_commits": dev_commits,
+                            "gate_passed": True,
+                        },
+                    )
+            else:
+                # Fold failed: the takeover is NOT resolved regardless of
+                # gate outcome — report failure to the caller so it does not
+                # treat this resume as having landed the work.
+                gate_passed = False
         else:
             # Status already paused-takeover from start_takeover; the
             # active record is preserved.  No transition needed — simply
@@ -5045,6 +5755,74 @@ class ExecutionEngine:
 
         self._save_execution(state)
 
+    def _publish_manager_artifacts(
+        self, plan: "MachinePlan", *, trigger: str
+    ) -> "ManagerArtifactRebuildResult":
+        """Rebuild + atomically publish every manager-mode sidecar for
+        *plan* (Phase 6, 6.3). Thin executor-side wiring around
+        ``agent_baton.core.manager.rebuild.rebuild_and_publish`` -- resolves
+        ``ManagerConfig``/``ManagerArtifactPaths`` the same way every other
+        manager-mode hook in this module already does (see
+        ``resolve_scope_expansion``, the phase-completion hook).
+
+        Callers MUST NOT adopt any plan mutation into ``state.plan`` (or
+        persist ``ExecutionState``) unless ``result.ok`` is ``True`` -- see
+        :meth:`amend_plan` for the reference caller.
+        """
+        from agent_baton.core.config.manager import ManagerConfig
+        from agent_baton.core.manager.rebuild import rebuild_and_publish
+
+        try:
+            mgr_config = ManagerConfig.load(self._project_root())
+        except Exception:  # noqa: BLE001 — never let config load block an amendment
+            mgr_config = ManagerConfig()
+
+        return rebuild_and_publish(
+            plan,
+            plan.task_summary,
+            config=mgr_config,
+            project_root=self._project_root(),
+            team_context_dir=self._root,
+            trigger=trigger,
+        )
+
+    def _file_manager_rebuild_failure_bead(
+        self, state: "ExecutionState", trigger: str, errors: list[str]
+    ) -> None:
+        """Autonomous incident handling (root CLAUDE.md): a failed
+        transactional manager-artifact rebuild is a real defect (a plan
+        mutation that could not be published), never silently discarded.
+        Best-effort — a bead-store failure must never mask the original
+        rebuild failure the caller is already handling.
+        """
+        if self._bead_store is None:
+            return
+        try:
+            from agent_baton.models.bead import Bead as _BeadCls
+            from agent_baton.models.bead import _generate_bead_id as _gen_id
+            from agent_baton.utils.time import utcnow_zulu as _utc
+
+            _ts = _utc()
+            _summary = "; ".join(errors)[:2000]
+            _bc = len(self._bead_store.query(task_id=state.task_id, limit=10000))
+            self._bead_store.write(_BeadCls(
+                bead_id=_gen_id(state.task_id, "manager-rebuild", _summary, _ts, _bc),
+                task_id=state.task_id,
+                step_id="manager-artifacts",
+                agent_name="engine",
+                bead_type="warning",
+                content=(
+                    f"Manager-artifact rebuild failed for trigger={trigger!r}; "
+                    f"amendment discarded, plan left unchanged: {_summary}"
+                ),
+                scope="task",
+                tags=["manager-artifacts", "rebuild-failed", trigger],
+                created_at=_ts,
+                source="engine",
+            ))
+        except Exception as exc:  # noqa: BLE001 — telemetry must never mask the real failure
+            _log.debug("_file_manager_rebuild_failure_bead failed (non-fatal): %s", exc)
+
     def amend_plan(
         self,
         description: str,
@@ -5061,6 +5839,25 @@ class ExecutionEngine:
         The plan inside ``ExecutionState`` is mutated in place.  An audit
         record (:class:`PlanAmendment`) is appended to ``state.amendments``.
 
+        For a ``manager_mode`` plan, a real phase/step mutation (adding
+        phases, or adding steps to an existing phase) also triggers a
+        transactional rebuild-and-publish of every manager-mode sidecar
+        (Phase 6, 6.3 -- see
+        ``agent_baton.core.manager.rebuild.rebuild_and_publish``) so the
+        charter, scope map, blueprint, role cards, knowledge plan, scope
+        contracts, and context bundles never go stale relative to the
+        amended plan. Before mutating, ``state.plan`` (and ``gate_results``
+        / ``approval_results`` / ``feedback_results``, which
+        ``_renumber_phases`` may also touch) is deep-copy snapshotted; the
+        mutation then proceeds against ``state.plan`` directly (as always)
+        so ``_renumber_phases`` and every other pre-existing code path
+        needs no changes. Only once the rebuild reports ``ok=True`` does
+        this amendment get recorded/persisted. On failure, every snapshotted
+        field is restored verbatim and
+        :class:`~agent_baton.core.manager.rebuild.ManagerArtifactPublishError`
+        is raised — the caller sees no partial amendment and no partial
+        sidecar publish.
+
         Args:
             description: Human-readable explanation of the amendment.
             new_phases: New :class:`PlanPhase` objects to insert.
@@ -5074,6 +5871,11 @@ class ExecutionEngine:
 
         Returns:
             The :class:`PlanAmendment` record.
+
+        Raises:
+            ManagerArtifactPublishError: A ``manager_mode`` plan's mutation
+                could not be published as an internally-consistent sidecar
+                set. Nothing was mutated or persisted.
         """
         state = self._require_execution("amend_plan")
 
@@ -5085,7 +5887,41 @@ class ExecutionEngine:
             feedback=feedback,
         )
 
+        plan_mutated = bool(new_phases) or bool(new_steps and add_steps_to_phase is not None)
+        manager_mode = bool(state.plan is not None and state.plan.manager_mode)
+        transactional = manager_mode and plan_mutated
+
+        plan_snapshot = None
+        gate_results_snapshot = None
+        approval_results_snapshot = None
+        feedback_results_snapshot = None
+        if transactional:
+            plan_snapshot = state.plan.model_copy(deep=True)
+            gate_results_snapshot = [r.model_copy(deep=True) for r in state.gate_results]
+            approval_results_snapshot = [r.model_copy(deep=True) for r in state.approval_results]
+            feedback_results_snapshot = [r.model_copy(deep=True) for r in state.feedback_results]
+
         if new_phases:
+            # Phase 6, 6.1 — stale-reference repair for runtime amendments.
+            # ``_renumber_phases`` below rewrites phase_ids/step_ids for
+            # every phase after the insertion point, but (pre-6.1) left the
+            # plan's own internal references untouched: a later step's
+            # ``depends_on`` kept naming the OLD step_id (which after
+            # renumbering belongs to a *different* step — often the freshly
+            # inserted one), and the "Build on the ... output from phase N
+            # (<agents>)" sentence phase_builder bakes into
+            # ``task_description`` kept naming the old phase number. Same
+            # bug class ``planning.utils.phase_normalize`` fixed for
+            # foresight insertions at plan time; use the same snapshot/
+            # normalize bracket here (the module docstring explicitly
+            # prescribes this pattern for amendment call sites).
+            from agent_baton.core.engine.planning.utils.phase_normalize import (
+                normalize_phase_references,
+                snapshot_phase_state,
+            )
+
+            pre_phase_ids, pre_step_ids = snapshot_phase_state(state.plan.phases)
+
             # Determine insertion index.
             if insert_after_phase is not None:
                 insert_idx = next(
@@ -5102,6 +5938,11 @@ class ExecutionEngine:
                 amendment.phases_added.append(phase.phase_id)
 
             self._renumber_phases(state)
+            normalize_phase_references(
+                state.plan.phases,
+                pre_phase_ids=pre_phase_ids,
+                pre_step_ids=pre_step_ids,
+            )
 
         if new_steps and add_steps_to_phase is not None:
             target = next(
@@ -5112,6 +5953,30 @@ class ExecutionEngine:
                 for step in new_steps:
                     target.steps.append(step)
                     amendment.steps_added.append(step.step_id)
+
+        if transactional:
+            publish = self._publish_manager_artifacts(state.plan, trigger=trigger)
+            if not publish.ok:
+                # Roll back every field this method (and _renumber_phases)
+                # may have mutated -- state must look exactly as it did
+                # before this call, per the "failed rebuild leaves the
+                # prior plan and sidecars intact" contract.
+                state.plan = plan_snapshot
+                state.gate_results = gate_results_snapshot
+                state.approval_results = approval_results_snapshot
+                state.feedback_results = feedback_results_snapshot
+                logger.warning(
+                    "amend_plan: manager-artifact rebuild failed for "
+                    "trigger=%r; amendment discarded, plan left unchanged: %s",
+                    trigger, "; ".join(publish.errors),
+                )
+                self._file_manager_rebuild_failure_bead(state, trigger, publish.errors)
+                from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+                raise ManagerArtifactPublishError(
+                    f"amend_plan: manager-artifact rebuild failed for "
+                    f"trigger={trigger!r}: {'; '.join(publish.errors)}"
+                )
 
         state.amendments.append(amendment)
 
@@ -5148,6 +6013,7 @@ class ExecutionEngine:
             check_expansion_guardrails,
             generate_expansion_phase,
         )
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
 
         _amended_step_count = sum(len(a.steps_added) for a in state.amendments)
         original_step_count = max(
@@ -5194,17 +6060,52 @@ class ExecutionEngine:
                 trigger_phase_id=trigger_phase,
             )
 
-            self.amend_plan(
-                description=f"Scope expansion: {desc[:200]}",
-                new_phases=[new_phase],
-                insert_after_phase=(
-                    state.current_phase_obj.phase_id
-                    if state.current_phase_obj
-                    else None
-                ),
-                trigger="scope_expansion",
-                trigger_phase_id=trigger_phase,
-            )
+            try:
+                self.amend_plan(
+                    description=f"Scope expansion: {desc[:200]}",
+                    new_phases=[new_phase],
+                    insert_after_phase=(
+                        state.current_phase_obj.phase_id
+                        if state.current_phase_obj
+                        else None
+                    ),
+                    trigger="scope_expansion",
+                    trigger_phase_id=trigger_phase,
+                )
+            except ManagerArtifactPublishError as exc:
+                # amend_plan() already rolled state.plan back to its
+                # pre-call snapshot and filed a warning bead — this
+                # particular expansion is dropped (not retried; consistent
+                # with the guardrail-blocked branch above), and processing
+                # continues with the next pending expansion.
+                _log.warning(
+                    "Scope expansion dropped (manager-artifact rebuild "
+                    "failed): %s (%s)", desc[:80], exc,
+                )
+                continue
+
+            # amend_plan() has no `state` parameter -- it reloads its OWN
+            # copy internally (see its docstring) and persists the
+            # amendment against THAT copy, not this loop's `state`. Left
+            # unaddressed, this loop's *own* trailing `_save_execution(state)`
+            # below would overwrite disk with this now-stale pre-amendment
+            # `state.plan`, silently reverting every expansion this call
+            # just applied (a pre-existing bug this transactional-publish
+            # work surfaced: it defeats the "prior plan and sidecars stay
+            # consistent" guarantee just as surely as a failed publish
+            # would). Pull the freshly-amended fields back onto THIS same
+            # `state` object (attribute mutation, not rebinding `state` --
+            # this function's callers hold the identical reference and
+            # must see the refresh too) so every subsequent guardrail
+            # check/expansion in this same loop, and the trailing save,
+            # both see the real, amended plan.
+            _reloaded = self._load_execution()
+            if _reloaded is not None:
+                state.plan = _reloaded.plan
+                state.amendments = _reloaded.amendments
+                state.gate_results = _reloaded.gate_results
+                state.approval_results = _reloaded.approval_results
+                state.feedback_results = _reloaded.feedback_results
 
             state.scope_expansions_applied = getattr(state, "scope_expansions_applied", 0) + 1
             processed += 1
@@ -5309,6 +6210,8 @@ class ExecutionEngine:
                     f"Team member(s) failed: {', '.join(sorted(failed_ids))}"
                 )
                 parent.completed_at = _utcnow()
+                if spec and spec.strategy == "agent_synthesis":
+                    parent.synthesis_state = SynthesisState.FAILED.value
             elif completed_ids >= all_member_ids:
                 spec = plan_step.synthesis
                 conflict = self._detect_team_conflict(
@@ -5319,6 +6222,7 @@ class ExecutionEngine:
                 # for human review instead of auto-completing.
                 if conflict and spec and spec.conflict_handling == "escalate":
                     parent.status = "dispatched"  # keep step open
+                    parent.synthesis_state = SynthesisState.ESCALATED.value
                     parent.deviations.append(
                         f"Conflict escalated: {conflict.conflict_id}"
                     )
@@ -5346,27 +6250,52 @@ class ExecutionEngine:
                         self._save_execution(state)
                     return
 
-                # Apply synthesis strategy.
+                # Conflict detected and the plan says fail outright — this
+                # applies even when every member individually "succeeded";
+                # the conflict is between their outputs, not a member
+                # failure.  Terminal: mirrors the failed_ids branch above.
+                if conflict and spec and spec.conflict_handling == "fail":
+                    parent.status = "failed"
+                    parent.error = (
+                        f"Conflict detected: {conflict.resolution_detail}"
+                    )
+                    parent.completed_at = _utcnow()
+                    if spec.strategy == "agent_synthesis":
+                        parent.synthesis_state = SynthesisState.FAILED.value
+                    self._save_execution(state)
+                    return
+
+                # Apply synthesis strategy (auto_merge default, or no
+                # conflict detected).  concatenate/merge_files complete the
+                # step synchronously (unchanged, backward-compatible
+                # behavior).  agent_synthesis instead transitions
+                # parent.synthesis_state to SYNTHESIZING and leaves
+                # parent.status == "dispatched" — the actual synthesis
+                # agent dispatch is built by _pending_synthesis_dispatch
+                # (consulted from next_action/next_actions) and its result
+                # is recorded via the ordinary record_step_result call
+                # against this SAME step_id.
                 self._apply_synthesis(plan_step, parent)
-                parent.completed_at = _utcnow()
-                # A2.b: parent step complete → emit teammate_idle per member
-                # so consumers (UI, future Claude Code hook bridge) see the
-                # team has come to rest.
-                _mailbox = self._team_mailbox(step_id)
-                if _mailbox is not None:
-                    try:
-                        for mr in parent.member_results:
-                            _mailbox.append(
-                                "teammate_idle",
-                                from_member=mr.member_id,
-                                subject=f"{mr.agent_name} idle",
-                                payload={"final_status": mr.status},
+                if parent.status != "dispatched":
+                    parent.completed_at = _utcnow()
+                    # A2.b: parent step complete → emit teammate_idle per
+                    # member so consumers (UI, future Claude Code hook
+                    # bridge) see the team has come to rest.
+                    _mailbox = self._team_mailbox(step_id)
+                    if _mailbox is not None:
+                        try:
+                            for mr in parent.member_results:
+                                _mailbox.append(
+                                    "teammate_idle",
+                                    from_member=mr.member_id,
+                                    subject=f"{mr.agent_name} idle",
+                                    payload={"final_status": mr.status},
+                                )
+                        except Exception as _mb_exc:  # noqa: BLE001
+                            logger.debug(
+                                "Mailbox teammate_idle emission failed (non-fatal): %s",
+                                _mb_exc,
                             )
-                    except Exception as _mb_exc:  # noqa: BLE001
-                        logger.debug(
-                            "Mailbox teammate_idle emission failed (non-fatal): %s",
-                            _mb_exc,
-                        )
 
         # A2.b: emit task_completed / task_failed for the member just recorded.
         _mailbox = self._team_mailbox(step_id)
@@ -5469,16 +6398,26 @@ class ExecutionEngine:
     ) -> None:
         """Apply the configured synthesis strategy to team member results.
 
-        Updates ``parent.outcome`` and ``parent.files_changed`` in place.
-
         Strategies:
         - ``concatenate`` (default): Join outcomes with ``"; "``, collect
-          all files_changed.
+          all files_changed.  Completes ``parent`` synchronously — behavior
+          unchanged from before agent_synthesis dispatch was wired up.
         - ``merge_files``: Same as concatenate but deduplicate files_changed.
-        - ``agent_synthesis``: Same as concatenate for now — the synthesis
-          agent dispatch is deferred to Phase 3.3 (INTERACT action type)
-          which requires invariant changes.  This branch sets a marker in
-          ``parent.deviations`` indicating synthesis was requested.
+          Also completes synchronously, unchanged.
+        - ``agent_synthesis``: Does NOT complete ``parent``.  Transitions
+          ``parent.synthesis_state`` to :data:`SynthesisState.SYNTHESIZING`
+          and leaves ``parent.status`` as ``"dispatched"`` — the caller
+          (``record_team_member_result``) must check
+          ``parent.status != "dispatched"`` before stamping
+          ``completed_at``.  The actual synthesis agent dispatch is built
+          by :meth:`_pending_synthesis_dispatch` (consulted by
+          ``next_action``/``next_actions``) and its result is recorded via
+          the ordinary :meth:`record_step_result` call against the SAME
+          ``step_id`` as this team step, routing the synthesis agent's
+          output through the identical scope/commit/evidence verification
+          pipeline non-team steps already go through (see the
+          member_results/synthesis_state carry-forward at the top of
+          ``record_step_result``).
         """
         spec = plan_step.synthesis
         strategy = spec.strategy if spec else "concatenate"
@@ -5500,18 +6439,15 @@ class ExecutionEngine:
                     seen.add(f)
                     deduped.append(f)
             parent.files_changed = deduped
+            parent.outcome = "; ".join(outcomes)
+            parent.status = "complete"
         elif strategy == "agent_synthesis":
-            # Mark for future synthesis agent dispatch.
-            parent.deviations.append(
-                f"synthesis_requested: agent={spec.synthesis_agent if spec else 'code-reviewer'}"
-            )
-            parent.files_changed = all_files
+            parent.synthesis_state = SynthesisState.SYNTHESIZING.value
         else:
             # concatenate (default)
             parent.files_changed = all_files
-
-        parent.outcome = "; ".join(outcomes)
-        parent.status = "complete"
+            parent.outcome = "; ".join(outcomes)
+            parent.status = "complete"
 
     def _detect_team_conflict(
         self,
@@ -5573,6 +6509,366 @@ class ExecutionEngine:
             evidence=evidence,
             severity="medium",
             resolution="unresolved",
+        )
+
+    # ── agent_synthesis dispatch (Phase 4, 4.3) ─────────────────────────────
+    # See docs/internal/team-runtime-contract.md Section 8.  These three
+    # methods turn a team step whose parent StepResult is sitting in
+    # SynthesisState.SYNTHESIZING (set by _apply_synthesis) into a real,
+    # persisted, exactly-once DISPATCH action for spec.synthesis_agent.
+    # Consulted from both the serial (_apply_resolver_decision's WAIT arm)
+    # and parallel (next_actions) dispatch paths so the CLI-driven
+    # orchestrator loop and the async TaskWorker daemon both pick it up.
+
+    def _pending_synthesis_dispatch(
+        self, step: PlanStep, state: ExecutionState,
+    ) -> ExecutionAction | None:
+        """Return the synthesis-agent DISPATCH action for *step*, if one is due.
+
+        Returns ``None`` when *step* is not an ``agent_synthesis`` team step,
+        has no parent ``StepResult`` yet (members still in flight), is not
+        currently ready for synthesis, or has already had its synthesis
+        agent dispatched (``synthesis_dispatched`` guards exactly-once
+        dispatch and survives restart because it is persisted on the
+        ``StepResult``).
+
+        Also handles resuming an ``ESCALATED`` synthesis (a human approved
+        past the conflict-escalation APPROVAL gate): once execution status
+        has moved off ``"approval_pending"`` again, an ESCALATED synthesis
+        transitions back to SYNTHESIZING and is dispatched — the
+        ``ESCALATED -> SYNTHESIZING`` resume edge from
+        ``SYNTHESIS_STATE_TRANSITIONS``.
+        """
+        if not step.team or step.synthesis is None:
+            return None
+        spec = step.synthesis
+        if spec.strategy != "agent_synthesis":
+            return None
+
+        parent = state.get_step_result(step.step_id)
+        if parent is None or parent.synthesis_dispatched:
+            return None
+
+        if parent.synthesis_state == SynthesisState.ESCALATED.value:
+            if state.status == "approval_pending":
+                # Still waiting on the human decision — nothing to dispatch.
+                return None
+            # Approval resolved and execution resumed: proceed to synthesis,
+            # informed by whatever the members reported (the synthesis
+            # prompt includes the detected conflict either way).
+            parent.synthesis_state = SynthesisState.SYNTHESIZING.value
+        elif parent.synthesis_state != SynthesisState.SYNTHESIZING.value:
+            return None
+
+        conflict = self._detect_team_conflict(step, parent.member_results)
+        action = self._synthesis_dispatch_action(step, parent, spec, conflict)
+        parent.synthesis_dispatched = True
+        self._save_execution(state)
+        return action
+
+    def _synthesis_dispatch_action(
+        self,
+        step: PlanStep,
+        parent: StepResult,
+        spec: SynthesisSpec,
+        conflict: ConflictRecord | None,
+    ) -> ExecutionAction:
+        """Build the DISPATCH action for *spec*'s synthesis agent.
+
+        ``step_id`` is deliberately the SAME id as the parent team step
+        (not a synthetic child id) — this is what makes the eventual
+        ``baton execute record --step <step_id> ...`` call route through
+        the ordinary (non-team-member) ``record_step_result`` CLI path,
+        which in turn runs the full scope/commit/evidence verification
+        pipeline unmodified.  See the CLI's ``STEP_ID_RE``/
+        ``TEAM_MEMBER_ID_RE`` split in
+        ``agent_baton/cli/commands/execution/_validators.py`` — any id
+        shaped like ``"N.N.xxxx"`` is routed to the team-member path
+        instead, which is why this reuses the plain ``"N.N"`` id rather
+        than minting a suffixed one.
+        """
+        agent_name = spec.synthesis_agent or "code-reviewer"
+        prompt = self._synthesis_prompt_text(step, parent, spec, conflict)
+        return ExecutionAction(
+            action_type=ActionType.DISPATCH,
+            message=(
+                f"Synthesis agent '{agent_name}' for team step "
+                f"{step.step_id} ({len(parent.member_results)} member "
+                f"result(s) to merge)."
+            ),
+            agent_name=agent_name,
+            agent_model="sonnet",
+            delegation_prompt=prompt,
+            step_id=step.step_id,
+            step_type=step.step_type,
+        )
+
+    def _synthesis_prompt_text(
+        self,
+        step: PlanStep,
+        parent: StepResult,
+        spec: SynthesisSpec,
+        conflict: ConflictRecord | None,
+    ) -> str:
+        """Build the synthesis agent's delegation prompt.
+
+        Includes structured member outcomes, files changed, detected
+        conflicts, and provenance (member_id/agent_name/status) so the
+        synthesis agent has everything it needs to merge without
+        re-reading each member's raw transcript.  When
+        ``spec.synthesis_prompt`` is set, ``{member_outcomes}`` is
+        substituted with the structured block (or the block is appended
+        when the template has no placeholder); otherwise a sensible
+        default template is used — matching :class:`SynthesisSpec`'s
+        documented contract.
+        """
+        lines: list[str] = ["## Member outcomes"]
+        for mr in parent.member_results:
+            lines.append(f"- [{mr.member_id}] {mr.agent_name} ({mr.status}): {mr.outcome}")
+            if mr.files_changed:
+                lines.append(f"  files: {', '.join(mr.files_changed)}")
+
+        all_files = sorted({f for mr in parent.member_results for f in mr.files_changed})
+        lines.append("")
+        lines.append("## Files changed across members")
+        lines.append(", ".join(all_files) if all_files else "(none reported)")
+
+        lines.append("")
+        lines.append("## Conflicts detected")
+        if conflict is not None:
+            lines.append(
+                f"conflict_id={conflict.conflict_id} severity={conflict.severity}: "
+                + (conflict.resolution_detail or "Overlapping file changes between members.")
+            )
+            for agent, files in conflict.evidence.items():
+                lines.append(f"  - {agent}: {files}")
+        else:
+            lines.append("(none detected)")
+
+        lines.append("")
+        lines.append("## Provenance")
+        for mr in parent.member_results:
+            lines.append(
+                f"- member_id={mr.member_id} agent_name={mr.agent_name} status={mr.status}"
+            )
+
+        member_outcomes_block = "\n".join(lines)
+
+        template = spec.synthesis_prompt
+        if template:
+            if "{member_outcomes}" in template:
+                return template.replace("{member_outcomes}", member_outcomes_block)
+            return f"{template}\n\n{member_outcomes_block}"
+
+        return (
+            f"You are the synthesis agent for team step {step.step_id} "
+            f"({step.task_description}).  Merge the following team member "
+            "outputs into one coherent, verified result. "
+            f"conflict_handling={spec.conflict_handling!r} — resolve any "
+            "conflicts (auto_merge: reconcile the overlapping changes "
+            "yourself) and report the final merged outcome, the complete "
+            "list of files changed, and the commit hash for your merged "
+            f"work.\n\n{member_outcomes_block}"
+        )
+
+    # ── Phase 6.2: CHECKPOINT policy (context-rot mitigation) ───────────────
+
+    def _checkpoint_trigger(self, state: ExecutionState) -> str | None:
+        """Return the name of the tripped checkpoint threshold, or ``None``.
+
+        Pure / read-only -- never mutates *state*.  Called from two places:
+
+        1. :meth:`next_actions` (plural), to withhold a dispatchable batch
+           and force the caller back onto :meth:`next_action` (singular),
+           which is the only place that actually emits and persists the
+           CHECKPOINT action (see :meth:`_emit_checkpoint`).
+        2. :meth:`_apply_resolver_decision`'s ``PHASE_ADVANCE_OK`` /
+           ``EMPTY_PHASE_ADVANCE`` arms, immediately after the phase has
+           advanced and before anything in the new phase is dispatched --
+           the only safe, already-persisted boundary a checkpoint may land
+           on.
+
+        A checkpoint is due when the phase just advanced past a boundary
+        that has not already been checkpointed (dedup guard via
+        ``state.last_checkpoint_phase``) AND at least one of three
+        independent, deterministic thresholds has tripped since the
+        previous checkpoint (or since the start of execution, for the
+        first one):
+
+        - ``phase_interval``: ``BATON_CHECKPOINT_PHASE_INTERVAL`` or more
+          phases have completed.
+        - ``turn_threshold``: ``BATON_CHECKPOINT_TURN_THRESHOLD`` or more
+          turns (``state.turn_count``) have been recorded -- catches a
+          single phase with many steps even before the phase-interval
+          would trip.
+        - ``token_threshold``: ``BATON_CHECKPOINT_TOKEN_THRESHOLD`` or more
+          cumulative ``estimated_tokens`` have accrued across step results
+          -- a proxy for accumulated orchestrator context size.
+        """
+        if not _checkpoint_enabled():
+            return None
+        if state.current_phase >= len(state.plan.phases):
+            # About to COMPLETE on the next resolver pass -- no boundary to
+            # pause at.
+            return None
+        last_phase = getattr(state, "last_checkpoint_phase", -1)
+        if state.current_phase == last_phase:
+            # Dedup: this exact boundary already checkpointed.
+            return None
+
+        phases_since = state.current_phase - max(last_phase, 0)
+        turns_since = state.turn_count - getattr(state, "last_checkpoint_turn_count", 0)
+        tokens_total = sum(r.estimated_tokens for r in state.step_results)
+        tokens_since = tokens_total - getattr(state, "last_checkpoint_tokens", 0)
+
+        if phases_since >= _checkpoint_phase_interval():
+            return "phase_interval"
+        if turns_since >= _checkpoint_turn_threshold():
+            return "turn_threshold"
+        if tokens_since >= _checkpoint_token_threshold():
+            return "token_threshold"
+        return None
+
+    def _build_checkpoint_handoff(
+        self, state: ExecutionState, trigger: str,
+    ) -> CheckpointHandoff:
+        """Build the compact handoff record for a checkpoint at *state*'s
+        (already-advanced) current phase.
+
+        Slices ``step_results`` / ``gate_results`` / ``approval_results``
+        by count-since-last-checkpoint markers so the record stays compact
+        (a delta, not a full history dump) while ``changed_files`` and
+        ``scope`` are cumulative -- a fresh session needs the full
+        footprint of work already done, not just the most recent slice.
+        """
+        phase_obj = state.current_phase_obj
+        phase_id = phase_obj.phase_id if phase_obj is not None else state.current_phase
+
+        # Compact-by-construction: cap to the most recent 10 completed steps
+        # rather than tracking a separate "since last checkpoint" index on
+        # ExecutionState (which would add another persisted field).  A
+        # fresh session reads the full step_results history from the
+        # persisted ExecutionState itself if it needs more than this
+        # summary -- the handoff exists to orient, not to be the source of
+        # truth for resume.
+        completed_outcomes = [
+            f"{r.step_id} ({r.agent_name}): {(r.outcome or '').strip()[:140]}"
+            for r in state.step_results
+            if r.status == "complete"
+        ][-10:]
+
+        decisions: list[str] = []
+        for g in state.gate_results:
+            decisions.append(
+                f"Phase {g.phase_id} gate '{g.gate_type}': "
+                f"{'passed' if g.passed else 'failed'}"
+            )
+        for a in state.approval_results:
+            decisions.append(f"Phase {a.phase_id} approval: {a.result}")
+        decisions = decisions[-10:]
+
+        scope: list[str] = []
+        for p in state.plan.phases[: state.current_phase]:
+            for s in p.steps:
+                for path in s.allowed_paths:
+                    if path not in scope:
+                        scope.append(path)
+
+        changed_files: list[str] = []
+        for r in state.step_results:
+            for f in r.files_changed:
+                if f not in changed_files:
+                    changed_files.append(f)
+
+        unresolved_risks: list[str] = [
+            f"knowledge gap: {getattr(g, 'question', '') or getattr(g, 'summary', str(g))}"
+            for g in state.pending_gaps
+        ]
+        for r in state.step_results:
+            for dev in r.deviations:
+                unresolved_risks.append(f"deviation ({r.step_id}): {dev[:140]}")
+        if getattr(state, "pending_scope_expansions", None):
+            unresolved_risks.append(
+                f"{len(state.pending_scope_expansions)} pending scope expansion(s)"
+            )
+        unresolved_risks = unresolved_risks[-10:]
+
+        if phase_obj is not None and phase_obj.steps:
+            next_actions = (
+                f"Phase {phase_obj.phase_id} ({phase_obj.name}): "
+                f"{len(phase_obj.steps)} step(s) pending."
+            )
+        elif phase_obj is not None:
+            next_actions = f"Phase {phase_obj.phase_id} ({phase_obj.name}): no steps; will advance."
+        else:
+            next_actions = "No phases remain; execution will complete."
+
+        goal = state.plan.completion_condition or state.plan.task_summary
+
+        return CheckpointHandoff(
+            checkpoint_id=f"cp{getattr(state, 'checkpoint_count', 0) + 1}",
+            phase_id=phase_id,
+            trigger=trigger,
+            goal=goal,
+            completed_outcomes=completed_outcomes,
+            decisions=decisions,
+            scope=scope,
+            changed_files=changed_files,
+            unresolved_risks=unresolved_risks,
+            next_actions=next_actions,
+            resume_command=f"baton execute resume --task-id {state.task_id}",
+        )
+
+    def _emit_checkpoint(self, state: ExecutionState, trigger: str) -> ExecutionAction:
+        """Build + persist a checkpoint at *state*'s current (advanced) phase
+        and return the ``CHECKPOINT`` action.
+
+        Mutates *state*: appends the handoff to ``state.checkpoints`` and
+        advances the dedup markers (``last_checkpoint_phase``,
+        ``last_checkpoint_turn_count``, ``last_checkpoint_tokens``,
+        ``checkpoint_count``) so the SAME phase boundary cannot checkpoint
+        again -- even across an investigative-archetype ``retry_phase``
+        loop that re-completes the identical ``current_phase``.  The caller
+        (``next_action`` / ``resume``) persists *state* immediately after
+        this method returns, so the dedup guard is durable before the
+        action ever reaches the caller.
+        """
+        handoff = self._build_checkpoint_handoff(state, trigger)
+        state.checkpoints.append(handoff)
+        state.last_checkpoint_phase = state.current_phase
+        state.last_checkpoint_turn_count = state.turn_count
+        state.last_checkpoint_tokens = sum(
+            r.estimated_tokens for r in state.step_results
+        )
+        state.checkpoint_count += 1
+
+        _log.info(
+            "Checkpoint %s emitted for task %s at phase %s (trigger=%s).",
+            handoff.checkpoint_id, state.task_id, handoff.phase_id, trigger,
+        )
+        try:
+            self._publish(Event.create(
+                topic="checkpoint.emitted",
+                task_id=state.task_id,
+                payload={
+                    "checkpoint_id": handoff.checkpoint_id,
+                    "phase_id": handoff.phase_id,
+                    "trigger": trigger,
+                },
+            ))
+        except Exception as _cp_exc:  # noqa: BLE001 — event publish must never block checkpointing
+            _log.debug("checkpoint.emitted event publish failed (non-fatal): %s", _cp_exc)
+
+        return ExecutionAction(
+            action_type=ActionType.CHECKPOINT,
+            message=(
+                f"Safe checkpoint at phase {handoff.phase_id} "
+                f"(trigger: {trigger}). Persisted — start a fresh session "
+                "and resume with the command below to avoid context rot."
+            ),
+            phase_id=handoff.phase_id,
+            checkpoint_handoff=handoff.to_dict(),
+            summary=handoff.resume_command,
         )
 
     def _check_token_budget(self, state: ExecutionState) -> str | None:
@@ -6673,6 +7969,9 @@ class ExecutionEngine:
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=False)
             self._publish_phase_started(state)
+            checkpoint_trigger = self._checkpoint_trigger(state)
+            if checkpoint_trigger is not None:
+                return self._emit_checkpoint(state, checkpoint_trigger)
             return None  # loop
 
         # ── A failed step in this phase short-circuits to FAILED ────────────
@@ -6801,6 +8100,23 @@ class ExecutionEngine:
             timeout_action = self._check_timeout(state)
             if timeout_action is not None:
                 return timeout_action
+            # Phase 4, 4.3: a team step sitting in SynthesisState.SYNTHESIZING
+            # (all members reported, agent_synthesis strategy, no dispatch
+            # issued yet) is exactly the kind of "in-flight step" the WAIT
+            # decision above is reporting on — the resolver (out of scope
+            # here, see resolver.py's import-boundary note) has no notion of
+            # synthesis dispatch, so the engine must intercept WAIT and
+            # dispatch the synthesis agent itself before falling through to
+            # a plain WAIT.  _pending_synthesis_dispatch is exactly-once
+            # (guarded by StepResult.synthesis_dispatched) and a no-op for
+            # every non-agent_synthesis step, so this scan is cheap and safe
+            # to run on every WAIT.
+            phase_obj = state.current_phase_obj
+            if phase_obj is not None:
+                for _wait_step in phase_obj.steps:
+                    _synth_action = self._pending_synthesis_dispatch(_wait_step, state)
+                    if _synth_action is not None:
+                        return _synth_action
             return ExecutionAction(
                 action_type=ActionType.WAIT,
                 message=decision.message,
@@ -6846,6 +8162,9 @@ class ExecutionEngine:
             self._process_pending_expansions(state)
             self._phase_manager.advance_phase(state, set_status_running=True)
             self._publish_phase_started(state)
+            checkpoint_trigger = self._checkpoint_trigger(state)
+            if checkpoint_trigger is not None:
+                return self._emit_checkpoint(state, checkpoint_trigger)
             return None  # loop
 
         # ── RETRY_PHASE: investigative archetype loop-back ─────────────────
@@ -7686,16 +9005,31 @@ class ExecutionEngine:
         state.feedback_results.append(fb_result)
         self._save_execution(state)
 
-        amendment = self.amend_plan(
-            description=(
-                f"Feedback dispatch for question '{question_id}' on phase {phase_id}: "
-                f"user chose '{chosen_option}'"
-            ),
-            new_phases=[new_phase],
-            trigger="feedback",
-            trigger_phase_id=phase_id,
-            feedback=chosen_option,
-        )
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+        try:
+            amendment = self.amend_plan(
+                description=(
+                    f"Feedback dispatch for question '{question_id}' on phase {phase_id}: "
+                    f"user chose '{chosen_option}'"
+                ),
+                new_phases=[new_phase],
+                trigger="feedback",
+                trigger_phase_id=phase_id,
+                feedback=chosen_option,
+            )
+        except ManagerArtifactPublishError as exc:
+            # amend_plan() already rolled the plan back and filed a warning
+            # bead. The feedback answer itself (fb_result, saved above) is
+            # kept — this leaves the execution in "feedback_pending" rather
+            # than silently dispatching against an inconsistent sidecar
+            # set. A human/operator sees the bead and can retry.
+            logger.warning(
+                "record_feedback_result: dispatch amendment failed for "
+                "question %r on phase %s (%s); feedback recorded, no "
+                "step dispatched.", question_id, phase_id, exc,
+            )
+            return
 
         # Reload to pick up the amendment's renumbered state (including
         # updated phase_ids on feedback_results).  Do NOT fall back to the
@@ -7721,9 +9055,24 @@ class ExecutionEngine:
         )
         if reloaded_fb is not None:
             # Record the dispatched step_id.
+            #
+            # Regression (found while adding Phase 6, 6.3 manager-mode
+            # coverage for this method): ``amendment.phases_added`` holds
+            # the PRE-renumber placeholder phase_id (``amend_plan``'s
+            # documented contract -- see
+            # ``TestPlanAmendments.test_amendment_records_phases_added``),
+            # but ``state`` here was just reloaded fresh from disk AFTER
+            # ``_renumber_phases`` ran, so every phase's ``.phase_id`` is
+            # already the renumbered value. ``p.phase_id in
+            # amendment.phases_added`` can therefore never match (unless
+            # the placeholder id -9999 coincidentally survived
+            # renumbering, which it never does) -- this always left
+            # ``dispatched_step_id`` empty. ``new_phase.name`` is stable
+            # across renumbering (only phase_id/step_id are rewritten) and
+            # unique per question_id, so match on that instead.
             if amendment.phases_added:
                 for p in state.plan.phases:
-                    if p.phase_id in amendment.phases_added and p.steps:
+                    if p.name == new_phase.name and p.steps:
                         reloaded_fb.dispatched_step_id = p.steps[0].step_id
                         break
             elif amendment.steps_added:

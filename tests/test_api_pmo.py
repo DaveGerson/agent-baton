@@ -525,6 +525,31 @@ class TestForgePlan:
         )
         assert r.status_code == 201
 
+    def test_manager_mode_flag_stamps_returned_plan(self, client: TestClient) -> None:
+        _register_project(client, project_id="fmm-proj", program="FMM")
+        body = client.post(
+            "/api/v1/pmo/forge/plan",
+            json={
+                "description": "Build a reporting endpoint",
+                "program": "FMM",
+                "project_id": "fmm-proj",
+                "manager_mode": True,
+            },
+        ).json()
+        assert body["plan"]["manager_mode"] is True
+
+    def test_manager_mode_defaults_false(self, client: TestClient) -> None:
+        _register_project(client, project_id="fmm-proj2", program="FMM2")
+        body = client.post(
+            "/api/v1/pmo/forge/plan",
+            json={
+                "description": "Build a reporting endpoint",
+                "program": "FMM2",
+                "project_id": "fmm-proj2",
+            },
+        ).json()
+        assert body["plan"]["manager_mode"] is False
+
     def test_plan_quality_error_returns_structured_422(
         self, client: TestClient, app
     ) -> None:
@@ -631,6 +656,136 @@ class TestForgeApprove:
             json={"plan": {"broken": "yes"}, "project_id": "inv-proj"},
         )
         assert r.status_code == 400
+
+    def test_approve_response_manager_mode_false_by_default(self, client: TestClient) -> None:
+        """A non-manager-mode plan's response carries manager_mode=False and
+        manager_revision=None -- the new response fields must not change
+        behavior for the existing (default) path."""
+        _register_project(client, project_id="appr-proj4", program="AP4")
+        body = client.post(
+            "/api/v1/pmo/forge/approve",
+            json={"plan": self._plan_dict(), "project_id": "appr-proj4"},
+        ).json()
+        assert body["manager_mode"] is False
+        assert body["manager_revision"] is None
+
+
+# ===========================================================================
+# POST /api/v1/pmo/forge/approve -- manager mode (Phase 7 "Turn PMO into
+# the director console"). Uses a REAL ForgeSession (not the stub every
+# other class in this file uses) because the manager-mode branch this
+# exercises writes real sidecar files to disk via
+# agent_baton.core.manager.rebuild.rebuild_and_publish -- a MagicMock
+# ForgeSession would make that a no-op and defeat the point of the test.
+# ===========================================================================
+
+
+class TestForgeApproveManagerMode:
+    @pytest.fixture()
+    def real_forge_app(self, tmp_path: Path, store: PmoStore):
+        from unittest.mock import MagicMock
+
+        from agent_baton.core.pmo.forge import ForgeSession
+        from agent_baton.core.runtime.headless import HeadlessClaude, HeadlessConfig
+
+        _app = create_app(team_context_root=tmp_path)
+        scanner = PmoScanner(store=store)
+        disabled_headless = HeadlessClaude(HeadlessConfig(claude_path="/nonexistent/claude"))
+        real_forge = ForgeSession(planner=MagicMock(), store=store, headless=disabled_headless)
+        _app.dependency_overrides[get_pmo_store] = lambda: store
+        _app.dependency_overrides[get_pmo_scanner] = lambda: scanner
+        _app.dependency_overrides[get_forge_session] = lambda: real_forge
+        return _app
+
+    @pytest.fixture()
+    def real_forge_client(self, real_forge_app) -> TestClient:
+        return TestClient(real_forge_app)
+
+    def _manager_plan_dict(self, task_id: str = "mgr-http-task") -> dict:
+        plan = MachinePlan(
+            task_id=task_id,
+            task_summary="Add a reporting endpoint",
+            task_type="feature",
+            complexity="medium",
+            risk_level="MEDIUM",
+            manager_mode=True,
+            phases=[
+                PlanPhase(
+                    phase_id=1,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="backend-engineer",
+                            task_description="Implement the reporting endpoint.",
+                            allowed_paths=["app/reporting/**"],
+                            step_type="developing",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        return plan.to_dict()
+
+    def test_manager_mode_approve_publishes_full_sidecar_set(
+        self, real_forge_client: TestClient, tmp_path: Path,
+    ) -> None:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        project_root = tmp_path / "mgr-proj"
+        r = real_forge_client.post(
+            "/api/v1/pmo/projects",
+            json={"project_id": "mgr-proj", "name": "Mgr", "path": str(project_root), "program": "MGR"},
+        )
+        assert r.status_code == 201, r.text
+
+        plan_dict = self._manager_plan_dict()
+        resp = real_forge_client.post(
+            "/api/v1/pmo/forge/approve",
+            json={"plan": plan_dict, "project_id": "mgr-proj"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["saved"] is True
+        assert body["manager_mode"] is True
+        assert body["manager_revision"] == 1
+
+        paths = ManagerArtifactPaths(
+            project_root / ".claude" / "team-context", plan_dict["task_id"],
+        )
+        assert paths.charter.exists()
+        assert paths.scope_map.exists()
+        assert paths.revision_manifest.exists()
+
+    def test_manager_mode_approve_invalid_config_returns_422(
+        self, real_forge_client: TestClient, tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "mgr-bad-cfg-proj"
+        project_root.mkdir()
+        claude_dir = project_root / ".claude"
+        claude_dir.mkdir()
+        # `adversarial_review` only accepts "always"/"risk_based"/"off" --
+        # this value is invalid, so ManagerConfig.load() must raise.
+        (claude_dir / "baton.yaml").write_text(
+            "version: 1\n"
+            "policies:\n"
+            "  phase_completion:\n"
+            "    adversarial_review: not-a-real-option\n",
+            encoding="utf-8",
+        )
+
+        r = real_forge_client.post(
+            "/api/v1/pmo/projects",
+            json={"project_id": "mgr-bad-cfg", "name": "Bad", "path": str(project_root), "program": "BAD"},
+        )
+        assert r.status_code == 201, r.text
+
+        plan_dict = self._manager_plan_dict(task_id="mgr-bad-cfg-task")
+        resp = real_forge_client.post(
+            "/api/v1/pmo/forge/approve",
+            json={"plan": plan_dict, "project_id": "mgr-bad-cfg"},
+        )
+        assert resp.status_code == 422
 
 
 # ===========================================================================

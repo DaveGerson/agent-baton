@@ -1,28 +1,33 @@
 """``baton run`` -- autonomously drive an orchestrated execution in the foreground.
 
-This module implements the interactive, autonomous runner. It initializes the
-ExecutionEngine and TaskWorker, then loops automatically, only pausing to prompt
-the user interactively when a human gate (e.g., approval) is reached.
+This module is a thin, backward-compatible CLI shim.  The actual autonomous
+loop lives in ``_handle_run`` (``cli/commands/execution/execute.py``, also
+reachable as ``baton execute run``) -- the canonical implementation of the
+"one lifecycle, four surfaces" contract described in
+``docs/internal/execution-runtime-contract.md`` (see its §7.4 compatibility
+plan).  ``baton run`` used to construct its own independent
+``ExecutionEngine`` + ``TaskWorker`` + ``BatonRunner`` stack, which was a
+second, divergent implementation of the same autonomous-loop contract
+(different active-task resolution, different resume guard, different
+gate/approval semantics) and the source of a real bug: it called
+``ExecutionEngine.start(plan, task_id=...)``, a signature the engine has
+never had, so ``baton run --dry-run`` (and every other invocation that
+started a fresh plan) crashed with a ``TypeError``.
 
 Delegates to:
-    agent_baton.core.orchestration.runner.BatonRunner
+    agent_baton.cli.commands.execution.execute._handle_run
 """
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
-import logging
-from pathlib import Path
 
-from agent_baton.cli.colors import success, error as color_error, info as color_info
-from agent_baton.core.engine.executor import ExecutionEngine
-from agent_baton.core.runtime.launcher import AgentLauncher, DryRunLauncher
-from agent_baton.core.runtime.worker import TaskWorker
-from agent_baton.core.orchestration.runner import BatonRunner
-from agent_baton.models.execution import MachinePlan
+from agent_baton.cli.colors import error as color_error, info as color_info
 
-_log = logging.getLogger(__name__)
+# A practically non-constraining step ceiling for the canonical runner's
+# ``--max-steps`` safety limit.  ``baton run`` never exposed its own cap, so
+# this is chosen high enough that no real plan should hit it while still
+# guarding against a genuine infinite loop.
+_DEFAULT_MAX_STEPS = 2000
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -45,7 +50,18 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=3,
-        help="Maximum parallel agents (default: 3)",
+        help=(
+            "Accepted for backward compatibility only -- the canonical "
+            "runner dispatches one step at a time and does not honor this "
+            "flag."
+        ),
+    )
+    p.add_argument(
+        "--max-steps",
+        metavar="N",
+        type=int,
+        default=_DEFAULT_MAX_STEPS,
+        help=f"Safety limit: maximum steps before aborting (default: {_DEFAULT_MAX_STEPS})",
     )
     p.add_argument(
         "--dry-run",
@@ -57,70 +73,52 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p.add_argument(
         "--resume",
         action="store_true",
-        help="Resume an already started execution without passing a new plan",
+        help=(
+            "Accepted for backward compatibility only -- the canonical "
+            "runner always resumes an active/resumable execution "
+            "automatically and refuses to silently restart one, whether "
+            "or not this flag is passed."
+        ),
     )
     return p
 
 
 def handler(args: argparse.Namespace) -> None:
-    # 1. Initialize Launcher
-    if args.dry_run:
-        print(color_info("Starting runner in DRY RUN mode..."))
-        launcher: AgentLauncher = DryRunLauncher()
-    else:
-        # Avoid importing heavy modules if not needed
-        from agent_baton.core.runtime.claude_launcher import ClaudeCodeLauncher
-        launcher = ClaudeCodeLauncher()
+    """Translate the ``baton run`` CLI surface onto the canonical runner.
 
-    # 2. Load Plan if not resuming
-    plan = None
-    if not args.resume:
-        plan_path = Path(args.plan)
-        if not plan_path.is_file():
-            print(color_error(f"Plan file not found: {plan_path}"))
-            print("Generate a plan first using 'baton plan', or pass --resume.")
-            return
-        try:
-            with open(plan_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            plan = MachinePlan.parse_obj(data)
-        except Exception as e:
-            print(color_error(f"Failed to parse plan: {e}"))
-            return
+    Keeps the ``baton run`` flags stable (no breaking CLI change) while
+    running through the exact same active-task resolution,
+    resumable/terminal status guard, and non-TTY-safe approval/feedback/
+    interact pausing that ``baton execute run`` already implements --
+    "the canonical execute runner is the single implementation" per the
+    Phase 2 unified-lifecycle contract.  No second state machine is
+    constructed here.
+    """
+    from agent_baton.cli.commands.execution.execute import _handle_run
 
-    # 3. Initialize Engine
-    # By default, ExecutionEngine uses the current working directory
-    engine = ExecutionEngine()
+    if getattr(args, "max_parallel", 3) != 3:
+        print(
+            color_info(
+                "note: 'baton run' delegates to the canonical sequential "
+                "runner ('baton execute run'); --max-parallel is accepted "
+                "for backward compatibility but has no effect."
+            )
+        )
 
-    if plan is not None:
-        try:
-            engine.start(plan, task_id=args.task_id)
-            print(color_info(f"Engine started with task ID: {plan.task_id}"))
-        except Exception as e:
-            if "already exists" in str(e).lower() or "active" in str(e).lower():
-                print(color_info("Execution already active. Resuming..."))
-            else:
-                print(color_error(f"Failed to start engine: {e}"))
-                return
-
-    # 4. Initialize Worker
-    worker = TaskWorker(
-        engine=engine,
-        launcher=launcher,
-        max_parallel=args.max_parallel,
+    delegate_args = argparse.Namespace(
+        subcommand="run",
+        plan=args.plan,
+        task_id=getattr(args, "task_id", None),
+        model="sonnet",
+        max_steps=getattr(args, "max_steps", _DEFAULT_MAX_STEPS),
+        token_budget=0,
+        dry_run=getattr(args, "dry_run", False),
+        force_override=False,
+        override_justification="",
+        output="text",
     )
 
-    # 5. Initialize Facade
-    runner = BatonRunner(engine=engine, worker=worker)
-
-    # 6. Run the Event Loop
-    print(color_info("\nStarting autonomous execution loop... (Press Ctrl+C to abort)\n"))
     try:
-        summary = asyncio.run(runner.run_until_complete_or_gate(args.task_id))
-        print(f"\n{success('Execution Complete')}")
-        print(summary)
+        _handle_run(delegate_args)
     except KeyboardInterrupt:
         print(color_error("\nExecution aborted by user."))
-    except Exception as e:
-        print(color_error(f"\nExecution failed: {e}"))
-        _log.exception("Runner failed")

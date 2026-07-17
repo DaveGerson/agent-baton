@@ -179,6 +179,36 @@ class AgentRegistry:
             return False
         return any(agents_dir.glob("*.md"))
 
+    def register_generated_agent(self, path: Path) -> AgentDefinition | None:
+        """Load and register a single agent definition file, in place.
+
+        Used by the talent-factory lifecycle
+        (``agent_baton.core.engine.planning.talent_factory``) after
+        atomically installing a validated generated agent artifact --
+        the ``registry_reload: immediate`` policy in
+        ``TalentFactoryConfig`` (see
+        docs/internal/talent-factory-contract.md §4) means the *same*
+        in-process registry instance a plan is being built against picks
+        up the new agent right away, without a full
+        :meth:`load_default_paths` rescan.
+
+        Always overrides any existing entry with the same name -- the
+        caller (``talent_factory.run_talent_factory_for_gap``) has
+        already applied name-collision policy before writing the file,
+        so a same-name entry here means the file legitimately replaces a
+        stale in-memory definition, not a collision to guard against
+        again.
+
+        Returns the parsed :class:`AgentDefinition`, or ``None`` if the
+        file could not be parsed (caller should treat this as an install
+        failure and roll back).
+        """
+        agent = self._parse_agent_file(path)
+        if agent is None:
+            return None
+        self._agents[agent.name] = agent
+        return agent
+
     def get(self, name: str) -> AgentDefinition | None:
         """Look up an agent by exact name."""
         return self._agents.get(name)

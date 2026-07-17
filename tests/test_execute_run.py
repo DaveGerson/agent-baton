@@ -24,8 +24,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_baton.cli.commands.execution import execute as _mod
+from agent_baton.cli.commands.execution import run as _run_mod
 from agent_baton.cli.commands.execution.execute import _handle_run, register
 from agent_baton.core.engine.executor import ExecutionEngine
+from agent_baton.models.execution import MachinePlan
 
 
 # ---------------------------------------------------------------------------
@@ -498,3 +500,282 @@ class TestDryRun:
         # Both agents should be mentioned
         assert "backend-engineer" in output
         assert "test-engineer" in output
+
+
+# ===========================================================================
+# Lifecycle contract — resume-vs-restart guard
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md
+# §4 ("idempotency semantics", `start()` row) and §8 (state-transition test
+# matrix, stage 0 "Start / resume-vs-restart guard" and stage 7 "Resume same
+# task"). These pin down the current, already-implemented contract: a
+# non-terminal execution must be *resumed*, never silently restarted from
+# the plan file, and a terminal execution must refuse to restart at all.
+# ===========================================================================
+
+class TestLifecycleContract:
+    def _seed_engine(self, tmp_path: Path, task_id: str, plan: MachinePlan) -> ExecutionEngine:
+        """Build a real ExecutionEngine scoped to *tmp_path*/*task_id* and
+        drive it via the same public methods every surface uses (§3:
+        ExecutionEngine is the single writer of ExecutionState)."""
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        engine.start(plan)
+        return engine
+
+    def test_resumable_status_is_resumed_not_restarted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A task with a resumable status (here: 'running', with one of two
+        steps already recorded complete) must not be restarted from the
+        plan file on a second `execute run` invocation — the already
+        recorded step result must survive, and only the remaining step
+        should be (re)dispatched."""
+        task_id = "resume-contract-task"
+        two_step_plan_dict = {
+            **_MINIMAL_PLAN,
+            "task_id": task_id,
+            "phases": [
+                {
+                    "phase_id": 1,
+                    "name": "Phase 1",
+                    "steps": [
+                        {
+                            "step_id": "1.1",
+                            "agent_name": "backend-engineer",
+                            "task_description": "Step one",
+                            "model": "sonnet",
+                        },
+                        {
+                            "step_id": "1.2",
+                            "agent_name": "test-engineer",
+                            "task_description": "Step two",
+                            "model": "sonnet",
+                        },
+                    ],
+                }
+            ],
+        }
+        plan_obj = MachinePlan.from_dict(two_step_plan_dict)
+
+        # Pre-seed an in-progress execution: step 1.1 already complete,
+        # 1.2 still pending — status stays "running".
+        seed_engine = self._seed_engine(tmp_path, task_id, plan_obj)
+        seed_engine.record_step_result("1.1", "backend-engineer", status="complete", outcome="done")
+        assert seed_engine.status().get("status") == "running"
+
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(two_step_plan_dict), encoding="utf-8")
+        args = _make_args(str(plan_path), dry_run=True, task_id=task_id)
+        storage = _FakeStorage()
+
+        with (
+            patch(f"{_EXECUTE_MOD}._resolve_context_root", return_value=tmp_path),
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=storage),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+        ):
+            _handle_run(args)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        # The resume branch (not the fresh-start branch) must have been taken.
+        assert "Resuming execution" in output
+        assert task_id in output
+        # The remaining step is dispatched (previewed, in dry-run mode).
+        assert "1.2" in output
+
+        # Persisted state: step 1.1 remains complete, and dry-run must not
+        # have mutated anything else (no new step results recorded).
+        final_engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        final_state = final_engine._load_execution()
+        assert final_state is not None
+        complete_ids = {r.step_id for r in final_state.step_results if r.status == "complete"}
+        assert complete_ids == {"1.1"}
+
+    def test_terminal_status_refuses_restart(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A task that already reached a terminal status ('complete') must
+        refuse to restart from the plan file rather than silently
+        overwriting the recorded history."""
+        task_id = "terminal-contract-task"
+        plan_dict = {**_MINIMAL_PLAN, "task_id": task_id}
+        plan_obj = MachinePlan.from_dict(plan_dict)
+
+        seed_engine = self._seed_engine(tmp_path, task_id, plan_obj)
+        seed_engine.record_step_result("1.1", "backend-engineer", status="complete", outcome="done")
+        seed_engine.complete()
+        assert seed_engine.status().get("status") == "complete"
+
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan_dict), encoding="utf-8")
+        args = _make_args(str(plan_path), dry_run=True, task_id=task_id)
+        storage = _FakeStorage()
+
+        with (
+            patch(f"{_EXECUTE_MOD}._resolve_context_root", return_value=tmp_path),
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=storage),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_run(args)
+
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "already" in output.lower()
+        assert "complete" in output.lower()
+
+        # The persisted state must be untouched by the refused restart.
+        final_engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        final_state = final_engine._load_execution()
+        assert final_state is not None
+        assert final_state.status == "complete"
+
+
+# ===========================================================================
+# Canonical vs. compatibility surface — dry-run parity
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md
+# §7.4 (the "duplicate top-level baton run" compatibility plan) and §8's
+# "Compat: two decision systems" row. `baton run` (the compatibility shim,
+# `agent_baton/cli/commands/execution/run.py::handler`) delegates to the
+# exact same `_handle_run` that `baton execute run` (the canonical surface)
+# calls directly. These tests drive BOTH real entry points -- not a mock of
+# one standing in for the other -- and assert they make identical
+# resume-vs-restart decisions and reach identical persisted state, so a
+# regression that reintroduces a second, divergent implementation behind
+# `baton run` (the historical bug this delegation fixed) is caught here.
+# ===========================================================================
+
+class TestCanonicalAndCompatibilityDryRunParity:
+    def _seed_engine(self, tmp_path: Path, task_id: str, plan: MachinePlan) -> ExecutionEngine:
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        engine.start(plan)
+        return engine
+
+    def _compat_args(
+        self, plan: str, *, task_id: str | None, dry_run: bool = True,
+    ) -> argparse.Namespace:
+        """Namespace shaped like ``run.register()``'s parser output --
+        NOT ``execute run``'s -- so this genuinely exercises the `baton run`
+        CLI surface's own flag names and defaults."""
+        return argparse.Namespace(
+            plan=plan,
+            task_id=task_id,
+            max_parallel=3,
+            max_steps=2000,
+            dry_run=dry_run,
+            resume=False,
+        )
+
+    def _two_step_plan_dict(self, task_id: str) -> dict[str, Any]:
+        return {
+            **_MINIMAL_PLAN,
+            "task_id": task_id,
+            "phases": [
+                {
+                    "phase_id": 1,
+                    "name": "Phase 1",
+                    "steps": [
+                        {
+                            "step_id": "1.1",
+                            "agent_name": "backend-engineer",
+                            "task_description": "Step one",
+                            "model": "sonnet",
+                        },
+                        {
+                            "step_id": "1.2",
+                            "agent_name": "test-engineer",
+                            "task_description": "Step two",
+                            "model": "sonnet",
+                        },
+                    ],
+                }
+            ],
+        }
+
+    @pytest.mark.parametrize("surface", ["canonical", "compat"])
+    def test_resumable_status_is_resumed_not_restarted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture, surface: str,
+    ) -> None:
+        """Both surfaces must resume (not restart) an in-progress execution
+        and dispatch only the remaining step, previewing it identically in
+        dry-run mode."""
+        task_id = f"parity-resume-{surface}"
+        plan_dict = self._two_step_plan_dict(task_id)
+        plan_obj = MachinePlan.from_dict(plan_dict)
+
+        seed_engine = self._seed_engine(tmp_path, task_id, plan_obj)
+        seed_engine.record_step_result("1.1", "backend-engineer", status="complete", outcome="done")
+        assert seed_engine.status().get("status") == "running"
+
+        plan_path = tmp_path / f"plan-{surface}.json"
+        plan_path.write_text(json.dumps(plan_dict), encoding="utf-8")
+        storage = _FakeStorage()
+
+        with (
+            patch(f"{_EXECUTE_MOD}._resolve_context_root", return_value=tmp_path),
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=storage),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+        ):
+            if surface == "canonical":
+                args = _make_args(str(plan_path), dry_run=True, task_id=task_id)
+                _handle_run(args)
+            else:
+                args = self._compat_args(str(plan_path), task_id=task_id, dry_run=True)
+                _run_mod.handler(args)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Resuming execution" in output
+        assert task_id in output
+        assert "1.2" in output
+
+        final_engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        final_state = final_engine._load_execution()
+        assert final_state is not None
+        complete_ids = {r.step_id for r in final_state.step_results if r.status == "complete"}
+        assert complete_ids == {"1.1"}
+
+    @pytest.mark.parametrize("surface", ["canonical", "compat"])
+    def test_terminal_status_refuses_restart(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture, surface: str,
+    ) -> None:
+        """Both surfaces must refuse to restart a terminal execution rather
+        than silently overwriting recorded history."""
+        task_id = f"parity-terminal-{surface}"
+        plan_dict = {**_MINIMAL_PLAN, "task_id": task_id}
+        plan_obj = MachinePlan.from_dict(plan_dict)
+
+        seed_engine = self._seed_engine(tmp_path, task_id, plan_obj)
+        seed_engine.record_step_result("1.1", "backend-engineer", status="complete", outcome="done")
+        seed_engine.complete()
+        assert seed_engine.status().get("status") == "complete"
+
+        plan_path = tmp_path / f"plan-{surface}.json"
+        plan_path.write_text(json.dumps(plan_dict), encoding="utf-8")
+        storage = _FakeStorage()
+
+        with (
+            patch(f"{_EXECUTE_MOD}._resolve_context_root", return_value=tmp_path),
+            patch(f"{_EXECUTE_MOD}.get_project_storage", return_value=storage),
+            patch(f"{_EXECUTE_MOD}.ContextManager"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            if surface == "canonical":
+                args = _make_args(str(plan_path), dry_run=True, task_id=task_id)
+                _handle_run(args)
+            else:
+                args = self._compat_args(str(plan_path), task_id=task_id, dry_run=True)
+                _run_mod.handler(args)
+
+        assert exc_info.value.code != 0
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "already" in output.lower()
+        assert "complete" in output.lower()
+
+        final_engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        final_state = final_engine._load_execution()
+        assert final_state is not None
+        assert final_state.status == "complete"

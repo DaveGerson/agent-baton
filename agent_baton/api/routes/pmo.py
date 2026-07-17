@@ -36,6 +36,13 @@ from agent_baton.api.deps import get_bus, get_central_store, get_forge_session, 
 from agent_baton.api.planner_errors import plan_quality_error_detail
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.engine.planning.stages.validation import PlanQualityError
+from agent_baton.models.execution import ActionType
+from agent_baton.core.runtime.decisions import (
+    DecisionManager,
+    apply_decision_resolution,
+    parse_decision_id,
+    resume_task_headless,
+)
 from agent_baton.api.models.requests import (
     ApproveForgeRequest,
     BatchResolveRequest,
@@ -51,6 +58,7 @@ from agent_baton.api.models.requests import (
     RegenerateRequest,
     RegisterProjectRequest,
     RequestReviewRequest,
+    ResolveDecisionRequest,
     RetryStepRequest,
     SkipStepRequest,
 )
@@ -62,6 +70,7 @@ from agent_baton.api.models.responses import (
     ApprovalLogResponse,
     ChangelistResponse,
     CreatePrResponse,
+    DecisionListResponse,
     ExecuteCardResponse,
     ExecutionControlResponse,
     ExternalItemResponse,
@@ -79,6 +88,7 @@ from agent_baton.api.models.responses import (
     PmoProjectResponse,
     PmoSignalResponse,
     ProgramHealthResponse,
+    ResolveResponse,
 )
 from agent_baton.core.pmo.forge import ForgeSession
 from agent_baton.core.pmo.scanner import PmoScanner
@@ -815,6 +825,15 @@ async def forge_plan(
         except asyncio.QueueFull:
             pass
 
+    # Phase 7 "Turn PMO into the director console": stamp manager_mode onto
+    # the plan the same way `baton plan --manager-mode` does (see
+    # cli/commands/execution/plan_cmd.py) -- the flag rides in the returned
+    # plan dict so the UI can preview/edit it, and POST /pmo/forge/approve
+    # later reads whatever value ends up on that (possibly user-edited)
+    # dict, not this request field again.
+    if req.manager_mode:
+        plan.manager_mode = True
+
     return ForgePlanResponse(session_id=session_id, plan=plan.to_dict())
 
 
@@ -839,13 +858,19 @@ async def forge_approve(
         store: Injected PMO store singleton (to resolve project path).
 
     Returns:
-        ``{"saved": true, "path": "<plan.json path>"}``
+        ``{"saved": true, "path": "<plan.json path>", "manager_mode": ...,
+        "manager_revision": ...}``
 
     Raises:
         HTTPException 400: If the plan dict is malformed.
         HTTPException 404: If the specified project is not registered.
-        HTTPException 500: If writing the plan files fails.
+        HTTPException 422: If the plan is manager_mode and its manager-mode
+            config (project ``.claude/baton.yaml``) is invalid.
+        HTTPException 500: If writing the plan files, or building the
+            manager-mode artifact set, fails.
     """
+    from pathlib import Path
+
     project = store.get_project(req.project_id)
     if project is None:
         raise HTTPException(
@@ -857,19 +882,65 @@ async def forge_approve(
         from agent_baton.models.execution import MachinePlan
 
         plan = MachinePlan.from_dict(req.plan)
-        saved_path = forge.save_plan(plan, project)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid plan payload: {exc}",
         ) from exc
+
+    # Phase 7 "Turn PMO into the director console": Forge calls the exact
+    # same ManagerModePlanner post-processing CLI planning uses
+    # (`baton plan --manager-mode --save`) so a manager-mode plan created
+    # via the PMO ends up with the identical, version-consistent sidecar
+    # set the manager-mode read API (GET /pmo/manager/{card_id}/...)
+    # exposes -- see ForgeSession.save_plan's docstring for the exact
+    # ordering contract.
+    manager_config = None
+    if plan.manager_mode:
+        from agent_baton.core.config.manager import ManagerConfig, ManagerConfigError
+
+        project_root = Path(project.path)
+        try:
+            if ManagerConfig.find_config_file(project_root) is not None:
+                manager_config = ManagerConfig.load(project_root)
+            else:
+                manager_config = ManagerConfig()
+        except ManagerConfigError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid manager config for project '{req.project_id}': {exc}",
+            ) from exc
+
+    try:
+        saved_path = forge.save_plan(plan, project, manager_config=manager_config)
     except Exception as exc:
+        from agent_baton.core.manager.rebuild import ManagerArtifactPublishError
+
+        if isinstance(exc, ManagerArtifactPublishError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         raise HTTPException(
             status_code=500,
             detail=f"Failed to save plan: {exc}",
         ) from exc
 
-    return ForgeApproveResponse(saved=True, path=str(saved_path))
+    manager_revision: int | None = None
+    if plan.manager_mode:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.rebuild import load_revision_manifest
+
+        context_root = Path(project.path) / ".claude" / "team-context"
+        manifest = load_revision_manifest(
+            ManagerArtifactPaths(context_root, plan.task_id)
+        )
+        if manifest is not None:
+            manager_revision = int(manifest.get("revision", 0) or 0)
+
+    return ForgeApproveResponse(
+        saved=True,
+        path=str(saved_path),
+        manager_mode=bool(plan.manager_mode),
+        manager_revision=manager_revision,
+    )
 
 
 @router.post("/pmo/forge/interview", response_model=InterviewResponse)
@@ -1542,6 +1613,171 @@ async def skip_step(
     )
 
 
+# ---------------------------------------------------------------------------
+# Paused-task decision inbox (per-card)
+#
+# Headless execution launched by POST /pmo/execute/{card_id} pauses on an
+# APPROVAL, FEEDBACK, or INTERACT action by recording a durable pending
+# decision (see cli/commands/execution/execute.py::_run_loop) rather than
+# exiting as a failed/completed job.  These two endpoints are the PMO-scoped
+# counterpart of the generic /decisions API (api/routes/decisions.py):
+# generic /decisions is bound to a single team_context_root at server
+# startup, which does not work for a multi-project PMO board where each
+# card can belong to a different project root.  These endpoints resolve
+# the card's own project root per-request instead, exactly like
+# /pmo/gates/pending and /pmo/gates/{task_id}/approve already do for
+# APPROVAL-only decisions.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/pmo/execute/{card_id}/decisions",
+    response_model=DecisionListResponse,
+    summary="List pending human decisions for a card's paused execution",
+    tags=["pmo"],
+)
+async def list_card_decisions(
+    card_id: str,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+) -> DecisionListResponse:
+    """Return every decision request recorded for *card_id*.
+
+    GET /api/v1/pmo/execute/{card_id}/decisions
+
+    Reads the card's own project ``decisions`` directory -- the same one a
+    headless ``baton execute run`` subprocess launched for this card writes
+    to when it pauses on an APPROVAL, FEEDBACK, or INTERACT action.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (to resolve the project path).
+
+    Returns:
+        A ``DecisionListResponse`` with every decision (pending and
+        resolved) belonging to this card, most-recent first.
+
+    Raises:
+        HTTPException 404: If the card or its project cannot be resolved.
+    """
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+    dm = DecisionManager(decisions_dir=context_root / "decisions", safe_read_root=context_root)
+    items = [r for r in dm.list_all() if r.task_id == card_id]
+    return DecisionListResponse.from_dataclass_list(items)
+
+
+@router.post(
+    "/pmo/execute/{card_id}/decisions/{request_id}/resolve",
+    response_model=ResolveResponse,
+    summary="Resolve a pending decision and resume the paused execution",
+    tags=["pmo"],
+)
+async def resolve_card_decision(
+    card_id: str,
+    request_id: str,
+    body: ResolveDecisionRequest,
+    scanner: PmoScanner = Depends(get_pmo_scanner),
+    store: PmoStore = Depends(get_pmo_store),
+    bus: EventBus = Depends(get_bus),
+) -> ResolveResponse:
+    """Resolve a pending decision for *card_id* and resume its execution.
+
+    POST /api/v1/pmo/execute/{card_id}/decisions/{request_id}/resolve
+
+    Mirrors ``POST /decisions/{request_id}/resolve`` (see
+    ``api/routes/decisions.py``) but scoped to a single card's own project
+    root, so it works for any card on the PMO board regardless of which
+    project it belongs to.  After persisting the resolution:
+
+    1. The decision is applied directly to the execution engine (idempotent
+       -- a no-op if a live daemon worker already applied the same
+       resolution concurrently).
+    2. The task is resumed exactly once via a headless ``baton execute
+       run --task-id`` subprocess, guarded by a liveness check on the
+       execution's ``worker.pid`` so a retried or duplicate resolve never
+       launches two processes racing on the same task.
+
+    Args:
+        card_id: The task ID of the card (URL path parameter).
+        request_id: The decision request to resolve (URL path parameter).
+        body: Validated request body with the chosen option, optional
+            rationale, and optional resolved_by identity.
+        scanner: Injected ``PmoScanner`` singleton.
+        store: Injected PMO store singleton (to resolve the project path).
+        bus: The shared ``EventBus`` (for SSE event emission).
+
+    Returns:
+        A ``ResolveResponse`` confirming the resolution; ``execution_resumed``
+        is ``True`` when a worker is now (or was already) actively driving
+        the task forward.
+
+    Raises:
+        HTTPException 400: If the decision has already been resolved.
+        HTTPException 404: If the card, project, or decision cannot be
+            found, or the decision does not belong to this card.
+        HTTPException 409: If a concurrent modification prevented the
+            resolution from being written.
+    """
+    card, project_root, context_root = _resolve_worker_context(card_id, scanner, store)
+    dm = DecisionManager(
+        decisions_dir=context_root / "decisions", bus=bus, safe_read_root=context_root,
+    )
+
+    existing = dm.get(request_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Decision '{request_id}' not found for card '{card_id}'.",
+        )
+    if existing.task_id != card_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Decision '{request_id}' does not belong to card '{card_id}'.",
+        )
+    if existing.status != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Decision '{request_id}' cannot be resolved — "
+                f"current status is '{existing.status}'."
+            ),
+        )
+
+    resolved_by = body.resolved_by or "human"
+    success = dm.resolve(
+        request_id=request_id,
+        chosen_option=body.option,
+        rationale=body.rationale,
+        resolved_by=resolved_by,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Decision '{request_id}' could not be resolved (concurrent modification).",
+        )
+
+    execution_resumed = False
+    parsed = parse_decision_id(request_id)
+    if parsed is not None:
+        task_id, kind, parts = parsed
+        applied = apply_decision_resolution(
+            team_context_root=context_root,
+            task_id=task_id,
+            kind=kind,
+            parts=parts,
+            chosen_option=body.option,
+            rationale=body.rationale,
+            bus=bus,
+        )
+        if applied:
+            execution_resumed = resume_task_headless(
+                team_context_root=context_root, task_id=task_id,
+            )
+
+    return ResolveResponse(resolved=True, execution_resumed=execution_resumed)
+
+
 @router.get("/pmo/ado/search", response_model=AdoSearchResponse)
 async def ado_search(q: str = "") -> AdoSearchResponse:
     """Search Azure DevOps work items via the ADO adapter.
@@ -1859,6 +2095,13 @@ async def list_pending_gates(
                 storage=storage,
             )
             action = engine.next_action()
+            if action.action_type == ActionType.CHECKPOINT:
+                # Phase 6.2: a checkpoint is a paused-for-refresh boundary,
+                # not a pending gate/approval the PMO reviewer needs to act
+                # on.  The dedup guard already advanced when this fired, so
+                # a second call surfaces the real pending item (if any)
+                # instead of leaving this card's approval fields empty.
+                action = engine.next_action()
             action_dict = action.to_dict()
         except Exception:
             action_dict = {}

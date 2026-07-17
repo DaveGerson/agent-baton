@@ -72,6 +72,13 @@ class PlanDraft:
     risk_level_enum: "RiskLevel | None" = None
     git_strategy: str = ""
     planning_archetype: str = "phased"  # direct | phased | investigative
+    # Phase names RiskStage._ensure_safety_roster appended to host injected
+    # safety agents (e.g. "Audit" for auditor). EnrichmentStage's
+    # concern-splitting must never restructure these slots — they exist
+    # purely to give a reviewer-class agent a phase home, and splitting one
+    # replaces its oversight step with per-concern implementation steps
+    # (evaporating the auditor and hard-blocking the plan on audit_missing).
+    safety_appended_phases: list[str] = field(default_factory=list)
 
     # --- ResearchStage outputs ---
     research_concerns: list[tuple[str, str]] | None = None  # (marker, text) tuples from research
@@ -118,6 +125,39 @@ class PlanDraft:
     # Populated by ValidationStage.  See ``planning.stages.validation.PlanDefect``.
     plan_defects: list = field(default_factory=list)
 
+    # --- Talent-factory lifecycle inputs/outputs ---
+    # See agent_baton.core.engine.planning.capability_gap and
+    # docs/internal/talent-factory-contract.md.
+    #
+    # ``skip_init``/``allow_talent_builder`` are inputs (caller-controlled
+    # policy overrides — CLI ``--skip-init`` and manager config
+    # ``team.allow_talent_builder`` respectively); defaults preserve
+    # pre-existing planner behavior (generation permitted, not skipped).
+    # ``capability_gaps``/``talent_lifecycle_decisions`` are outputs
+    # populated by RosterStage and surfaced on
+    # ``plan.plan_diagnostics["capability_gaps"]`` by AssemblyStage.
+    skip_init: bool = False
+    allow_talent_builder: bool = True
+    # The resolved TalentFactoryConfig for this create_plan call (set by
+    # IntelligentPlanner.create_plan before the pre-pipeline runs; never
+    # None once the pipeline is running). RosterStage reads
+    # ``retry_budget``/``max_recursion_depth`` from it so the
+    # ``talent_factory`` policy section in baton.yaml actually governs the
+    # lifecycle decision — e.g. ``retry_budget: 0`` must forbid dispatch,
+    # not just be recorded. Untyped to keep draft.py import-light; the
+    # real type is agent_baton.core.config.manager.TalentFactoryConfig.
+    talent_factory_config: object = None
+    capability_gaps: list = field(default_factory=list)
+    talent_lifecycle_decisions: list = field(default_factory=list)
+    # Populated by IntelligentPlanner._run_talent_factory (post-RosterStage,
+    # pre-DecompositionStage) -- one dict per gap, recording what actually
+    # happened when a DISPATCH_TALENT_BUILDER (or fallback/queue/clarify)
+    # decision was acted on: dispatch outcome, validation result, and the
+    # resolved agent name (if any) substituted into ``resolved_agents``
+    # before phase construction. See
+    # agent_baton.core.engine.planning.talent_factory.TalentFactoryOutcome.
+    talent_factory_outcomes: list = field(default_factory=list)
+
     @classmethod
     def from_inputs(
         cls,
@@ -133,6 +173,8 @@ class PlanDraft:
         intervention_level: str = "low",
         default_model: str | None = None,
         gate_scope: "GateScope" = "focused",
+        skip_init: bool = False,
+        allow_talent_builder: bool = True,
     ) -> "PlanDraft":
         """Build a fresh draft from create_plan kwargs."""
         return cls(
@@ -147,4 +189,6 @@ class PlanDraft:
             intervention_level=intervention_level,
             default_model=default_model,
             gate_scope=gate_scope,
+            skip_init=skip_init,
+            allow_talent_builder=allow_talent_builder,
         )

@@ -160,6 +160,7 @@ async def _run_daemon_with_api(
     from agent_baton.api.server import create_app
     from agent_baton.core.events.bus import EventBus
     from agent_baton.core.runtime.context import ExecutionContext
+    from agent_baton.core.runtime.decisions import DecisionManager
     from agent_baton.core.runtime.signals import SignalHandler
     from agent_baton.core.runtime.worker import TaskWorker
     import uvicorn
@@ -195,12 +196,26 @@ async def _run_daemon_with_api(
     if token_budget > 0:
         engine._token_budget = token_budget
 
+    # Persistent, disk-backed DecisionManager -- always injected (see the
+    # matching comment in WorkerSupervisor.start()) so a human-required
+    # GATE/APPROVAL/FEEDBACK/INTERACT is routed to a durable pending
+    # decision rather than auto-approved merely because this call site
+    # forgot to wire one up.  ``api/deps.py`` binds the API's shared
+    # singleton DecisionManager to this same ``team_context_root/decisions``
+    # path, so the REST decisions API sees the same requests.
+    decision_manager = DecisionManager(
+        decisions_dir=team_context_root / "decisions",
+        bus=bus,
+        safe_read_root=team_context_root,
+    )
+
     worker = TaskWorker(
         engine=engine,
         launcher=launcher,
         bus=bus,
         max_parallel=max_parallel,
         max_steps=max_steps or None,
+        decision_manager=decision_manager,
     )
 
     # ── FastAPI app (shares the same bus) ────────────────────────────────────

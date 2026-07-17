@@ -32,7 +32,7 @@ from pathlib import Path
 from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
-from agent_baton.core.runtime.decisions import DecisionManager
+from agent_baton.core.runtime.decisions import DecisionManager, deterministic_decision_id
 from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.scheduler import StepScheduler, SchedulerConfig
 from agent_baton.models.decision import DecisionRequest
@@ -146,6 +146,25 @@ class TaskWorker:
             if action.action_type == ActionType.FAILED:
                 return action.message
 
+            if action.action_type == ActionType.CHECKPOINT:
+                # Phase 6.2: a checkpoint is a paused-for-refresh boundary,
+                # NOT completion or failure -- the engine already persisted
+                # the handoff and advanced the dedup markers before
+                # returning this action (see
+                # ExecutionEngine._emit_checkpoint).  Stop this worker's
+                # loop cleanly (mirroring the --max-steps ceiling above) so
+                # a fresh daemon/CLI session can pick the execution back up
+                # via the handoff's resume_command without redispatching
+                # completed work or losing decisions/context.
+                resume_cmd = (
+                    (action.checkpoint_handoff or {}).get("resume_command")
+                    or f"baton execute resume --task-id {self._engine.status().get('task_id', '')}"
+                )
+                return (
+                    f"Execution checkpointed (paused for refresh): "
+                    f"{action.message} Resume with: {resume_cmd}"
+                )
+
             if action.action_type == ActionType.WAIT:
                 # Parallel steps are still in-flight (from a previous
                 # iteration).  Sleep briefly and re-check.
@@ -154,6 +173,14 @@ class TaskWorker:
 
             if action.action_type == ActionType.APPROVAL:
                 await self._handle_approval(action)
+                continue
+
+            if action.action_type == ActionType.FEEDBACK:
+                await self._handle_feedback(action)
+                continue
+
+            if action.action_type == ActionType.INTERACT:
+                await self._handle_interact(action)
                 continue
 
             if action.action_type == ActionType.GATE:
@@ -194,6 +221,44 @@ class TaskWorker:
                             _wt_path = _wt_dict.get("path") or ""
                             if _wt_path:
                                 _worktree_paths[a.step_id] = _wt_path
+
+                        # Phase 3 "Make scope contracts authoritative" (3.2):
+                        # forward the dispatched PlanStep's scope contract to
+                        # the launcher so allowed_paths/blocked_paths are
+                        # enforced as a real subprocess control, not just
+                        # prose in the delegation prompt. Best-effort and
+                        # duck-typed: launchers that don't implement
+                        # configure_step_scope (DryRunLauncher, test doubles)
+                        # are silently skipped, and any lookup failure here
+                        # must never block dispatch.
+                        _configure_scope = getattr(
+                            self._launcher, "configure_step_scope", None
+                        )
+                        if (
+                            _configure_scope is not None
+                            and _wt_state is not None
+                            and _wt_state.plan is not None
+                            and getattr(a, "step_type", "") != "automation"
+                        ):
+                            _plan_step = next(
+                                (
+                                    s
+                                    for p in _wt_state.plan.phases
+                                    for s in p.steps
+                                    if s.step_id == a.step_id
+                                ),
+                                None,
+                            )
+                            if _plan_step is not None:
+                                from agent_baton.core.engine.planning.scope_contract import (
+                                    is_write_capable,
+                                )
+                                _configure_scope(
+                                    a.step_id,
+                                    list(_plan_step.allowed_paths),
+                                    list(_plan_step.blocked_paths),
+                                    write_capable=is_write_capable(_plan_step.step_type),
+                                )
                     except Exception:
                         pass
 
@@ -546,21 +611,28 @@ class TaskWorker:
             )
             return
 
-        # Create decision request and persist it to disk.
+        # Create decision request and persist it to disk.  A deterministic
+        # request_id (keyed on task_id/phase_id) means a worker restart that
+        # re-enters this gate reuses the same pending request instead of
+        # creating a duplicate, and lets other surfaces (the decisions REST
+        # API, ``baton decide``) recover the phase_id from the ID alone.
         task_id = self._engine.status().get("task_id", "")
-        req = DecisionRequest.create(
-            task_id=task_id,
-            decision_type="gate_approval",
-            summary=getattr(action, "message", f"Gate '{gate_type}' requires approval"),
-            options=["approve", "reject"],
-        )
-        self._decision_manager.request(req)
+        request_id = deterministic_decision_id(task_id, "gate", phase_id)
+        if self._decision_manager.get(request_id) is None:
+            req = DecisionRequest(
+                request_id=request_id,
+                task_id=task_id,
+                decision_type="gate_approval",
+                summary=getattr(action, "message", f"Gate '{gate_type}' requires approval"),
+                options=["approve", "reject"],
+            )
+            self._decision_manager.request(req)
 
         # Poll filesystem for resolution.
         while True:
-            resolved = self._decision_manager.get(req.request_id)
+            resolved = self._decision_manager.get(request_id)
             if resolved is not None and resolved.status == "resolved":
-                res_data = self._decision_manager.get_resolution(req.request_id)
+                res_data = self._decision_manager.get_resolution(request_id)
                 if res_data is not None:
                     passed = res_data.get("chosen_option") == "approve"
                 else:
@@ -606,18 +678,21 @@ class TaskWorker:
             return
 
         task_id = self._engine.status().get("task_id", "")
-        req = DecisionRequest.create(
-            task_id=task_id,
-            decision_type="phase_approval",
-            summary=getattr(action, "message", f"Phase {phase_id} requires approval"),
-            options=["approve", "reject", "approve-with-feedback"],
-        )
-        self._decision_manager.request(req)
+        request_id = deterministic_decision_id(task_id, "approval", phase_id)
+        if self._decision_manager.get(request_id) is None:
+            req = DecisionRequest(
+                request_id=request_id,
+                task_id=task_id,
+                decision_type="phase_approval",
+                summary=getattr(action, "message", f"Phase {phase_id} requires approval"),
+                options=["approve", "reject", "approve-with-feedback"],
+            )
+            self._decision_manager.request(req)
 
         while True:
-            resolved = self._decision_manager.get(req.request_id)
+            resolved = self._decision_manager.get(request_id)
             if resolved is not None and resolved.status == "resolved":
-                res_data = self._decision_manager.get_resolution(req.request_id)
+                res_data = self._decision_manager.get_resolution(request_id)
                 if res_data is not None:
                     result = res_data.get("chosen_option", "approve")
                     feedback = res_data.get("rationale") or ""
@@ -637,6 +712,143 @@ class TaskWorker:
                     result="reject",
                     feedback="Approval aborted: shutdown requested",
                 )
+                return
+
+            await asyncio.sleep(self._gate_poll_interval)
+
+    async def _handle_feedback(self, action: object) -> None:
+        """Handle a FEEDBACK action.
+
+        Routes the first unanswered feedback question through the
+        :class:`DecisionManager` when configured; otherwise auto-selects the
+        first option (mirroring GATE/APPROVAL's "no decision manager
+        configured" fallback) so a bare ``TaskWorker`` used without a
+        supervisor never busy-loops.  ``next_action()`` re-presents any
+        remaining questions on subsequent calls, so this only needs to
+        resolve one question per invocation.
+        """
+        phase_id = getattr(action, "phase_id", 0)
+        questions = getattr(action, "feedback_questions", None) or []
+        if not questions:
+            # Nothing to answer -- nothing this handler can do; returning
+            # without recording anything lets the caller re-evaluate
+            # next_action() rather than spin forever inside this method.
+            return
+
+        question = questions[0]
+        question_id = (
+            question.get("question_id", "")
+            if isinstance(question, dict)
+            else getattr(question, "question_id", "")
+        )
+        options = (
+            question.get("options", [])
+            if isinstance(question, dict)
+            else getattr(question, "options", [])
+        )
+
+        if self._decision_manager is None:
+            self._engine.record_feedback_result(
+                phase_id=phase_id, question_id=question_id, chosen_index=0,
+            )
+            return
+
+        task_id = self._engine.status().get("task_id", "")
+        request_id = deterministic_decision_id(task_id, "feedback", phase_id, question_id)
+        if self._decision_manager.get(request_id) is None:
+            req = DecisionRequest(
+                request_id=request_id,
+                task_id=task_id,
+                decision_type="feedback_response",
+                summary=getattr(
+                    action, "message",
+                    f"Feedback question '{question_id}' for phase {phase_id}",
+                ),
+                options=[str(i) for i in range(len(options))] or ["0"],
+            )
+            self._decision_manager.request(req)
+
+        while True:
+            resolved = self._decision_manager.get(request_id)
+            if resolved is not None and resolved.status == "resolved":
+                res_data = self._decision_manager.get_resolution(request_id)
+                chosen_index = 0
+                if res_data is not None:
+                    try:
+                        chosen_index = int(res_data.get("chosen_option", "0"))
+                    except (TypeError, ValueError):
+                        chosen_index = 0
+                self._engine.record_feedback_result(
+                    phase_id=phase_id,
+                    question_id=question_id,
+                    chosen_index=chosen_index,
+                )
+                return
+
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
+                # Nothing sensible to auto-pick; leave the question
+                # unanswered and let the caller decide whether to retry.
+                return
+
+            await asyncio.sleep(self._gate_poll_interval)
+
+    async def _handle_interact(self, action: object) -> None:
+        """Handle an INTERACT action.
+
+        Routes through the :class:`DecisionManager` when configured,
+        offering ``"done"`` (finalize the step using the agent's last
+        output, via :meth:`ExecutionDriver.complete_interaction`) plus
+        free-text input (via :meth:`ExecutionDriver.provide_interact_input`).
+        Without a configured manager, falls back to finalizing the
+        interaction immediately so a bare ``TaskWorker`` never busy-loops --
+        the same "no decision manager configured" fallback GATE/APPROVAL use.
+        """
+        step_id = getattr(action, "interact_step_id", "") or getattr(action, "step_id", "")
+
+        if self._decision_manager is None:
+            try:
+                self._engine.complete_interaction(step_id=step_id)
+            except Exception:
+                pass
+            return
+
+        task_id = self._engine.status().get("task_id", "")
+        # The ID must be turn-scoped: an interaction re-presents the SAME
+        # step_id on every turn, so a (task, step)-only ID would match turn
+        # 1's already-resolved decision on turn 2 and silently replay the
+        # same input forever without ever asking the human again.  The turn
+        # number is stable across a crash/restart at the same turn (it is
+        # derived from the persisted interaction history), so crash-resume
+        # still converges on one request per logical decision.
+        turn = getattr(action, "interact_turn", 0)
+        request_id = deterministic_decision_id(task_id, "interact", step_id, turn)
+        if self._decision_manager.get(request_id) is None:
+            req = DecisionRequest(
+                request_id=request_id,
+                task_id=task_id,
+                decision_type="interact_response",
+                summary=getattr(
+                    action, "message", f"Interactive step {step_id} awaiting human input",
+                ),
+                options=["done"],
+            )
+            self._decision_manager.request(req)
+
+        while True:
+            resolved = self._decision_manager.get(request_id)
+            if resolved is not None and resolved.status == "resolved":
+                res_data = self._decision_manager.get_resolution(request_id) or {}
+                chosen = res_data.get("chosen_option", "done")
+                if chosen == "done":
+                    self._engine.complete_interaction(step_id=step_id)
+                else:
+                    rationale = res_data.get("rationale") or chosen
+                    self._engine.provide_interact_input(
+                        step_id=step_id, input_text=rationale,
+                    )
+                return
+
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
                 return
 
             await asyncio.sleep(self._gate_poll_interval)

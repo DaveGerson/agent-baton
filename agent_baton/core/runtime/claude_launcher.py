@@ -46,6 +46,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent_baton.core.engine.planning.scope_contract import (
+    normalize_path_list,
+    paths_overlap,
+)
 from agent_baton.core.orchestration.registry import AgentRegistry
 from agent_baton.core.runtime._redaction import (
     _REDACT_PATTERNS,
@@ -117,6 +121,199 @@ def _redact_stderr(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Path-scope enforcement (Phase 3 "Make scope contracts authoritative", 3.2)
+# ---------------------------------------------------------------------------
+#
+# Converts a step's ``allowed_paths``/``blocked_paths`` scope contract into
+# a runtime control that is actually applied to the ``claude`` subprocess,
+# rather than the pre-existing ``ExecutionAction.path_enforcement`` bash
+# guard string, which only ever reached the interactive orchestrator loop
+# and only did anything if that agent remembered to wire it into a hook.
+# ``TaskWorker`` (see ``core/runtime/worker.py``) calls
+# ``ClaudeCodeLauncher.configure_step_scope`` once per DISPATCH action
+# before handing the step to the scheduler; ``launch()`` consumes it below.
+
+
+@dataclass(frozen=True)
+class _ResolvedPathScope:
+    """Normalized, filesystem-verified path scope for one launch."""
+
+    allowed: tuple[str, ...]
+    blocked: tuple[str, ...]
+    rejected: tuple[str, ...]  # raw entries dropped: malformed, traversal, or symlink escape
+
+
+def _filesystem_safe(repo_root: Path, rel_path: str) -> bool:
+    """True when *rel_path* (already lexically normalized, repo-relative,
+    no ``..``) does not escape *repo_root* once symlinks are resolved.
+
+    Lexical normalization (``normalize_scope_path``) already rejects ``..``
+    segments and absolute paths; this catches what a purely lexical check
+    cannot: an existing symlink *inside* the repo whose target points
+    outside it (e.g. ``allowed_paths=["app/link"]`` where
+    ``app/link -> /etc``). A nonexistent path (the common case -- an agent
+    about to create a new file) resolves safely because ``Path.resolve()``
+    only follows symlinks that actually exist on disk.
+    """
+    try:
+        root_resolved = repo_root.resolve(strict=False)
+        candidate_resolved = (repo_root / rel_path).resolve(strict=False)
+        candidate_resolved.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolve_path_scope(
+    effective_cwd: str,
+    allowed_paths: list[str],
+    blocked_paths: list[str],
+) -> _ResolvedPathScope:
+    """Normalize *allowed_paths*/*blocked_paths* against *effective_cwd*.
+
+    Applies, in order: lexical normalization + traversal/absolute-path
+    rejection (``normalize_path_list``), filesystem symlink-escape
+    rejection (:func:`_filesystem_safe`), then blocked-path precedence
+    (any allowed entry that collides with a blocked entry is dropped from
+    the effective allowed set -- a path is never simultaneously permitted
+    and forbidden).
+    """
+    repo_root = Path(effective_cwd)
+    rejected: list[str] = []
+
+    lexical_allowed = normalize_path_list(allowed_paths)
+    lexical_blocked = normalize_path_list(blocked_paths)
+    # normalize_path_list() silently drops malformed/traversal/absolute
+    # entries; surface exactly which raw entries it dropped so operators
+    # can see what was rejected rather than silently narrowed.
+    for raw in (allowed_paths or []) + (blocked_paths or []):
+        if raw and raw.strip() and not normalize_path_list([raw]):
+            rejected.append(raw)
+
+    safe_allowed: list[str] = []
+    for p in lexical_allowed:
+        if _filesystem_safe(repo_root, p):
+            safe_allowed.append(p)
+        else:
+            rejected.append(p)
+    safe_blocked: list[str] = []
+    for p in lexical_blocked:
+        if _filesystem_safe(repo_root, p):
+            safe_blocked.append(p)
+        else:
+            rejected.append(p)
+
+    effective_allowed = [
+        p for p in safe_allowed if not any(paths_overlap(p, b) for b in safe_blocked)
+    ]
+
+    return _ResolvedPathScope(
+        allowed=tuple(effective_allowed),
+        blocked=tuple(safe_blocked),
+        rejected=tuple(rejected),
+    )
+
+
+def _build_bash_path_guard(scope: _ResolvedPathScope) -> str | None:
+    """Bash ``PreToolUse`` guard command for *scope*, or ``None`` when the
+    scope has no allowed/blocked entries left to enforce.
+
+    Stronger than ``agent_baton.core.engine.dispatcher.PromptDispatcher.
+    build_path_enforcement`` (the pre-existing, purely-advisory version):
+    every path here is already repo-root-normalized and regex-escaped
+    (``re.escape``, not a naive ``.``/``*`` string replace), and
+    blocked-path precedence has already been resolved upstream in
+    :func:`_resolve_path_scope`.
+
+    Symlink-escape resistance (Phase 3 "Make scope contracts
+    authoritative", 3.3 threat model): :func:`_resolve_path_scope` /
+    :func:`_filesystem_safe` only reject an ``allowed_paths`` entry that
+    is *already* a symlink escaping the repo at launch time -- they say
+    nothing about a symlink an agent *creates* mid-session (e.g.
+    ``allowed_paths=["app"]``, then a first Write creates
+    ``app/link -> /etc``, and a second Write targets
+    ``app/link/passwd``). A guard that only string-matches
+    ``$CLAUDE_TOOL_INPUT_FILE_PATH`` against the allowed/blocked regex
+    would let that second write through: the literal path string starts
+    with ``app/``, even though the real destination the write resolves to
+    is outside the repository entirely. The guard below first canonicalizes
+    ``$FILE`` with ``readlink -f`` (falling back to ``realpath -m``, then
+    to the raw path when neither tool is present) relative to the
+    subprocess's own working directory -- which is always the repo/worktree
+    root :func:`_resolve_path_scope` normalized *scope* against -- so the
+    allowed/blocked regex below is evaluated against the write's REAL,
+    symlink-resolved destination, not the string an agent supplied. A
+    resolved path that escapes the working directory entirely is always
+    blocked, regardless of *scope*.
+    """
+    if not scope.allowed and not scope.blocked:
+        return None
+    parts: list[str] = []
+    if scope.allowed:
+        allowed_pattern = "|".join(re.escape(p) for p in scope.allowed)
+        parts.append(
+            f'if ! echo "$FILE" | grep -qE "^({allowed_pattern})(/|$)"; then '
+            'echo "BLOCKED: write outside scope contract allowed_paths: $FILE" >&2; exit 2; fi'
+        )
+    if scope.blocked:
+        blocked_pattern = "|".join(re.escape(p) for p in scope.blocked)
+        parts.append(
+            f'if echo "$FILE" | grep -qE "^({blocked_pattern})(/|$)"; then '
+            'echo "BLOCKED: write to scope contract blocked_paths: $FILE" >&2; exit 2; fi'
+        )
+    inner = "; ".join(parts)
+    # Canonicalize $FILE (resolving any symlink -- pre-existing OR created
+    # earlier in the same session) against the subprocess cwd (the repo /
+    # worktree root) before running the allowed/blocked checks above, and
+    # reject anything whose real destination escapes that root outright.
+    resolve = (
+        'ROOT="$(pwd -P)"; '
+        'case "$FILE" in /*) RAW="$FILE" ;; *) RAW="$ROOT/$FILE" ;; esac; '
+        'RESOLVED="$(readlink -f -- "$RAW" 2>/dev/null'
+        ' || realpath -m -- "$RAW" 2>/dev/null || echo "$RAW")"; '
+        'case "$RESOLVED" in '
+        '"$ROOT"/*) FILE="${RESOLVED#"$ROOT"/}" ;; '
+        '"$ROOT") FILE="." ;; '
+        '*) echo "BLOCKED: write escapes repository root via symlink or '
+        'absolute path: $CLAUDE_TOOL_INPUT_FILE_PATH -> $RESOLVED" >&2; exit 2 ;; '
+        'esac'
+    )
+    return (
+        "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; "
+        f"{resolve}; {inner}; exit 0'"
+    )
+
+
+def _build_scope_enforcement_args(scope: _ResolvedPathScope) -> list[str]:
+    """Build the ``claude`` CLI argv fragment that actually enforces *scope*.
+
+    Delivers the PreToolUse guard via ``--settings <inline JSON>`` -- an
+    override merged with whatever ``.claude/settings.json`` /
+    ``settings.local.json`` the subprocess would otherwise discover in its
+    cwd (see references/hooks-enforcement.md), with zero filesystem writes
+    of our own (no temp settings file to create or clean up). This is the
+    "actually applied" control: unlike the pre-existing
+    ``ExecutionAction.path_enforcement`` string, this is on the literal
+    subprocess argv the launcher execs -- there is no step where a driving
+    agent can forget to wire it up.
+    """
+    guard = _build_bash_path_guard(scope)
+    if guard is None:
+        return []
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Write|Edit|MultiEdit",
+                    "hooks": [{"type": "command", "command": guard}],
+                }
+            ]
+        }
+    }
+    return ["--settings", json.dumps(settings)]
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
@@ -136,6 +333,18 @@ _DEFAULT_ENV_PASSTHROUGH: list[str] = [
     "BATON_DB_PATH",
     "BATON_TASK_ID",
     "BATON_TEAM_CONTEXT_ROOT",
+    # Phase 4 4.2 (team runtime contract): base-level passthrough for
+    # BATON_TEAM_MEMBER_ID so a caller-set value survives if present in the
+    # parent os.environ. launch() below always OVERWRITES this with the
+    # per-call step_id when non-empty (see the "team runtime contract" note
+    # in launch()'s docstring) — that per-call value is authoritative
+    # because, for a dispatched team member, `step_id IS member.member_id`
+    # by construction (ExecutionEngine._team_dispatch_action). Deriving it
+    # from the per-call argument (rather than relying solely on os.environ)
+    # avoids a race between concurrently-dispatched team members sharing
+    # one process's environment (StepScheduler.dispatch_batch launches
+    # all of a wave's steps concurrently via asyncio.gather).
+    "BATON_TEAM_MEMBER_ID",
 ]
 
 
@@ -479,7 +688,47 @@ class ClaudeCodeLauncher:
         # Set operations are safe without locks because asyncio is single-threaded.
         self._active_processes: set[asyncio.subprocess.Process] = set()
 
+        # Phase 3 "Make scope contracts authoritative" (3.2): step_id ->
+        # (allowed_paths, blocked_paths, write_capable), set via
+        # configure_step_scope() and consumed (popped) by the matching
+        # launch() call. Callers that never call configure_step_scope get
+        # zero behavior change -- enforcement only activates when a caller
+        # (TaskWorker) opts a step in.
+        self._step_scopes: dict[str, tuple[list[str], list[str], bool]] = {}
+
     # ── Public API ───────────────────────────────────────────────────────────
+
+    def configure_step_scope(
+        self,
+        step_id: str,
+        allowed_paths: list[str] | None,
+        blocked_paths: list[str] | None = None,
+        *,
+        write_capable: bool = True,
+    ) -> None:
+        """Register the scope contract *step_id* must be dispatched under.
+
+        One-shot: consumed by the next matching ``launch()`` call so scope
+        configured for one step can never leak onto a later, unrelated
+        step_id. See ``core/runtime/worker.py``'s ``TaskWorker`` for the
+        (only) production call site -- one call per DISPATCH action, using
+        the dispatched ``PlanStep``'s ``allowed_paths``/``blocked_paths``.
+
+        ``write_capable=True`` (the default) makes ``launch()`` fail
+        closed -- refuse to spawn the subprocess at all -- when the scope
+        normalizes to an empty allowed set; pass ``False`` for
+        intentionally read-only steps (see
+        ``agent_baton.core.engine.planning.scope_contract.
+        READ_ONLY_STEP_TYPES``) where an empty allowed set is the valid,
+        intentional representation of "this step does not write".
+        """
+        if not step_id:
+            return
+        self._step_scopes[step_id] = (
+            list(allowed_paths or []),
+            list(blocked_paths or []),
+            write_capable,
+        )
 
     async def launch(
         self,
@@ -500,27 +749,95 @@ class ClaudeCodeLauncher:
                 directory as its working directory instead of the default
                 ``config.working_directory``.  Used by Wave 1.3 worktree
                 isolation to run each agent inside its isolated worktree.
+                Every git inspection tied to this launch (pre/post HEAD
+                capture, diff/file discovery) also targets this directory —
+                never the parent repository — so a commit made inside an
+                isolated worktree is detected from that worktree.
             task_id: Optional task identifier propagated to the subprocess as
                 ``BATON_TASK_ID`` when ``cwd_override`` is set, so the
                 subagent's bead/state writes target the correct task.
+
+        Team runtime contract (Phase 4 4.2, docs/internal/team-runtime-
+        contract.md §9.1): when *step_id* is non-empty, it is injected into
+        the subprocess as ``BATON_TEAM_MEMBER_ID`` — for a team member's
+        dispatch, ``step_id`` IS the member's ``member_id`` by construction
+        (see ``ExecutionEngine._team_dispatch_action``, which sets
+        ``ExecutionAction.step_id=member.member_id`` for each flattened team
+        member). This lets a dispatched member's ``baton team <verb>`` calls
+        omit ``--member-id`` and still resolve the caller's own identity.
+        For a non-team (solo) step, ``step_id`` is the plan step's own id
+        (e.g. ``"4.2"``) — the env var is still set, but harmlessly unused,
+        since no such member is registered in any team and a team-tool call
+        against it fails closed with a clear "member not found" error.
         """
         start = time.monotonic()
-        pre_commit = await self._git_rev_parse()
+        # The launch's effective working directory: cwd_override takes
+        # precedence over the configured directory (Wave 1.3 worktree
+        # isolation).  ALL git inspection associated with this launch must
+        # use this same directory — never the parent repo's
+        # config.working_directory — otherwise a commit made inside an
+        # isolated worktree is invisible to pre/post HEAD capture and gets
+        # silently discarded by callers that clean up "commit-less" worktrees.
+        effective_cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+
+        # ── Path-scope enforcement (Phase 3 "Make scope contracts
+        # authoritative", 3.2) — runs BEFORE any git probing or subprocess
+        # spawn so a fail-closed refusal never touches git or the process
+        # table. See configure_step_scope()'s docstring for the contract.
+        scope_extra_cmd_args: list[str] = []
+        scope_spec = self._step_scopes.pop(step_id, None) if step_id else None
+        if scope_spec is not None:
+            raw_allowed, raw_blocked, write_capable = scope_spec
+            scope = _resolve_path_scope(effective_cwd, raw_allowed, raw_blocked)
+            if scope.rejected:
+                logger.warning(
+                    "ClaudeCodeLauncher: dropped %d unsafe allowed/blocked "
+                    "path(s) for step %s (traversal, malformed, or symlink "
+                    "escape outside %s): %s",
+                    len(scope.rejected), step_id, effective_cwd, scope.rejected,
+                )
+            if write_capable and not scope.allowed:
+                # Fail closed: a write-capable step with no enforceable
+                # write scope is never dispatched. Converts the previously
+                # advisory-only guardrail into a hard runtime control --
+                # no subprocess is spawned, no git probe runs.
+                return LaunchResult(
+                    step_id=step_id,
+                    agent_name=agent_name,
+                    status="failed",
+                    error=(
+                        "PATH_SCOPE_EMPTY: step declares a write-capable "
+                        "scope contract but allowed_paths is empty after "
+                        f"normalization (raw allowed_paths={raw_allowed!r}, "
+                        f"rejected={list(scope.rejected)!r}) — refusing to "
+                        "dispatch the subprocess (fail-closed)."
+                    ),
+                )
+            scope_extra_cmd_args = _build_scope_enforcement_args(scope)
+
+        pre_commit = await self._git_rev_parse(effective_cwd)
 
         agent: AgentDefinition | None = None
         if self._registry is not None:
             agent = self._registry.get(agent_name)
         cmd = self._build_command(model, agent, mcp_servers=mcp_servers)
+        cmd.extend(scope_extra_cmd_args)
         env = self._build_env()
         # bd-37a9: when running in a Wave 1.3 worktree, inject pointers to
         # the parent project's state so the subagent's upward-walk db
         # discovery doesn't latch onto the worktree-local empty baton.db.
         if cwd_override:
             self._inject_parent_state_env(env, task_id=task_id)
+        # Phase 4 4.2 (team runtime contract): authoritative, race-free
+        # BATON_TEAM_MEMBER_ID injection — see the "Team runtime contract"
+        # note on this method's docstring for why this overwrites (rather
+        # than merely falling back to) whatever _build_env()'s passthrough
+        # of the parent os.environ produced.
+        if step_id:
+            env["BATON_TEAM_MEMBER_ID"] = step_id
         timeout = self._resolve_timeout(model)
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
-        # Wave 1.3: cwd_override takes precedence over the configured directory.
-        cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+        cwd = effective_cwd
 
         if use_stdin:
             # Large prompt — deliver via stdin; drop the -p flag from the command.
@@ -559,12 +876,16 @@ class ClaudeCodeLauncher:
 
             break
 
-        # Populate git fields if the agent committed anything.
+        # Populate git fields if the agent committed anything.  Probed from
+        # the same effective_cwd used for pre_commit above, and for the
+        # subprocess launch itself — never the parent repository.
         if result.status == "complete" and pre_commit:
-            post_commit = await self._git_rev_parse()
+            post_commit = await self._git_rev_parse(effective_cwd)
             if post_commit and post_commit != pre_commit:
                 result.commit_hash = post_commit
-                result.files_changed = await self._git_diff_files(pre_commit, post_commit)
+                result.files_changed = await self._git_diff_files(
+                    pre_commit, post_commit, effective_cwd
+                )
 
         return result
 
@@ -892,8 +1213,17 @@ class ClaudeCodeLauncher:
         lower = stderr.lower()
         return "rate limit" in lower or "429" in lower
 
-    async def _git_rev_parse(self) -> str:
-        """Return the current HEAD commit hash, or ``""`` on failure."""
+    async def _git_rev_parse(self, cwd: str) -> str:
+        """Return the current HEAD commit hash in *cwd*, or ``""`` on failure.
+
+        Args:
+            cwd: The launch's effective working directory (``cwd_override``
+                when set, otherwise ``config.working_directory``).  Callers
+                MUST pass the same effective cwd used for the subprocess
+                launch itself — probing a different directory (e.g. the
+                parent repository while the agent worked in an isolated
+                worktree) silently hides real commits.
+        """
         if self._git_bin is None:
             return ""
         try:
@@ -901,7 +1231,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "rev-parse", "HEAD",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode == 0:
@@ -910,8 +1240,16 @@ class ClaudeCodeLauncher:
             pass
         return ""
 
-    async def _git_diff_files(self, from_commit: str, to_commit: str) -> list[str]:
-        """Return files changed between *from_commit* and *to_commit*."""
+    async def _git_diff_files(
+        self, from_commit: str, to_commit: str, cwd: str
+    ) -> list[str]:
+        """Return files changed between *from_commit* and *to_commit* in *cwd*.
+
+        Args:
+            cwd: The launch's effective working directory — see
+                :meth:`_git_rev_parse` for why this must match the cwd used
+                to capture *from_commit*/*to_commit*.
+        """
         if self._git_bin is None or not from_commit or not to_commit:
             return []
         try:
@@ -919,7 +1257,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "diff", "--name-only", from_commit, to_commit,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:

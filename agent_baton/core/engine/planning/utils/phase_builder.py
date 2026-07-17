@@ -227,10 +227,44 @@ def step_description(
 
 
 def _is_blocked_for_phase(agent_name: str, phase_name: str) -> bool:
-    """Return True if *agent_name* must not be assigned to *phase_name*."""
+    """Return True if *agent_name* must not be assigned to *phase_name*,
+    per the explicit ``PHASE_BLOCKED_ROLES`` table (e.g. architect on
+    Implement). Used by Passes 2 and 4 of ``assign_agents_to_phases``,
+    which intentionally tolerate a reviewer-class agent overflowing into
+    a work phase rather than dropping it from the plan entirely -- see
+    ``_is_blocked_for_pass3`` for the stricter check Pass 3 needs.
+    """
     base = agent_name.split("--")[0]
     blocked = PHASE_BLOCKED_ROLES.get(phase_name.lower(), set())
     return base in blocked
+
+
+def _is_blocked_for_pass3(agent_name: str, phase_name: str) -> bool:
+    """Stricter block-check for Pass 3 ("reuse best-fit from pool").
+
+    Pass 3 handles phases nothing else claimed -- typically because the
+    entire supplied roster is reviewer-class (e.g. a caller-supplied
+    ``--agents`` list of just ``code-reviewer``). Unlike Passes 2/4
+    (which only care about bounding overflow, and tolerate a reviewer
+    landing in a work phase as a last resort -- see
+    ``TestAgentOverflowToWorkPhases.test_review_phase_not_bloated``),
+    Pass 3 is reused as the ideal-role source for *every* phase that
+    resolves to a real step, including implement-type ones. Blocking
+    reviewer-class agents from implement-type phases here too
+    (``IMPLEMENT_PHASE_NAMES`` -- matching
+    ``ValidationStage._detect_defects``'s independent agent_phase_mismatch
+    check) forces Pass 3 down to its ``_PHASE_FALLBACK_AGENT`` fallback
+    (a real engineer) instead of assigning the sole reviewer to, say,
+    Draft -- previously assigned there (``PHASE_BLOCKED_ROLES["draft"]``
+    was empty) and then rejected by ValidationStage with no fallback
+    ever having been tried.
+    """
+    if _is_blocked_for_phase(agent_name, phase_name):
+        return True
+    return (
+        phase_name.lower() in IMPLEMENT_PHASE_NAMES
+        and is_reviewer_agent(agent_name)
+    )
 
 
 def assign_agents_to_phases(
@@ -297,14 +331,14 @@ def assign_agents_to_phases(
         best = None
         for role in ideal_roles:
             for agent in agents:
-                if agent.split("--")[0] == role and not _is_blocked_for_phase(agent, phase.name):
+                if agent.split("--")[0] == role and not _is_blocked_for_pass3(agent, phase.name):
                     best = agent
                     break
             if best:
                 break
         if best is None:
             for agent in agents:
-                if not _is_blocked_for_phase(agent, phase.name):
+                if not _is_blocked_for_pass3(agent, phase.name):
                     best = agent
                     break
         if best is None:

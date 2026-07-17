@@ -445,3 +445,108 @@ class TestTeamRecordGuard:
 
         # The guard must NOT have fired (no state → guard skipped entirely).
         assert not any("not a team step" in m for m in captured_user_error_calls)
+
+
+# ===========================================================================
+# TestTeamRecordRestartAndMalformedMember
+# ===========================================================================
+
+class TestTeamRecordRestartAndMalformedMember:
+    """The `team-record` CLI handler must survive a restart between two
+    members' recordings, and must not crash on a malformed --member-id
+    that doesn't correspond to any roster entry."""
+
+    def _make_args(
+        self,
+        step_id: str,
+        member_id: str = "1.1.a",
+        agent: str = "backend-engineer",
+        status: str = "complete",
+        outcome: str = "",
+        files: str = "",
+        output: str = "text",
+        task_id: str | None = None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            subcommand="team-record",
+            step_id=step_id,
+            member_id=member_id,
+            agent=agent,
+            status=status,
+            outcome=outcome,
+            files=files,
+            output=output,
+            task_id=task_id,
+        )
+
+    @staticmethod
+    def _patched_handler_call(execute_mod, engine, args) -> None:
+        with patch.object(execute_mod, "ExecutionEngine", return_value=engine), \
+             patch.object(execute_mod, "get_project_storage", return_value=MagicMock()), \
+             patch.object(execute_mod, "EventBus", return_value=MagicMock()), \
+             patch("os.environ.get", return_value=None), \
+             patch.object(execute_mod.StatePersistence, "get_active_task_id", return_value=None), \
+             patch.object(execute_mod, "ContextManager", return_value=MagicMock()):
+            execute_mod.handler(args)
+
+    def test_team_record_survives_restart_between_members(
+        self, tmp_path: Path,
+    ) -> None:
+        """Member A is recorded through one handler call; a brand-new
+        ExecutionEngine object (same on-disk, file-backed persistence —
+        simulating a restarted CLI process) records member B and the step
+        completes correctly with BOTH members present."""
+        from agent_baton.cli.commands.execution import execute as execute_mod
+        from agent_baton.core.engine.executor import ExecutionEngine
+
+        engine1, _ = _plan_with_team_step(tmp_path)
+        self._patched_handler_call(
+            execute_mod, engine1,
+            self._make_args(
+                step_id="1.1", member_id="1.1.a", agent="backend-engineer",
+                outcome="done part a",
+            ),
+        )
+
+        # Restart: fresh ExecutionEngine instance, same tmp_path persistence.
+        engine2 = ExecutionEngine(team_context_root=tmp_path)
+        self._patched_handler_call(
+            execute_mod, engine2,
+            self._make_args(
+                step_id="1.1", member_id="1.1.b", agent="test-engineer",
+                outcome="done part b",
+            ),
+        )
+
+        state = engine2._load_state()
+        parent = state.get_step_result("1.1")
+        assert parent is not None
+        assert {m.member_id for m in parent.member_results} == {"1.1.a", "1.1.b"}
+        assert parent.status == "complete"
+
+    def test_team_record_with_member_id_not_in_roster_does_not_crash(
+        self, tmp_path: Path,
+    ) -> None:
+        """Malformed call: --member-id references an id absent from the
+        plan's team roster. The step-level guard only checks the step_id
+        (does it have a team at all), not membership — a typo'd
+        --member-id must not crash the CLI, and must not silently
+        complete the step in place of the real members."""
+        from agent_baton.cli.commands.execution import execute as execute_mod
+
+        engine, _ = _plan_with_team_step(tmp_path)
+        self._patched_handler_call(
+            execute_mod, engine,
+            self._make_args(
+                step_id="1.1", member_id="1.1.ghost", agent="nobody",
+                outcome="bogus record",
+            ),
+        )
+
+        state = engine._load_state()
+        parent = state.get_step_result("1.1")
+        assert parent is not None
+        # Real members 1.1.a/1.1.b are still pending — the step must not
+        # be reported complete based on a member that isn't in the plan.
+        assert parent.status == "dispatched"
+        assert "1.1.ghost" in {m.member_id for m in parent.member_results}

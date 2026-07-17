@@ -201,3 +201,115 @@ class TestGoalWrapAndRefine:
         # No further amendment.
         assert state.amend_cycles_used == 1
         assert state.amendments == []
+
+
+def _manager_plan(condition: str = "all tests pass", max_amend: int = 3) -> MachinePlan:
+    return MachinePlan(
+        task_id="t-mm",
+        task_summary="goal task",
+        manager_mode=True,
+        completion_condition=condition,
+        max_amend_cycles=max_amend,
+        phases=[
+            PlanPhase(
+                phase_id=1, name="Implement",
+                steps=[PlanStep(
+                    step_id="1.1", agent_name="backend-engineer",
+                    task_description="do the work",
+                )],
+            ),
+        ],
+    )
+
+
+class TestGoalWrapManagerModePublish:
+    """Phase 6, 6.3: a manager_mode plan's goal round-out must publish a
+    fresh sidecar set for the round-out phase, and must roll the plan (and
+    goal bookkeeping) back to exactly its pre-call state when that publish
+    fails -- this path can't call amend_plan() (see the executor's own
+    docstring on why), so it needs its own rollback wiring."""
+
+    def test_round_out_publishes_sidecars_for_new_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        plan = _manager_plan(max_amend=3)
+        suggested = {
+            "phase_id": 99,
+            "name": "Close-the-gap",
+            "steps": [{
+                "step_id": "99.1",
+                "agent_name": "backend-engineer",
+                "task_description": "address the gap",
+            }],
+        }
+        check = GoalCheck(
+            check_id="x", phase_id=1,
+            completion_condition=plan.completion_condition or "",
+            met=False, confidence=0.4,
+            missing=["test coverage incomplete"],
+            suggested_phases=[suggested],
+            reasoning="needs more tests",
+        )
+        _patch_evaluator(monkeypatch, check)
+        engine, state = _started_engine(tmp_path, plan)
+
+        engine._evaluate_goal_after_gate(
+            state, passed_phase_id=1, last_gate_passed=True,
+        )
+
+        assert state.amend_cycles_used == 1
+        assert len(state.plan.phases) == 2
+        round_out_phase = state.plan.phases[1]
+
+        paths = ManagerArtifactPaths(tmp_path, state.task_id)
+        assert paths.revision_manifest.is_file()
+        for step in round_out_phase.steps:
+            assert paths.scope_contract(step.step_id, ext="json").is_file()
+            assert paths.context_bundle(step.step_id).is_file()
+
+    def test_round_out_publish_failure_rolls_back_plan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from agent_baton.core.manager.rebuild import ManagerArtifactRebuildResult
+
+        plan = _manager_plan(max_amend=3)
+        suggested = {
+            "phase_id": 99,
+            "name": "Close-the-gap",
+            "steps": [{
+                "step_id": "99.1",
+                "agent_name": "backend-engineer",
+                "task_description": "address the gap",
+            }],
+        }
+        check = GoalCheck(
+            check_id="x", phase_id=1,
+            completion_condition=plan.completion_condition or "",
+            met=False, confidence=0.4,
+            missing=["test coverage incomplete"],
+            suggested_phases=[suggested],
+            reasoning="needs more tests",
+        )
+        _patch_evaluator(monkeypatch, check)
+        engine, state = _started_engine(tmp_path, plan)
+
+        monkeypatch.setattr(
+            engine,
+            "_publish_manager_artifacts",
+            lambda _plan, *, trigger: ManagerArtifactRebuildResult(
+                ok=False, errors=["forced failure for test"],
+            ),
+        )
+
+        engine._evaluate_goal_after_gate(
+            state, passed_phase_id=1, last_gate_passed=True,
+        )
+
+        # Rolled back exactly: no new phase, no amendment, no cycle spent --
+        # only goal_status reflects that a round-out was attempted.
+        assert len(state.plan.phases) == 1
+        assert state.amendments == []
+        assert state.amend_cycles_used == 0
+        assert state.goal_status == "active"

@@ -18,6 +18,7 @@ from agent_baton.models.execution import (
     MachinePlan,
     PlanPhase,
     PlanStep,
+    SynthesisSpec,
     TeamMember,
 )
 
@@ -280,6 +281,117 @@ class TestMailboxOnMemberResult:
         # One idle per member when the parent step finalises.
         assert len(idle) == 2
         assert {e.from_member for e in idle} == {"1.1.a", "1.1.b"}
+
+
+def _nested_team_plan() -> MachinePlan:
+    """A lead with a 2-member sub_team — 3 flattened members total."""
+    return MachinePlan(
+        task_id="t-nested-mb",
+        task_summary="nested team mailbox test",
+        phases=[PlanPhase(
+            phase_id=1, name="Build",
+            steps=[PlanStep(
+                step_id="1.1", agent_name="team",
+                task_description="lead + sub-team",
+                team=[TeamMember(
+                    member_id="1.1.a", agent_name="architect",
+                    role="lead", task_description="coordinate",
+                    sub_team=[
+                        TeamMember(
+                            member_id="1.1.a.b", agent_name="backend-engineer",
+                            role="implementer", task_description="build api",
+                        ),
+                        TeamMember(
+                            member_id="1.1.a.c", agent_name="test-engineer",
+                            role="implementer", task_description="write tests",
+                        ),
+                    ],
+                    synthesis=SynthesisSpec(strategy="merge_files"),
+                )],
+                synthesis=SynthesisSpec(strategy="merge_files"),
+            )],
+        )],
+    )
+
+
+class TestNestedTeamMailboxOrdering:
+    """Nested teams (A2.b + Phase 4 nested-dispatch integration): mailbox
+    events must cover EVERY flattened member — lead and sub-team alike —
+    not just the top-level team roster, and only fire the completion signal
+    (teammate_idle) once the WHOLE nested tree is done."""
+
+    def test_task_created_emitted_for_lead_and_every_subteam_member(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_nested_team_plan())
+        engine.next_action()  # dispatches the lead + flattened sub-team
+
+        events = _mailbox_for(tmp_path).read_all()
+        created = [e for e in events if e.event_type == "task_created"]
+        assert {e.to_member for e in created} == {"1.1.a", "1.1.a.b", "1.1.a.c"}
+
+    def test_teammate_idle_not_emitted_while_subteam_incomplete(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_nested_team_plan())
+        engine.next_action()
+
+        # Only the lead and ONE of two sub-team members complete.
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a",
+            agent_name="architect", status="complete", outcome="coordinated",
+        )
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a.b",
+            agent_name="backend-engineer", status="complete", outcome="api built",
+        )
+        events = _mailbox_for(tmp_path).read_all()
+        idle = [e for e in events if e.event_type == "teammate_idle"]
+        assert idle == []
+
+    def test_teammate_idle_fires_for_all_three_once_subteam_completes(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_nested_team_plan())
+        engine.next_action()
+
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a",
+            agent_name="architect", status="complete", outcome="coordinated",
+        )
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a.b",
+            agent_name="backend-engineer", status="complete", outcome="api built",
+        )
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a.c",
+            agent_name="test-engineer", status="complete", outcome="tests green",
+        )
+        events = _mailbox_for(tmp_path).read_all()
+        idle = [e for e in events if e.event_type == "teammate_idle"]
+        assert {e.from_member for e in idle} == {"1.1.a", "1.1.a.b", "1.1.a.c"}
+
+    def test_task_failed_from_nested_member_does_not_block_sibling_event(
+        self, tmp_path: Path,
+    ) -> None:
+        """A deep sub-team member's failure is captured on the mailbox
+        independent of its siblings — member-level events fire per-member
+        as each result lands, before the parent-level failure fan-out."""
+        engine = ExecutionEngine(team_context_root=tmp_path)
+        engine.start(_nested_team_plan())
+        engine.next_action()
+
+        engine.record_team_member_result(
+            step_id="1.1", member_id="1.1.a.c",
+            agent_name="test-engineer", status="failed", outcome="flaky suite",
+        )
+        events = _mailbox_for(tmp_path).read_all()
+        failed = [e for e in events if e.event_type == "task_failed"]
+        assert len(failed) == 1
+        assert failed[0].from_member == "1.1.a.c"
 
 
 class TestPlanApprovalFlow:

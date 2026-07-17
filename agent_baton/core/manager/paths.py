@@ -54,6 +54,19 @@ class ManagerArtifactPaths:
     def decision_log(self) -> Path:
         return self.root / "decision-log.jsonl"
 
+    @property
+    def revision_manifest(self) -> Path:
+        """Monotonic version record for the transactional artifact rebuild
+        (Phase 6, step 6.3 -- ``agent_baton.core.manager.rebuild``).
+
+        Distinct from ``decision_log`` (an append-only, immutable audit
+        trail of human decisions): this file is *overwritten* on every
+        successful publish and records which plan revision the currently
+        published sidecar set corresponds to, so a caller can detect a
+        stale/partial publish without re-parsing every sidecar.
+        """
+        return self.root / "artifact-revision.json"
+
     # ------------------------------------------------------------------
     # Directories holding per-entity artifacts
     # ------------------------------------------------------------------
@@ -78,6 +91,20 @@ class ManagerArtifactPaths:
     def decisions_dir(self) -> Path:
         return self.root / "decisions"
 
+    @property
+    def scope_evidence_dir(self) -> Path:
+        """Independently-computed diff evidence backing scope-expansion
+        decisions (Phase 3 "Make scope contracts authoritative", 3.2).
+
+        One JSON file per decision, keyed by ``decision_id`` -- see
+        ``agent_baton.core.manager.scope_amendment.write_scope_evidence``.
+        Kept separate from ``decisions_dir`` (which holds the
+        human-facing Markdown packet) because this is a machine-readable
+        record of exactly which step/paths/real-diff a decision concerns,
+        used to resolve the decision without re-parsing free text.
+        """
+        return self.root / "scope-evidence"
+
     # ------------------------------------------------------------------
     # Per-entity artifact path builders
     # ------------------------------------------------------------------
@@ -87,6 +114,9 @@ class ManagerArtifactPaths:
 
     def scope_contract(self, step_id: str, ext: str = "md") -> Path:
         return self.scope_contracts_dir / f"{self._sanitize(step_id)}.{ext}"
+
+    def scope_evidence(self, decision_id: str) -> Path:
+        return self.scope_evidence_dir / f"{self._sanitize(decision_id)}.json"
 
     def context_bundle(self, step_id: str) -> Path:
         return self.context_bundles_dir / f"{self._sanitize(step_id)}.json"

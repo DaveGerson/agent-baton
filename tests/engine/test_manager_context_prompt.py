@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_baton.core.engine.dispatcher import PromptDispatcher
+from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.models.execution import PlanStep
 
 _GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -171,3 +172,214 @@ def test_dispatcher_scope_contract_without_bundle() -> None:
 
     assert "## Scope Contract" in prompt
     assert "## Context Bundle" not in prompt
+
+
+# ===========================================================================
+# Phase 6, 6.4 -- checkpoint + scope amendment: the resumed dispatch prompt
+# must reflect the amended sidecars, not the ones current when the
+# checkpoint fired.
+#
+# ``_dispatch_action`` (executor.py) reads the scope-contract/context-bundle
+# sidecars fresh from disk (via ``ManagerArtifactPaths``) at dispatch time --
+# never from anything cached on ``ExecutionState``. This end-to-end scenario
+# pins that contract across a real CHECKPOINT boundary: a step is amended
+# (scope widened, sidecars rebuilt to a new revision) *after* the engine has
+# already checkpointed and *before* the amended step is ever dispatched, and
+# a brand-new ``ExecutionEngine`` instance (simulating a fresh session that
+# picked up the checkpoint's resume command) must dispatch it with the
+# amended content.
+# ===========================================================================
+
+class TestCheckpointThenScopeAmendmentDispatch:
+    def _plan(self, task_id: str) -> "MachinePlan":
+        from agent_baton.models.execution import MachinePlan, PlanPhase
+
+        return MachinePlan(
+            task_id=task_id,
+            task_summary="Add a reporting endpoint with tests",
+            task_type="feature",
+            complexity="medium",
+            risk_level="LOW",
+            manager_mode=True,
+            phases=[
+                PlanPhase(
+                    phase_id=1,
+                    name="Design",
+                    steps=[
+                        PlanStep(
+                            step_id="1.1",
+                            agent_name="architect",
+                            task_description="Design the reporting endpoint.",
+                            deliverables=["docs/reporting-design.md"],
+                            allowed_paths=["docs/**"],
+                            step_type="planning",
+                        ),
+                    ],
+                ),
+                PlanPhase(
+                    phase_id=2,
+                    name="Implement",
+                    steps=[
+                        PlanStep(
+                            step_id="2.1",
+                            agent_name="backend-engineer",
+                            task_description="Implement the reporting endpoint.",
+                            deliverables=["app/reporting/service.py"],
+                            allowed_paths=["app/reporting/**"],
+                            step_type="developing",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _no_review_config():
+        from agent_baton.core.config.manager import ManagerConfig
+
+        # Adversarial-review injection is an orthogonal PhasePolicyApplier
+        # concern (Phase 6, 6.3's rebuild pipeline) -- disabling it keeps
+        # this test's phase/step shape exactly what it defines, so a
+        # checkpoint-boundary assertion tied to a specific phase index
+        # can't be thrown off by an injected review step.
+        return ManagerConfig(
+            policies={
+                "phase_completion": {"adversarial_review": "off"},
+                "project_completion": {"adversarial_review": "off"},
+            }
+        )
+
+    def test_resumed_dispatch_reads_amended_sidecars_not_stale(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+        from agent_baton.core.manager.rebuild import rebuild_and_publish
+        from agent_baton.models.execution import ActionType
+
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+
+        context_root = tmp_path / ".claude" / "team-context"
+        task_id = "task-checkpoint-then-amend"
+        plan = self._plan(task_id)
+
+        engine = ExecutionEngine(team_context_root=context_root, task_id=task_id)
+        engine.start(plan)
+
+        # ── Initial publish (revision 1): 2.1's scope contract is scoped to
+        # app/reporting/** only.
+        publish1 = rebuild_and_publish(
+            plan, plan.task_summary,
+            config=self._no_review_config(),
+            project_root=tmp_path,
+            team_context_dir=context_root,
+            trigger="initial",
+        )
+        assert publish1.ok is True, publish1.errors
+        assert publish1.revision == 1
+
+        mgr_paths = ManagerArtifactPaths(context_root, task_id)
+        original_contract = mgr_paths.scope_contract("2.1", ext="md").read_text(encoding="utf-8")
+        assert "app/reporting/exports" not in original_contract
+
+        # ── Complete phase 1's only step -- with
+        # BATON_CHECKPOINT_PHASE_INTERVAL=1 this phase-boundary advance must
+        # trip a checkpoint, BEFORE 2.1 is ever dispatched.
+        engine.record_step_result("1.1", "architect")
+        checkpoint_action = engine.next_action()
+        assert checkpoint_action.action_type == ActionType.CHECKPOINT
+        assert checkpoint_action.checkpoint_handoff["phase_id"] == 2
+
+        # ── While checkpointed, the manager amends 2.1's scope (widens
+        # allowed_paths/deliverables) and republishes -- exactly the durable
+        # sidecar-then-plan-mutation ordering
+        # ``ExecutionEngine.resolve_scope_expansion``/``amend_plan`` use
+        # elsewhere for an approved scope amendment.
+        loaded = engine._load_state()
+        target_step = loaded.plan.phases[1].steps[0]
+        assert target_step.step_id == "2.1"
+        target_step.allowed_paths = list(target_step.allowed_paths) + [
+            "app/reporting/exports/**"
+        ]
+        target_step.deliverables = list(target_step.deliverables) + [
+            "app/reporting/exports/service.py"
+        ]
+
+        publish2 = rebuild_and_publish(
+            loaded.plan, loaded.plan.task_summary,
+            config=self._no_review_config(),
+            project_root=tmp_path,
+            team_context_dir=context_root,
+            trigger="post_checkpoint_amend",
+        )
+        assert publish2.ok is True, publish2.errors
+        assert publish2.revision == 2
+        engine._save_execution(loaded)
+
+        amended_contract = mgr_paths.scope_contract("2.1", ext="md").read_text(encoding="utf-8")
+        assert "app/reporting/exports/**" in amended_contract
+
+        # ── Fresh session: a brand-new ExecutionEngine instance against the
+        # same team_context_root (no shared in-memory state) picks the
+        # execution back up exactly as the checkpoint's own
+        # ``baton execute resume`` command would.
+        fresh_engine = ExecutionEngine(team_context_root=context_root, task_id=task_id)
+        resumed_action = fresh_engine.next_action()
+
+        # The checkpoint boundary is already recorded -- dedup means resume
+        # does NOT re-checkpoint, it proceeds straight to dispatch.
+        assert resumed_action.action_type == ActionType.DISPATCH
+        assert resumed_action.step_id == "2.1"
+        prompt = resumed_action.delegation_prompt
+        assert "## Scope Contract" in prompt
+        # The amended (post-checkpoint) scope must be what the resumed
+        # dispatch prompt carries -- not the revision-1 sidecar that was
+        # current when the checkpoint fired.
+        assert "app/reporting/exports/**" in prompt
+        assert "app/reporting/exports/service.py" in prompt
+
+    def test_checkpoint_dedup_holds_through_the_amendment(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A resumed session that amends scope and dispatches must not
+        re-trip the checkpoint it already crossed."""
+        from agent_baton.core.manager.rebuild import rebuild_and_publish
+        from agent_baton.models.execution import ActionType
+
+        monkeypatch.setenv("BATON_CHECKPOINT_ENABLED", "1")
+        monkeypatch.setenv("BATON_CHECKPOINT_PHASE_INTERVAL", "1")
+
+        context_root = tmp_path / ".claude" / "team-context"
+        task_id = "task-checkpoint-dedup-amend"
+        plan = self._plan(task_id)
+
+        engine = ExecutionEngine(team_context_root=context_root, task_id=task_id)
+        engine.start(plan)
+        rebuild_and_publish(
+            plan, plan.task_summary,
+            config=self._no_review_config(),
+            project_root=tmp_path,
+            team_context_dir=context_root,
+            trigger="initial",
+        )
+        engine.record_step_result("1.1", "architect")
+        assert engine.next_action().action_type == ActionType.CHECKPOINT
+
+        loaded = engine._load_state()
+        loaded.plan.phases[1].steps[0].allowed_paths.append("app/reporting/exports/**")
+        rebuild_and_publish(
+            loaded.plan, loaded.plan.task_summary,
+            config=self._no_review_config(),
+            project_root=tmp_path,
+            team_context_dir=context_root,
+            trigger="post_checkpoint_amend",
+        )
+        engine._save_execution(loaded)
+
+        fresh_engine = ExecutionEngine(team_context_root=context_root, task_id=task_id)
+        resumed_action = fresh_engine.next_action()
+
+        assert resumed_action.action_type == ActionType.DISPATCH
+        state = fresh_engine._load_state()
+        assert state.checkpoint_count == 1
+        assert len(state.checkpoints) == 1

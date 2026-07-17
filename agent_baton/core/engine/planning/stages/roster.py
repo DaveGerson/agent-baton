@@ -19,6 +19,10 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.core.engine.planning.capability_gap import (
+    decide_talent_lifecycle,
+    detect_missing_role_gap,
+)
 from agent_baton.core.engine.planning.draft import PlanDraft
 from agent_baton.core.engine.planning.rules.default_agents import (
     DEFAULT_AGENTS,
@@ -67,6 +71,7 @@ class RosterStage:
             )
             draft.resolved_agents = resolved_agents
             draft.agent_route_map = agent_route_map
+            self._detect_capability_gaps(draft, services=services)
             return draft
 
         # Step 4+4b — pattern lookup + bead hints.
@@ -119,11 +124,75 @@ class RosterStage:
         )
         draft.resolved_agents = resolved_agents
         draft.agent_route_map = agent_route_map
+        self._detect_capability_gaps(draft, services=services)
         return draft
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _detect_capability_gaps(
+        self,
+        draft: PlanDraft,
+        *,
+        services: PlannerServices,
+    ) -> None:
+        """Represent capability gaps for explicitly-requested agents.
+
+        Only fires for ``draft.agents`` (a caller explicitly named a role)
+        — the default/pattern/concern-expansion rosters only ever draw
+        from agent names the registry is known to have, so scanning them
+        here would be pure noise, not evidence.  See
+        agent_baton.core.engine.planning.capability_gap and
+        docs/internal/talent-factory-contract.md for the model this
+        implements.
+
+        Never mutates ``draft.resolved_agents`` — detection here is
+        diagnostic-only (surfaced via ``plan_diagnostics`` and routing
+        notes). Actually dispatching talent-builder generation from a
+        detected gap is a downstream execution-time concern, bounded by
+        the ``TalentLifecycleAction`` returned for each gap.
+        """
+        if not draft.agents:
+            return
+        known_base_names = {name.split("--", 1)[0] for name in services.registry.names}
+        # Lifecycle policy from the resolved ``talent_factory`` config
+        # section (set on the draft by IntelligentPlanner.create_plan).
+        # Without this, ``retry_budget: 0`` in baton.yaml would be parsed,
+        # threaded, and then silently ignored by the decision — a policy
+        # knob that does nothing. ``getattr`` defaults keep this stage
+        # working for tests/callers that build a bare PlanDraft directly.
+        tf_config = draft.talent_factory_config
+        retry_budget = getattr(tf_config, "retry_budget", 1)
+        max_recursion_depth = getattr(tf_config, "max_recursion_depth", 0)
+        seen_capabilities: set[str] = set()
+        for requested in draft.agents:
+            # One gap (and therefore at most one bounded generation
+            # attempt) per distinct requested capability. Duplicate
+            # entries in an explicit --agents list would otherwise create
+            # two gaps for the same capability: the second dispatch
+            # collides with the first's freshly installed artifact and
+            # its collision-fallback substitution rewrites the *first*
+            # (successful) resolution back out of the roster.
+            if requested in seen_capabilities:
+                continue
+            seen_capabilities.add(requested)
+            gap = detect_missing_role_gap(requested, known_agents=known_base_names)
+            if gap is None:
+                continue
+            decision = decide_talent_lifecycle(
+                gap,
+                allow_talent_builder=draft.allow_talent_builder,
+                skip_init=draft.skip_init,
+                retry_budget=retry_budget,
+                max_recursion_depth=max_recursion_depth,
+            )
+            draft.capability_gaps.append(gap)
+            draft.talent_lifecycle_decisions.append(decision)
+            draft.routing_notes.append(
+                f"capability gap: '{requested}' ({gap.kind.value}) -> "
+                f"{decision.action.value} ({decision.reason})"
+            )
 
     def _apply_pattern(
         self,

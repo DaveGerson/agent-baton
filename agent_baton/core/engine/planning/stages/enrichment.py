@@ -111,6 +111,7 @@ class EnrichmentStage:
             resolved_agents=draft.resolved_agents,
             research_concerns=draft.research_concerns,
             phases=draft.phases,
+            safety_appended_phases=draft.safety_appended_phases,
         )
         draft.split_phase_ids = split_phase_ids
 
@@ -152,6 +153,15 @@ class EnrichmentStage:
         # HIPAA/PCI), the phase builder silently drops it because is_reviewer_agent
         # returns True for "auditor".  Append a dedicated Audit phase here.
         self._ensure_audit_phase(draft, services)
+
+        # NOTE: draft.resolved_agents can still carry candidates that never
+        # landed in a phase step at this point (concern-split's per-concern
+        # best-fit pick, subtask decomposition's per-subtask agent unions).
+        # ValidationStage's team-consolidation (_consolidate_team) drops
+        # further reviewer-class agents from Implement/Fix team-steps, so
+        # the roster<->phases reconciliation happens once, there, after
+        # every agent-dropping mutation has had its turn -- see
+        # ValidationStage._prune_unused_resolved_agents.
 
         return draft
 
@@ -202,6 +212,7 @@ class EnrichmentStage:
         resolved_agents: list[str],
         research_concerns: list[tuple[str, str]] | None = None,
         phases: list[dict] | None = None,
+        safety_appended_phases: list[str] | None = None,
     ) -> set[int]:
         """Steps 12b / 12b-bis — approval gates and concern-splitting.
 
@@ -245,7 +256,18 @@ class EnrichmentStage:
                 len(_concerns),
                 [c[0] for c in _concerns],
             )
+            _safety_slots = {name.lower() for name in (safety_appended_phases or [])}
             for phase in plan_phases:
+                if phase.name.lower() in _safety_slots:
+                    # RiskStage appended this phase purely as a home for an
+                    # injected safety agent (auditor/code-reviewer).
+                    # Splitting it would replace that oversight step with
+                    # per-concern implementation steps — evaporating the
+                    # auditor and hard-blocking the plan on audit_missing.
+                    # A genuine Audit-as-work phase (audit-archetype tasks,
+                    # see tests/engine/planning/test_decomposition_fanout.py)
+                    # is never in safety_appended_phases and still splits.
+                    continue
                 if phase.name.lower() in (
                     "implement", "fix", "draft", "migrate", "audit", "assess",
                 ):

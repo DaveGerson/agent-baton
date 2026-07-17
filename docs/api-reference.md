@@ -26,6 +26,7 @@ and observability stack behind a versioned REST interface served by FastAPI.
    - [NOC](#412-noc-network-operations-centre)
    - [PMO H3](#413-pmo-h3-role-based-dashboards-scorecard-arch-review-crp)
    - [Spec Documents](#414-spec-documents-f01)
+   - [PMO Manager Console](#415-pmo-manager-console-manager-mode-plans)
 5. [Webhook System](#5-webhook-system)
 6. [Request and Response Models](#6-request-and-response-models)
 7. [CORS Configuration](#7-cors-configuration)
@@ -1579,6 +1580,7 @@ returned for review but NOT saved to disk.
 | `project_id` | string | Yes | ID of the registered project |
 | `task_type` | string | No | Task type hint: `"new-feature"`, `"bug-fix"`, `"refactor"` |
 | `priority` | int | No | Plan priority: 0=normal, 1=high, 2=critical (default: 0) |
+| `manager_mode` | bool | No | When `true`, the returned plan dict is stamped `manager_mode: true`. Approval then builds the full manager-mode sidecar set (see `POST /pmo/forge/approve` and [§4.15](#415-pmo-manager-console-manager-mode-plans)). Default: `false` |
 
 **Response:** Raw plan dict (MachinePlan shape)
 
@@ -1618,11 +1620,29 @@ Save an approved plan to a project's team-context directory.
 | `plan` | dict | Yes | Plan dict (MachinePlan shape), possibly edited by user |
 | `project_id` | string | Yes | ID of the project that will receive the plan |
 
+When the submitted plan dict carries `manager_mode: true`, approval runs the
+same `ManagerModePlanner` composition `baton plan --manager-mode --save`
+uses (loading the project's `.claude/baton.yaml` manager config when
+present) and transactionally publishes the full sidecar set — charter,
+scope map, team blueprint, role cards, knowledge plan, scope contracts,
+context bundles — plus an `artifact-revision.json` manifest (revision 1,
+trigger `forge_approve`) before writing `plan.json`. The persisted plan
+reflects any policy-injected review steps, exactly like the CLI path.
+
 **Response:**
 
 ```json
-{"saved": true, "path": "/home/user/project/.claude/team-context/plan.json"}
+{
+  "saved": true,
+  "path": "/home/user/project/.claude/team-context/executions/<task_id>/plan.json",
+  "manager_mode": false,
+  "manager_revision": null
+}
 ```
+
+`manager_mode` echoes whether the manager-mode branch ran; `manager_revision`
+is the published revision number (`1` on first approval) or `null` for a
+plain plan.
 
 **Error Responses:**
 
@@ -1630,6 +1650,7 @@ Save an approved plan to a project's team-context directory.
 |---|---|
 | `400` | Invalid plan payload |
 | `404` | Project not found |
+| `422` | Manager-mode plan with an invalid project manager config (`.claude/baton.yaml`), or the manager-mode artifact set failed to build/validate/publish (nothing is written in that case) |
 | `500` | Failed to save plan |
 
 ---
@@ -2400,6 +2421,74 @@ Returns the spec dict. **404** if not found.
 
 Transitions spec state to `approved`. Request body: `{"actor": str}` (default
 `local-user`). **400** if the transition is not valid from the current state.
+
+---
+
+### 4.15 PMO Manager Console (manager-mode plans)
+
+The "director console" surface backing the PMO UI's Manager Workspace
+(`agent_baton/api/routes/pmo_manager.py`). Read-only access to every
+manager-mode sidecar artifact for one card, plus one narrow mutation:
+resolving a scope-expansion decision. All routes are scoped by `card_id`
+(resolved to the owning project exactly like the per-card
+pause/resume/decision endpoints) and read only through the conventional,
+sanitized `ManagerArtifactPaths` locations — never a client-supplied path.
+
+Common behavior for the artifact reads: **404** if the card or the requested
+artifact file does not exist; **409** if the card's persisted plan is not
+`manager_mode: true`. Each artifact response carries a shared envelope —
+`task_id`, `revision`, `published_at` (both `null` when no
+`artifact-revision.json` has ever been published) — so a UI can tell whether
+two fetched artifacts describe the same published revision.
+
+#### Route table
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/pmo/manager/{card_id}/charter` | Project charter (rendered Markdown) |
+| GET | `/api/v1/pmo/manager/{card_id}/scope-map` | Scope map (workstream decomposition) |
+| GET | `/api/v1/pmo/manager/{card_id}/workstreams` | Each plan phase paired with its owning workstream |
+| GET | `/api/v1/pmo/manager/{card_id}/team-blueprint` | Ad-hoc team composition |
+| GET | `/api/v1/pmo/manager/{card_id}/role-cards` | Every role card (Markdown) |
+| GET | `/api/v1/pmo/manager/{card_id}/role-cards/{role}` | One role card (404 if unknown role) |
+| GET | `/api/v1/pmo/manager/{card_id}/knowledge-plan` | Plan-wide knowledge pack selection/gaps |
+| GET | `/api/v1/pmo/manager/{card_id}/scope-contracts` | Summary of every nontrivial step's contract |
+| GET | `/api/v1/pmo/manager/{card_id}/scope-contracts/{step_id}` | One step's full contract (JSON + Markdown) |
+| GET | `/api/v1/pmo/manager/{card_id}/context-bundles` | Metadata for every step's context bundle |
+| GET | `/api/v1/pmo/manager/{card_id}/context-bundles/{step_id}` | One step's full context bundle |
+| GET | `/api/v1/pmo/manager/{card_id}/report` | Manager brief + manager report (retrospective) Markdown |
+| GET | `/api/v1/pmo/manager/{card_id}/decisions` | Typed `ManagerDecision` packets from `decision-log.jsonl` |
+| GET | `/api/v1/pmo/manager/{card_id}/decisions/{decision_id}` | One decision packet (post-resolution state) |
+| POST | `/api/v1/pmo/manager/{card_id}/decisions/{decision_id}/resolve` | Approve/reject a scope-expansion decision |
+| GET | `/api/v1/pmo/manager/{card_id}/version` | Published `artifact-revision.json` manifest |
+| GET | `/api/v1/pmo/manager/{card_id}/validation` | Version-consistency check (plan fingerprint vs manifest) |
+
+Corrupt or unreadable artifact files degrade safely: a single-artifact read
+returns **404** instead of 500, and a corrupt entry inside a listing
+directory is skipped while valid siblings are still returned.
+
+The decision list/detail routes surface the typed manager decision packets
+(`scope_expansion`, `ambiguity`, `knowledge_gap`, `review_veto`,
+`approval`) and are distinct from the generic engine decision inbox at
+`GET /api/v1/pmo/execute/{card_id}/decisions`.
+
+#### `POST /api/v1/pmo/manager/{card_id}/decisions/{decision_id}/resolve`
+
+Request body (`ManagerDecisionResolveRequest`):
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `resolution` | `"approve"` \| `"reject"` | Yes | Approve durably widens the failed step's scope contract (via `ExecutionEngine.resolve_scope_expansion`), clears its failed result for re-dispatch, and republishes the manager artifact set; reject records the denial and changes nothing else |
+| `additional_paths` | list[string] | No | Explicit paths to grant on approval; defaults to the violated paths recorded in the decision's scope-evidence sidecar |
+
+**Error Responses:**
+
+| Status | Condition |
+|---|---|
+| `400` | Decision is not a `scope_expansion` decision, or the engine could not apply the resolution |
+| `404` | Card, project, or decision not found |
+| `409` | Decision already resolved, or no execution state exists for this card |
+| `422` | `resolution` is not `"approve"`/`"reject"` (request validation) |
 
 ---
 

@@ -153,6 +153,51 @@ class TestLoadDirectory:
         count = reg.load_directory(knowledge_root)
         assert count == 2
 
+
+class TestRegisterGeneratedPack:
+    """Talent-factory's ``registry_reload: immediate`` primitive (P5.2).
+
+    See agent_baton.core.engine.planning.talent_factory.
+    """
+
+    def test_registers_a_new_pack_immediately(self, tmp_path: Path) -> None:
+        reg = KnowledgeRegistry()
+        assert reg.get_pack("widget-domain") is None
+
+        pack_dir = tmp_path / "widget-domain"
+        pack_dir.mkdir()
+        _make_manifest(pack_dir, name="widget-domain", description="Widget domain knowledge")
+        _make_doc(pack_dir, "overview.md", name="overview")
+
+        pack = reg.register_generated_pack(pack_dir)
+
+        assert pack is not None
+        assert pack.name == "widget-domain"
+        assert reg.get_pack("widget-domain") is pack
+        assert "widget-domain" in reg.all_packs
+
+    def test_overrides_an_existing_in_memory_pack(self, tmp_path: Path) -> None:
+        reg = KnowledgeRegistry()
+        original_dir = tmp_path / "packs" / "widget-domain"
+        original_dir.mkdir(parents=True)
+        _make_manifest(original_dir, name="widget-domain", description="old")
+        _make_doc(original_dir, "overview.md", name="overview")
+        reg.load_directory(tmp_path / "packs")
+        assert reg.get_pack("widget-domain").description == "old"
+
+        regenerated_dir = tmp_path / "regenerated" / "widget-domain"
+        regenerated_dir.mkdir(parents=True)
+        _make_manifest(regenerated_dir, name="widget-domain", description="new")
+        _make_doc(regenerated_dir, "overview.md", name="overview")
+
+        reg.register_generated_pack(regenerated_dir)
+
+        assert reg.get_pack("widget-domain").description == "new"
+
+    def test_nonexistent_directory_returns_none(self, tmp_path: Path) -> None:
+        reg = KnowledgeRegistry()
+        assert reg.register_generated_pack(tmp_path / "does-not-exist") is None
+
     def test_all_packs_property_reflects_loaded_packs(
         self, knowledge_root: Path
     ) -> None:

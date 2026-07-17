@@ -1128,3 +1128,356 @@ class TestWaveOneThreeStateEnvInjection:
         assert env["BATON_DB_PATH"] == "/explicit/test/baton.db"  # preserved
         assert "BATON_TEAM_CONTEXT_ROOT" in env  # newly added
         assert env["BATON_TASK_ID"] == "t"
+
+
+# ===========================================================================
+# Regression: git inspection must target the launch's effective cwd
+# (cwd_override when set, else config.working_directory) — never the
+# parent repository's config.working_directory when a worktree is active.
+#
+# Defect: pre-launch/post-launch HEAD capture and diff/file discovery were
+# hardcoded to `self._config.working_directory`, ignoring `cwd_override`.
+# For a Wave 1.3 worktree-isolated dispatch this means a real commit made
+# inside the worktree was invisible to the launcher (parent HEAD never
+# moves), so `commit_hash`/`files_changed` came back empty even though the
+# agent committed — silently discarding the work once the caller (the
+# executor) cleaned up the "commit-less" worktree.
+# ===========================================================================
+
+def _patch_subprocess_sequence_capture_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: list[FakeProcess],
+) -> list[str | None]:
+    """Like _patch_subprocess_sequence, but also records the `cwd` kwarg
+    passed to each `asyncio.create_subprocess_exec` call, in call order."""
+    call_box = [0]
+    captured_cwds: list[str | None] = []
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        idx = call_box[0]
+        call_box[0] += 1
+        captured_cwds.append(kwargs.get("cwd"))
+        return processes[idx]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return captured_cwds
+
+
+class TestGitProbingUsesEffectiveCwd:
+    """All git inspection tied to a launch must use cwd_override (when set)
+    rather than the parent repo's config.working_directory."""
+
+    def test_pre_and_post_head_capture_use_cwd_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+
+        pre_commit_proc = FakeProcess(stdout=b"abc123\n", returncode=0)
+        main_proc = FakeProcess(stdout=_ok_json(), returncode=0)
+        post_commit_proc = FakeProcess(stdout=b"def456\n", returncode=0)
+        diff_proc = FakeProcess(stdout=b"src/foo.py\n", returncode=0)
+
+        captured_cwds = _patch_subprocess_sequence_capture_cwd(
+            monkeypatch,
+            [pre_commit_proc, main_proc, post_commit_proc, diff_proc],
+        )
+
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        launcher = _launcher(monkeypatch, config)
+        launcher._git_bin = "/usr/bin/git"
+
+        async def _run():
+            result = await launcher.launch(
+                "backend", "sonnet", "add feature", "1.3",
+                cwd_override=str(worktree_path),
+            )
+            assert result.commit_hash == "def456"
+            assert result.files_changed == ["src/foo.py"]
+
+        asyncio.run(_run())
+
+        assert len(captured_cwds) == 4
+        # call 0: pre-launch HEAD capture
+        assert captured_cwds[0] == str(worktree_path), (
+            "pre-launch HEAD capture must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[0]!r}"
+        )
+        # call 1: the claude subprocess itself
+        assert captured_cwds[1] == str(worktree_path)
+        # call 2: post-launch HEAD capture
+        assert captured_cwds[2] == str(worktree_path), (
+            "post-launch HEAD capture must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[2]!r}"
+        )
+        # call 3: diff/file discovery
+        assert captured_cwds[3] == str(worktree_path), (
+            "diff/file discovery must use cwd_override, not "
+            f"config.working_directory; got {captured_cwds[3]!r}"
+        )
+        # None of the git probes may target the parent repo.
+        assert str(parent_root) not in captured_cwds
+
+    def test_no_cwd_override_still_uses_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Ordinary in-place launches (no cwd_override) keep probing
+        config.working_directory — current behavior is preserved."""
+        parent_root = tmp_path / "parent"
+        parent_root.mkdir()
+
+        pre_commit_proc = FakeProcess(stdout=b"abc123\n", returncode=0)
+        main_proc = FakeProcess(stdout=_ok_json(), returncode=0)
+        post_commit_proc = FakeProcess(stdout=b"def456\n", returncode=0)
+        diff_proc = FakeProcess(stdout=b"src/foo.py\n", returncode=0)
+
+        captured_cwds = _patch_subprocess_sequence_capture_cwd(
+            monkeypatch,
+            [pre_commit_proc, main_proc, post_commit_proc, diff_proc],
+        )
+
+        config = ClaudeCodeConfig(working_directory=parent_root)
+        launcher = _launcher(monkeypatch, config)
+        launcher._git_bin = "/usr/bin/git"
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "add feature", "1.3")
+            assert result.commit_hash == "def456"
+
+        asyncio.run(_run())
+
+        assert all(c == str(parent_root) for c in captured_cwds)
+
+
+# ===========================================================================
+# TestPathScopeEnforcement (Phase 3 "Make scope contracts authoritative", 3.2)
+# ===========================================================================
+
+
+class TestPathScopeEnforcement:
+    def test_unconfigured_step_has_zero_behavior_change(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A step nobody called configure_step_scope() for dispatches exactly
+        as before -- no --settings flag, no fail-closed refusal."""
+        _patch_subprocess(monkeypatch, FakeProcess(stdout=_ok_json()))
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+
+        captured_cmd: list[str] = []
+        orig_run_once = launcher._run_once
+
+        async def _spy_run_once(*, cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return await orig_run_once(cmd=cmd, **kwargs)
+
+        launcher._run_once = _spy_run_once  # type: ignore[method-assign]
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "complete"
+
+        asyncio.run(_run())
+        assert "--settings" not in captured_cmd
+
+    def test_write_capable_step_with_empty_allowed_paths_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty allowed_paths on a write-capable step refuses to spawn the
+        subprocess at all -- no subprocess call, clear PATH_SCOPE_EMPTY error."""
+        spawned = {"count": 0}
+
+        async def _fake_exec(*args, **kwargs):
+            spawned["count"] += 1
+            return FakeProcess(stdout=_ok_json())
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", [], [], write_capable=True)
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "failed"
+            assert "PATH_SCOPE_EMPTY" in result.error
+
+        asyncio.run(_run())
+        assert spawned["count"] == 0, "subprocess must never be spawned when fail-closed"
+
+    def test_read_only_step_with_empty_allowed_paths_still_dispatches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """write_capable=False (e.g. a 'reviewing' step) tolerates an empty
+        allowed set -- that's the valid representation of read-only work."""
+        _patch_subprocess(monkeypatch, FakeProcess(stdout=_ok_json()))
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", [], [], write_capable=False)
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "complete"
+
+        asyncio.run(_run())
+
+    def test_configured_scope_adds_settings_flag_with_hook(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_subprocess(monkeypatch, FakeProcess(stdout=_ok_json()))
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", ["app/reporting"], ["infra/secrets"])
+
+        captured_cmd: list[str] = []
+        orig_run_once = launcher._run_once
+
+        async def _spy_run_once(*, cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return await orig_run_once(cmd=cmd, **kwargs)
+
+        launcher._run_once = _spy_run_once  # type: ignore[method-assign]
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "complete"
+
+        asyncio.run(_run())
+
+        assert "--settings" in captured_cmd
+        settings_json = captured_cmd[captured_cmd.index("--settings") + 1]
+        settings = json.loads(settings_json)
+        hook_cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert "app/reporting" in hook_cmd
+        assert "infra/secrets" in hook_cmd
+
+    def test_scope_is_one_shot_does_not_leak_to_next_step(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_subprocess_sequence(
+            monkeypatch, [FakeProcess(stdout=_ok_json()), FakeProcess(stdout=_ok_json())]
+        )
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", ["app"], [])
+
+        captured: list[list[str]] = []
+        orig_run_once = launcher._run_once
+
+        async def _spy_run_once(*, cmd, **kwargs):
+            captured.append(list(cmd))
+            return await orig_run_once(cmd=cmd, **kwargs)
+
+        launcher._run_once = _spy_run_once  # type: ignore[method-assign]
+
+        async def _run():
+            await launcher.launch("backend", "sonnet", "task", "1.1")
+            await launcher.launch("backend", "sonnet", "task", "1.2")
+
+        asyncio.run(_run())
+        assert "--settings" in captured[0]
+        assert "--settings" not in captured[1]
+
+    def test_traversal_and_symlink_escape_are_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """A traversal entry is dropped lexically; a symlink whose target
+        escapes the repo root is dropped even though it normalizes cleanly."""
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "app").mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        # app/escape-link -> ../outside (an existing symlink escaping repo_root)
+        (repo_root / "app" / "escape-link").symlink_to(outside, target_is_directory=True)
+
+        _patch_subprocess(monkeypatch, FakeProcess(stdout=_ok_json()))
+        launcher = _launcher(monkeypatch, ClaudeCodeConfig(working_directory=repo_root))
+        launcher._git_bin = None
+        launcher.configure_step_scope(
+            "1.1",
+            ["app", "../../etc/passwd", "app/escape-link"],
+            [],
+        )
+
+        captured_cmd: list[str] = []
+        orig_run_once = launcher._run_once
+
+        async def _spy_run_once(*, cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return await orig_run_once(cmd=cmd, **kwargs)
+
+        launcher._run_once = _spy_run_once  # type: ignore[method-assign]
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "complete"
+
+        asyncio.run(_run())
+
+        settings_json = captured_cmd[captured_cmd.index("--settings") + 1]
+        hook_cmd = json.loads(settings_json)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert "app" in hook_cmd
+        assert "escape-link" not in hook_cmd
+        assert "etc/passwd" not in hook_cmd
+
+    def test_blocked_path_colliding_with_allowed_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blocked path nested under an allowed path is a contradictory
+        contract (mirrors agent_baton.core.engine.planning.scope_contract.
+        diagnose_step_scope's "write_scope_contradictory" check -- both
+        directions of containment count). Precedence means blocked wins:
+        the colliding allowed entry is dropped from the effective scope
+        entirely, so a write-capable step with nothing left in its allowed
+        set fails closed rather than dispatching with a diluted guard."""
+        spawned = {"count": 0}
+
+        async def _fake_exec(*args, **kwargs):
+            spawned["count"] += 1
+            return FakeProcess(stdout=_ok_json())
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", ["app"], ["app/secrets"], write_capable=True)
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "failed"
+            assert "PATH_SCOPE_EMPTY" in result.error
+
+        asyncio.run(_run())
+        assert spawned["count"] == 0
+
+    def test_blocked_path_disjoint_from_allowed_both_enforced(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blocked path that does NOT overlap the allowed path (a sibling,
+        not a descendant) is enforced alongside it -- both regex branches
+        appear in the hook."""
+        _patch_subprocess(monkeypatch, FakeProcess(stdout=_ok_json()))
+        launcher = _launcher(monkeypatch)
+        launcher._git_bin = None
+        launcher.configure_step_scope("1.1", ["app"], ["secrets"])
+
+        captured_cmd: list[str] = []
+        orig_run_once = launcher._run_once
+
+        async def _spy_run_once(*, cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return await orig_run_once(cmd=cmd, **kwargs)
+
+        launcher._run_once = _spy_run_once  # type: ignore[method-assign]
+
+        async def _run():
+            result = await launcher.launch("backend", "sonnet", "task", "1.1")
+            assert result.status == "complete"
+
+        asyncio.run(_run())
+
+        settings_json = captured_cmd[captured_cmd.index("--settings") + 1]
+        hook_cmd = json.loads(settings_json)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert "app" in hook_cmd
+        assert "secrets" in hook_cmd

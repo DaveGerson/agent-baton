@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import subprocess
@@ -514,6 +515,495 @@ class TestWorkerDecisionIntegration:
             summary = await worker.run()
             assert "completed" in summary.lower() or "complete" in summary.lower()
         asyncio.run(_run())
+
+    def test_feedback_action_routes_through_decision_manager(self, tmp_path: Path) -> None:
+        """A FEEDBACK action is routed to the DecisionManager (not busy-looped)
+        and, once resolved, dispatches the chosen option's step."""
+        from agent_baton.models.execution import FeedbackQuestion
+
+        plan = _plan(phases=[
+            _phase(
+                phase_id=0,
+                steps=[_step("1.1")],
+            ),
+        ])
+        plan.phases[0].feedback_questions = [
+            FeedbackQuestion(
+                question_id="q1",
+                question="Which layout?",
+                context="",
+                options=["Grid", "List"],
+                option_agents=["frontend-engineer", "frontend-engineer"],
+                option_prompts=["Build grid for {task}", "Build list for {task}"],
+            )
+        ]
+        decisions_dir = tmp_path / "decisions"
+        dm = DecisionManager(decisions_dir=decisions_dir)
+
+        async def _run():
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            engine.record_step_result("1.1", "backend", status="complete")
+            launcher = DryRunLauncher()
+            worker = TaskWorker(engine=engine, launcher=launcher, decision_manager=dm)
+
+            async def _resolver():
+                for _ in range(100):
+                    if dm.pending():
+                        break
+                    await asyncio.sleep(0.02)
+                assert dm.pending(), "DecisionManager should have a pending feedback request"
+                req = dm.pending()[0]
+                assert req.decision_type == "feedback_response"
+                dm.resolve(req.request_id, chosen_option="0")
+
+            worker_task = asyncio.create_task(worker.run())
+            await asyncio.wait_for(
+                asyncio.gather(asyncio.create_task(_resolver()), worker_task),
+                timeout=10.0,
+            )
+            summary = worker_task.result()
+            assert "completed" in summary.lower() or "complete" in summary.lower()
+
+        asyncio.run(_run())
+
+    def test_feedback_no_decision_manager_picks_first_option(self, tmp_path: Path) -> None:
+        """Without a DecisionManager, FEEDBACK auto-selects option 0 instead
+        of busy-looping forever."""
+        from agent_baton.models.execution import FeedbackQuestion
+
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+        plan.phases[0].feedback_questions = [
+            FeedbackQuestion(
+                question_id="q1",
+                question="Which layout?",
+                context="",
+                options=["Grid", "List"],
+                option_agents=["frontend-engineer", "frontend-engineer"],
+                option_prompts=["Build grid for {task}", "Build list for {task}"],
+            )
+        ]
+
+        async def _run():
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            engine.record_step_result("1.1", "backend", status="complete")
+            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())  # no DM
+            summary = await asyncio.wait_for(worker.run(), timeout=10.0)
+            assert "completed" in summary.lower() or "complete" in summary.lower()
+
+        asyncio.run(_run())
+
+    def test_interact_stale_resolution_is_not_replayed_on_next_turn(
+        self, tmp_path: Path,
+    ) -> None:
+        """One resolved interact answer must resume exactly one turn.
+
+        Regression (phase 2 review): the interact decision ID was keyed on
+        ``(task, step)`` only, so on turn 2 the worker found turn 1's
+        already-resolved decision under the same ID and re-applied the same
+        input on every subsequent turn without ever asking the human again.
+        """
+        from unittest.mock import MagicMock
+
+        dm = DecisionManager(decisions_dir=tmp_path / "decisions")
+        engine = MagicMock()
+        engine.status.return_value = {"task_id": "task-i"}
+        shutdown = asyncio.Event()
+        shutdown.set()  # let _handle_interact return instead of polling
+        worker = TaskWorker(
+            engine=engine, launcher=DryRunLauncher(),
+            decision_manager=dm, shutdown_event=shutdown,
+            gate_poll_interval=0.01,
+        )
+
+        def _action(turn: int):
+            a = MagicMock()
+            a.interact_step_id = "1.1"
+            a.interact_turn = turn
+            a.message = "agent asks a question"
+            return a
+
+        async def _run():
+            # Turn 1: a pending decision is recorded (shutdown set → returns).
+            await worker._handle_interact(_action(1))
+            pending = [r for r in dm.pending() if r.task_id == "task-i"]
+            assert len(pending) == 1
+            turn1_id = pending[0].request_id
+            dm.resolve(turn1_id, chosen_option="reply", rationale="answer-one")
+
+            # Turn 1 re-entry (e.g. after restart): applies the answer once.
+            await worker._handle_interact(_action(1))
+            engine.provide_interact_input.assert_called_once_with(
+                step_id="1.1", input_text="answer-one",
+            )
+
+            # Turn 2: the stale turn-1 resolution must NOT be replayed —
+            # a fresh pending decision must be recorded instead.
+            await worker._handle_interact(_action(2))
+            engine.provide_interact_input.assert_called_once()
+            pending2 = [r for r in dm.pending() if r.task_id == "task-i"]
+            assert len(pending2) == 1
+            assert pending2[0].request_id != turn1_id
+
+        asyncio.run(_run())
+
+    def test_interact_no_decision_manager_completes_immediately(self, tmp_path: Path) -> None:
+        """Without a DecisionManager, INTERACT finalizes via
+        complete_interaction() instead of busy-looping forever."""
+        plan = _plan(phases=[_phase(phase_id=0, steps=[_step("1.1")])])
+
+        async def _run():
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            state = engine._load_execution()
+            state.step_results.append(
+                __import__("agent_baton.models.execution", fromlist=["StepResult"]).StepResult(
+                    step_id="1.1", agent_name="backend", status="interacting",
+                )
+            )
+            engine._save_execution(state)
+
+            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())  # no DM
+            summary = await asyncio.wait_for(worker.run(), timeout=10.0)
+            assert "completed" in summary.lower() or "complete" in summary.lower()
+
+        asyncio.run(_run())
+
+
+# ===========================================================================
+# WorkerSupervisor / daemon.py — persistent decision routing (mandatory)
+#
+# Regression coverage for: "Ensure daemon and supervisor always receive a
+# persistent DecisionManager when human-required actions are possible,
+# never auto-approve merely because dependency injection was omitted."
+# ===========================================================================
+
+class TestSupervisorAlwaysInjectsDecisionManager:
+    def test_review_gate_is_not_auto_approved_by_bare_supervisor_start(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """WorkerSupervisor.start() must inject its own persistent
+        DecisionManager -- callers that don't pass one explicitly must not
+        get TaskWorker's "no decision manager configured" auto-approve
+        fallback for a human-required gate."""
+        import threading
+
+        # signal.set_wakeup_fd() (used by SignalHandler.install()) only
+        # works on the main thread; this test drives supervisor.start() from
+        # a worker thread so it can poll for the pending decision while the
+        # supervisor's own asyncio.run() blocks, so the signal handling
+        # (irrelevant to what's under test here) is stubbed out.
+        monkeypatch.setattr(
+            "agent_baton.core.runtime.signals.SignalHandler.install", lambda self: None,
+        )
+        monkeypatch.setattr(
+            "agent_baton.core.runtime.signals.SignalHandler.uninstall", lambda self: None,
+        )
+
+        plan = _plan(phases=[
+            _phase(phase_id=0, steps=[_step("1.1")], gate=_gate("review")),
+            _phase(phase_id=1, steps=[_step("2.1", agent="tester")]),
+        ])
+        s = WorkerSupervisor(team_context_root=tmp_path)
+        summary_box: dict = {}
+
+        def _run_supervisor():
+            summary_box["summary"] = s.start(plan=plan, launcher=DryRunLauncher())
+
+        thread = threading.Thread(target=_run_supervisor, daemon=True)
+        thread.start()
+
+        decisions_dir = tmp_path / "decisions"
+        dm = DecisionManager(decisions_dir=decisions_dir)
+        for _ in range(200):
+            if dm.pending():
+                break
+            __import__("time").sleep(0.05)
+        pending = dm.pending()
+        assert pending, (
+            "Expected a durable pending decision under "
+            f"{decisions_dir} -- the gate must not have been auto-approved."
+        )
+        assert pending[0].decision_type == "gate_approval"
+        dm.resolve(pending[0].request_id, chosen_option="approve")
+
+        thread.join(timeout=10.0)
+        assert not thread.is_alive(), "supervisor.start() did not finish after resolution"
+        assert "completed" in summary_box.get("summary", "").lower() or \
+            "complete" in summary_box.get("summary", "").lower()
+
+    def test_run_daemon_with_api_injects_decision_manager_into_worker(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """_run_daemon_with_api must build TaskWorker with a non-None
+        DecisionManager rather than leaving dependency injection to chance."""
+        import agent_baton.cli.commands.execution.daemon as daemon_mod
+
+        captured: dict = {}
+        real_task_worker = TaskWorker
+
+        class _CapturingTaskWorker(real_task_worker):
+            def __init__(self, *args, **kwargs):
+                captured["decision_manager"] = kwargs.get("decision_manager")
+                super().__init__(*args, **kwargs)
+
+            async def run(self):  # type: ignore[override]
+                return "completed (stub)"
+
+        monkeypatch.setattr(
+            "agent_baton.core.runtime.worker.TaskWorker", _CapturingTaskWorker,
+        )
+
+        class _StubServer:
+            def __init__(self, *a, **k):
+                self.should_exit = False
+
+            async def serve(self):
+                await asyncio.sleep(3600)
+
+        monkeypatch.setattr(
+            "uvicorn.Server", lambda config: _StubServer(),
+        )
+        monkeypatch.setattr("uvicorn.Config", lambda *a, **k: object())
+
+        summary = asyncio.run(daemon_mod._run_daemon_with_api(
+            plan=_plan(),
+            launcher=DryRunLauncher(),
+            supervisor=WorkerSupervisor(team_context_root=tmp_path),
+            max_parallel=1,
+            resume=False,
+            host="127.0.0.1",
+            port=0,
+            token=None,
+            team_context_root=tmp_path,
+        ))
+        assert "completed" in summary.lower()
+        assert captured.get("decision_manager") is not None
+
+
+# ===========================================================================
+# Shared execution lifecycle contract
+#
+# Characterization tests for docs/internal/execution-runtime-contract.md:
+#   §6 (pause-and-resume contract) and §8 (state-transition test matrix,
+#   stage 5 "Pause" and stage 8 "Complete" cross-surface equivalence).
+# These pin down the CURRENT contract, including the documented gap that
+# process-level pause does not (yet) have an engine-owned status value.
+# ===========================================================================
+
+class TestSharedLifecycleContract:
+    def test_pause_does_not_mutate_persisted_status(self, tmp_path: Path) -> None:
+        """SIGSTOP/SIGCONT via WorkerSupervisor.pause_worker/resume_worker
+        operate purely at the OS process level today — per contract §6 they
+        must not change ExecutionState.status (there is no engine-owned
+        'paused' transition yet; durability comes only from the fact that
+        state was already saved at the last completed engine call)."""
+        import subprocess
+        import time
+
+        task_id = "pause-contract-task"
+
+        engine = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+        engine.start(_plan(task_id=task_id))
+        status_before = engine.status().get("status")
+        assert status_before == "running"
+
+        # A real, unrelated long-lived subprocess stands in for the daemon
+        # worker process so real SIGSTOP/SIGCONT can be sent without
+        # touching the test process itself.
+        proc = subprocess.Popen(["sleep", "5"])
+        try:
+            pid_dir = tmp_path / "executions" / task_id
+            pid_dir.mkdir(parents=True, exist_ok=True)
+            (pid_dir / "worker.pid").write_text(str(proc.pid))
+
+            s = WorkerSupervisor(team_context_root=tmp_path, task_id=task_id)
+            paused_pid = s.pause_worker(task_id)
+            assert paused_pid == proc.pid
+
+            if sys.platform.startswith("linux"):
+                for _ in range(20):
+                    state_line = next(
+                        line for line in Path(f"/proc/{proc.pid}/status").read_text().splitlines()
+                        if line.startswith("State:")
+                    )
+                    if state_line.split()[1] == "T":
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("worker process never entered SIGSTOP state 'T'")
+
+            # The persisted execution status is untouched by the OS-level pause.
+            assert engine.status().get("status") == status_before == "running"
+
+            resumed_pid = s.resume_worker(task_id)
+            assert resumed_pid == proc.pid
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+        # And still untouched after resume.
+        assert engine.status().get("status") == "running"
+
+    def test_worker_and_direct_engine_calls_reach_equivalent_terminal_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Driving the same plan (a) directly via ExecutionEngine calls (the
+        shape every CLI action-loop command performs one at a time) and
+        (b) via the async TaskWorker (the shape the daemon and BatonRunner
+        use) must persist an equivalent terminal ExecutionState — same
+        status, same set of completed step ids — because both surfaces are
+        required to drive the same ExecutionDriver methods (contract §3)."""
+        plan = _plan(phases=[
+            _phase(phase_id=0, steps=[_step("1.1"), _step("1.2", agent="tester")]),
+        ])
+
+        # (a) CLI-action-loop shape: one direct engine call per stage.
+        direct_engine = ExecutionEngine(team_context_root=tmp_path / "direct")
+        action = direct_engine.start(plan)
+        assert action.action_type.value == "dispatch"
+        direct_engine.mark_dispatched("1.1", "backend")
+        direct_engine.record_step_result("1.1", "backend", status="complete")
+        direct_engine.mark_dispatched("1.2", "tester")
+        direct_engine.record_step_result("1.2", "tester", status="complete")
+        final_action = direct_engine.next_action()
+        assert final_action.action_type.value == "complete"
+        direct_engine.complete()
+        direct_state = direct_engine._load_execution()
+        assert direct_state is not None
+
+        # (b) Daemon/TaskWorker shape: async loop drives the same plan.
+        worker_engine = ExecutionEngine(team_context_root=tmp_path / "worker")
+        worker_engine.start(plan)
+        worker = TaskWorker(engine=worker_engine, launcher=DryRunLauncher())
+        asyncio.run(worker.run())
+        worker_state = worker_engine._load_execution()
+        assert worker_state is not None
+
+        assert direct_state.status == worker_state.status == "complete"
+        direct_complete_ids = {r.step_id for r in direct_state.step_results if r.status == "complete"}
+        worker_complete_ids = {r.step_id for r in worker_state.step_results if r.status == "complete"}
+        assert direct_complete_ids == worker_complete_ids == {"1.1", "1.2"}
+
+
+# ===========================================================================
+# Daemon restart while a decision is pending
+#
+# docs/internal/execution-runtime-contract.md §5 (restart semantics) + §7.1
+# (no duplicate-call guard on record_step_result -- the mid-dispatch gap)
+# describe a worker crash as the one blind spot in "state is durable at
+# every transition boundary": a step left `dispatched` on a crash is stuck
+# until an operator (or WorkerSupervisor.start(resume=True)) clears it. This
+# test drives a real crash-and-restart across a human-required gate: the
+# first worker creates the durable decision request and then "dies" (its
+# asyncio task is cancelled) before the decision is resolved; a brand-new
+# engine + worker pair -- exactly what WorkerSupervisor.start(resume=True)
+# constructs -- must resume without duplicating the pending decision, and
+# the task must reach COMPLETE exactly once after the (single) decision is
+# eventually resolved.
+# ===========================================================================
+
+class TestDaemonRestartWithPendingDecision:
+    def test_worker_crash_while_gate_pending_then_restart_completes_once(
+        self, tmp_path: Path,
+    ) -> None:
+        from agent_baton.core.events.bus import EventBus
+
+        task_id = "restart-pending-decision-task"
+        plan = _plan(
+            task_id=task_id,
+            phases=[
+                _phase(phase_id=0, steps=[_step("1.1")], gate=_gate("review")),
+                _phase(phase_id=1, steps=[_step("2.1", agent="tester")]),
+            ],
+        )
+        decisions_dir = tmp_path / "decisions"
+        bus = EventBus()
+        dm = DecisionManager(decisions_dir=decisions_dir, bus=bus)
+
+        needed_events: list[dict] = []
+        bus.subscribe(
+            "human.decision_needed",
+            lambda event: needed_events.append(event.payload),
+        )
+
+        async def _run() -> str:
+            # --- "Crash" worker: reaches the review gate, records the
+            # durable decision request, then the process dies (the
+            # asyncio task is cancelled) before anyone resolves it. ---
+            engine1 = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            engine1.start(plan)
+            worker1 = TaskWorker(
+                engine=engine1, launcher=DryRunLauncher(), decision_manager=dm, bus=bus,
+            )
+            worker1_task = asyncio.create_task(worker1.run())
+            for _ in range(100):
+                if dm.pending():
+                    break
+                await asyncio.sleep(0.02)
+            assert dm.pending(), "worker1 should have created a pending gate decision"
+            pending_before_crash = dm.pending()[0]
+
+            worker1_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker1_task
+
+            # The crash must not have silently mutated state: the task is
+            # still waiting on the gate, not failed/complete.
+            crashed_status = engine1.status().get("status")
+            assert crashed_status not in ("complete", "failed", "cancelled"), crashed_status
+            # Exactly one decision request exists so far -- crashing did
+            # not spawn a second one.
+            assert len(dm.list_all()) == 1
+            assert len(needed_events) == 1
+
+            # --- "Restart": WorkerSupervisor.start(resume=True) would
+            # build exactly this pair -- a fresh engine that resumes from
+            # disk and clears any stuck `dispatched` steps, plus a fresh
+            # worker sharing the SAME DecisionManager (same decisions_dir
+            # on disk -- the durable queue every surface reads). ---
+            engine2 = ExecutionEngine(team_context_root=tmp_path, task_id=task_id)
+            engine2.resume()
+            engine2.recover_dispatched_steps()
+            launcher2 = DryRunLauncher()
+            worker2 = TaskWorker(
+                engine=engine2, launcher=launcher2, decision_manager=dm, bus=bus,
+            )
+
+            async def _resolve_after_reentry() -> None:
+                # The restarted worker re-enters the same gate. The
+                # deterministic request_id must make it reuse the SAME
+                # pending request rather than mint a duplicate.
+                for _ in range(100):
+                    if dm.pending():
+                        break
+                    await asyncio.sleep(0.02)
+                assert len(dm.pending()) == 1, "restart must not duplicate the pending decision"
+                assert dm.pending()[0].request_id == pending_before_crash.request_id
+                dm.resolve(dm.pending()[0].request_id, chosen_option="approve")
+
+            resolver_task = asyncio.create_task(_resolve_after_reentry())
+            results = await asyncio.gather(resolver_task, worker2.run())
+            return results[1]
+
+        summary = asyncio.run(_run())
+        assert "complete" in summary.lower()
+
+        # Exactly one decision request/resolution ever existed for this
+        # gate across the crash + restart -- no duplicate -- and the
+        # human_decision_needed event fired exactly once (the restarted
+        # worker found the pending request already on disk and did not
+        # re-publish it).
+        all_decisions = dm.list_all()
+        assert len(all_decisions) == 1
+        assert all_decisions[0].status == "resolved"
+        assert len(needed_events) == 1
+
+        final_status = ExecutionEngine(
+            team_context_root=tmp_path, task_id=task_id,
+        ).status()
+        assert final_status.get("status") == "complete"
 
 
 # ===========================================================================

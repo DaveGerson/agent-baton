@@ -184,6 +184,18 @@ class AssemblyStage:
             "degraded_packs": degraded_packs,
             "docs_indexed": docs_indexed,
             "attachments_selected": knowledge_attachment_count,
+            # Talent-factory lifecycle (see capability_gap.py + P5.1 —
+            # docs/internal/talent-factory-contract.md). Empty lists in the
+            # common case where no gap was detected.
+            "capability_gaps": [gap.to_dict() for gap in draft.capability_gaps],
+            "talent_lifecycle_decisions": [
+                decision.to_dict() for decision in draft.talent_lifecycle_decisions
+            ],
+            # P5.2 -- what IntelligentPlanner._run_talent_factory actually
+            # did with each decision above (dispatch/validate/install
+            # outcome + resolved agent name substituted into the roster).
+            # See agent_baton.core.engine.planning.talent_factory.
+            "talent_factory_outcomes": list(draft.talent_factory_outcomes),
         }
 
     # ------------------------------------------------------------------

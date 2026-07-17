@@ -23,10 +23,19 @@ from agent_baton.models.execution import (
 # Plan factories
 # ---------------------------------------------------------------------------
 
-def _step(step_id: str = "1.1", agent: str = "backend", depends_on=None) -> PlanStep:
+def _step(
+    step_id: str = "1.1",
+    agent: str = "backend",
+    depends_on=None,
+    *,
+    step_type: str = "developing",
+    allowed_paths=None,
+    blocked_paths=None,
+) -> PlanStep:
     return PlanStep(
         step_id=step_id, agent_name=agent, task_description="task",
-        depends_on=depends_on or [],
+        depends_on=depends_on or [], step_type=step_type,
+        allowed_paths=allowed_paths or [], blocked_paths=blocked_paths or [],
     )
 
 
@@ -235,6 +244,72 @@ class TestTaskWorkerParallelAndMultiStep:
             assert "completed" in summary.lower() or "complete" in summary.lower(), label
             launched_ids = {l["step_id"] for l in launcher.launches}
             assert expected_ids <= launched_ids, f"{label}: missing {expected_ids - launched_ids}"
+        asyncio.run(_run())
+
+
+class _ScopeRecordingLauncher(DryRunLauncher):
+    """DryRunLauncher that also records configure_step_scope() calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.configured_scopes: dict[str, tuple[list[str], list[str], bool]] = {}
+
+    def configure_step_scope(
+        self, step_id, allowed_paths, blocked_paths=None, *, write_capable=True,
+    ) -> None:
+        self.configured_scopes[step_id] = (
+            list(allowed_paths or []), list(blocked_paths or []), write_capable,
+        )
+
+
+class TestTaskWorkerScopeEnforcement:
+    """Phase 3 'Make scope contracts authoritative' (3.2): TaskWorker must
+    forward each dispatched PlanStep's scope contract to a launcher that
+    supports configure_step_scope() -- converting the previously prose-only
+    allowed_paths/blocked_paths into a real, per-dispatch runtime control."""
+
+    def test_forwards_allowed_and_blocked_paths_to_launcher(self, tmp_path: Path) -> None:
+        async def _run():
+            plan = _plan(phases=[_phase(steps=[
+                _step("1.1", allowed_paths=["app/reporting"], blocked_paths=["app/reporting/secrets"]),
+            ])])
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            launcher = _ScopeRecordingLauncher()
+            worker = TaskWorker(engine=engine, launcher=launcher)
+            await worker.run()
+            assert "1.1" in launcher.configured_scopes
+            allowed, blocked, write_capable = launcher.configured_scopes["1.1"]
+            assert allowed == ["app/reporting"]
+            assert blocked == ["app/reporting/secrets"]
+            assert write_capable is True
+        asyncio.run(_run())
+
+    def test_read_only_step_type_marks_write_capable_false(self, tmp_path: Path) -> None:
+        async def _run():
+            plan = _plan(phases=[_phase(steps=[
+                _step("1.1", step_type="reviewing"),
+            ])])
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            launcher = _ScopeRecordingLauncher()
+            worker = TaskWorker(engine=engine, launcher=launcher)
+            await worker.run()
+            assert launcher.configured_scopes["1.1"][2] is False
+        asyncio.run(_run())
+
+    def test_launcher_without_configure_step_scope_is_skipped_safely(self, tmp_path: Path) -> None:
+        """A plain DryRunLauncher (no configure_step_scope) must not break
+        dispatch -- the wiring is duck-typed and best-effort."""
+        async def _run():
+            plan = _plan(phases=[_phase(steps=[
+                _step("1.1", allowed_paths=["app"]),
+            ])])
+            engine = ExecutionEngine(team_context_root=tmp_path)
+            engine.start(plan)
+            worker = TaskWorker(engine=engine, launcher=DryRunLauncher())
+            summary = await worker.run()
+            assert "complete" in summary.lower()
         asyncio.run(_run())
 
 

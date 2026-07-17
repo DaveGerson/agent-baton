@@ -29,6 +29,14 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     enrich_phases,
     phases_from_dicts,
 )
+from agent_baton.core.engine.planning.utils.phase_normalize import (
+    normalize_phase_references,
+    snapshot_phase_state,
+)
+from agent_baton.core.engine.planning.utils.repo_grounding import (
+    gather_repo_findings,
+    ground_phases_in_repository,
+)
 from agent_baton.core.orchestration.router import REVIEWER_AGENTS
 
 if TYPE_CHECKING:
@@ -119,6 +127,7 @@ class DecompositionStage:
                 archetype, task_id,
                 [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
             )
+            self._ground_heavy_task(plan_phases, draft)
             plan_phases = enrich_phases(plan_phases, task_summary, registry)
             if getattr(draft, 'research_concerns', None):
                 draft.concerns = list(draft.research_concerns)
@@ -188,6 +197,14 @@ class DecompositionStage:
             [(p.name, [s.agent_name for s in p.steps]) for p in plan_phases],
         )
 
+        # 9a.5. Repository-grounded decomposition (heavy tasks only) — must
+        # run BEFORE 9b's enrich_phases, which only fills fields that are
+        # still empty: grounding a step in concrete repo evidence here
+        # means enrich_phases's generic per-agent template never
+        # overwrites it, while a step grounding found nothing for still
+        # falls through to that same generic-template fallback unchanged.
+        self._ground_heavy_task(plan_phases, draft)
+
         # 9b. Enrich steps with cross-phase context and default deliverables
         plan_phases = enrich_phases(plan_phases, task_summary, registry)
 
@@ -197,6 +214,25 @@ class DecompositionStage:
             draft.concerns = list(draft.research_concerns)
 
         return plan_phases
+
+    def _ground_heavy_task(
+        self,
+        plan_phases: list["PlanPhase"],
+        draft: PlanDraft,
+    ) -> None:
+        """Heavy-complexity-only: ground steps in concrete repository
+        evidence (files, tests, symbols) instead of leaving them on
+        generic per-agent/per-phase templates. No-op for light/medium
+        tasks and a no-op (by construction — see
+        ``repo_grounding.gather_repo_findings``) when no project_root is
+        available or the repository yields no matching evidence, so
+        deterministic template-based behavior is unchanged whenever repo
+        grounding has nothing to add.
+        """
+        if draft.inferred_complexity != "heavy":
+            return
+        findings = gather_repo_findings(draft.project_root, draft.task_summary)
+        ground_phases_in_repository(plan_phases, draft.task_summary, findings)
 
     def _resolve_knowledge(
         self,
@@ -295,6 +331,14 @@ class DecompositionStage:
         foresight_engine = services.foresight_engine
 
         # 9.7. Foresight analysis
+        # Snapshot phase/step identity->id BEFORE foresight may insert a
+        # phase ahead of an existing one and renumber everything after
+        # it -- ForesightEngine.analyze mutates the surviving PlanPhase/
+        # PlanStep objects in place, so their old ids are otherwise gone
+        # the instant it reassigns them. See
+        # ``planning.utils.phase_normalize`` module docstring.
+        pre_phase_ids, pre_step_ids = snapshot_phase_state(plan_phases)
+
         foresight_insights: list = []
         try:
             plan_phases, foresight_insights = foresight_engine.analyze(
@@ -311,6 +355,14 @@ class DecompositionStage:
 
         # Store on the draft for pipeline consumers and _sync_last_state.
         draft.foresight_insights = foresight_insights
+
+        # 9.7b. Repair any phase/step reference that went stale because
+        # foresight renumbered phases -- e.g. step 9b's "Build on the ...
+        # output from phase N" text baked in before foresight ran. No-op
+        # when foresight didn't actually change any numbering.
+        plan_phases = normalize_phase_references(
+            plan_phases, pre_phase_ids=pre_phase_ids, pre_step_ids=pre_step_ids,
+        )
 
         # 9.8. Resolve knowledge for foresight-inserted steps.
         if resolver is not None and foresight_insights:
@@ -347,7 +399,7 @@ class DecompositionStage:
         registry,
     ) -> list["PlanPhase"]:
         """DIRECT archetype: single Implement + Review, minimal overhead."""
-        from agent_baton.models.execution import PlanPhase, PlanStep, PlanGate
+        from agent_baton.models.execution import PlanPhase, PlanStep
 
         # Single implement step with the best-fit agent
         implement_agent = draft.resolved_agents[0] if draft.resolved_agents else "backend-engineer"
@@ -362,7 +414,14 @@ class DecompositionStage:
             phase_id=1,
             name="Implement",
             steps=[implement_step],
-            gate=PlanGate(gate_type="test", command="pytest --tb=short -q", description="Run tests"),
+            # Gate left unset (None) rather than a hardcoded command --
+            # EnrichmentStage._apply_gates only fills in ``default_gate``
+            # (which is where gate_scope/stack detection actually live)
+            # for phases whose gate is still None at that point. A
+            # hardcoded PlanGate here silently opted DIRECT-archetype
+            # plans out of gate_scope="full"/"smoke" entirely (bd-124f
+            # regression -- see tests/test_planner_gate_scoping.py
+            # TestCreatePlanGateScope).
         )
 
         # Lightweight review phase
@@ -463,11 +522,9 @@ class DecompositionStage:
                         depends_on=["3.1"],
                     ),
                 ],
-                gate=PlanGate(
-                    gate_type="test",
-                    command="pytest --tb=short -q",
-                    description="Regression test passes, existing tests pass",
-                ),
+                # Gate left unset -- see the "Implement" phase comment in
+                # _build_direct_phases above; EnrichmentStage._apply_gates
+                # fills this in via gate_scope-aware ``default_gate``.
             ),
             PlanPhase(
                 phase_id=4,

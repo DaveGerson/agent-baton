@@ -9,6 +9,11 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_baton.core.engine.planning.scope_contract import (
+    ScopeContractError,
+    diagnose_step_scope,
+    is_intentionally_read_only,
+)
 from agent_baton.core.manager.artifacts import ManagerArtifacts, write_all, write_text
 from agent_baton.core.manager.context_bundles import (
     ContextBundleBuilder,
@@ -31,7 +36,13 @@ if TYPE_CHECKING:
     from agent_baton.core.config.manager import ManagerConfig
     from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
     from agent_baton.models.execution import MachinePlan, PlanStep
-    from agent_baton.models.manager import KnowledgePlan, ScopeMap, TeamBlueprint, Workstream
+    from agent_baton.models.manager import (
+        KnowledgePlan,
+        ScopeContract,
+        ScopeMap,
+        TeamBlueprint,
+        Workstream,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -92,20 +103,21 @@ class ManagerModePlanner:
     Calling convention (enforced by the caller, not this class): callers
     invoke :meth:`build_and_write` only when the plan itself is being
     persisted (``baton plan --save``); for a preview (``--dry-run``) they
-    call :meth:`build` alone so nothing is written to disk. ``build()``
-    never touches the filesystem -- as a consequence, a step's own scope
-    contract / role card have not been written yet when its context
-    bundle is assembled during a dry-run preview, so their ``must_read``
-    token estimates come back ``0`` with a "missing file" truncation
-    warning (truthful: those files genuinely do not exist yet in a
-    preview). :meth:`build_and_write` avoids this by writing each scope
-    contract's Markdown sidecar and each role card's Markdown -- the two
-    ``must_read`` entries every bundle carries for itself -- to disk
-    *before* building that step's bundle, so real-run token accounting is
-    accurate. ``write_all`` still performs the authoritative final write
-    pass (including the JSON contracts, which are never pre-written) --
-    the early write is a superset-safe, idempotent head start solely for
-    token-estimation accuracy.
+    call :meth:`build` alone so nothing is written to disk. Token
+    accounting is identical either way: each step's bundle estimates its
+    own scope-contract / role-card ``must_read`` tokens from the rendered
+    text in memory (``ContextBundleBuilder.build``'s ``contract_text`` /
+    ``role_card_text``), never by re-reading the file at the target path
+    -- so ``build()`` (dry-run previews, and the transactional
+    ``rebuild_and_publish`` path used by PMO Forge and runtime
+    amendments, which must not write anything before validation) produces
+    the same estimates as ``build_and_write()`` for the same input, and
+    an amendment rebuild never inherits a previous revision's stale file
+    sizes. :meth:`build_and_write` additionally writes each contract's
+    Markdown sidecar and each role card's Markdown early (a superset-safe,
+    idempotent head start); ``write_all`` still performs the
+    authoritative final write pass (including the JSON contracts, which
+    are never pre-written).
     """
 
     def __init__(
@@ -116,11 +128,24 @@ class ManagerModePlanner:
         team_context_dir: Path,
         knowledge_registry: "KnowledgeRegistry | None" = None,
         cli_gate_scope_explicit: bool = False,
+        strict_scope: bool = False,
     ) -> None:
         self.config = config
         self.project_root = Path(project_root)
         self.team_context_dir = Path(team_context_dir)
         self.cli_gate_scope_explicit = cli_gate_scope_explicit
+        # Phase 3 "Make scope contracts authoritative": when True, a
+        # write-capable step (agent_baton.core.engine.planning.
+        # scope_contract.WRITE_CAPABLE_STEP_TYPES) that ends up with an
+        # empty, normalized allowed_paths raises ScopeContractError instead
+        # of silently dispatching with ambiguous write scope. Contradictory
+        # scope (an allowed path colliding with a blocked one) always
+        # raises regardless of this flag -- that is never valid. Defaults
+        # to False so existing advisory-mode callers are unaffected;
+        # missing/ambiguous scope is still recorded on
+        # ManagerArtifacts.warnings either way (see
+        # _build_contracts_and_bundles).
+        self.strict_scope = strict_scope
         self._knowledge_registry = knowledge_registry
 
     # ------------------------------------------------------------------
@@ -179,8 +204,19 @@ class ManagerModePlanner:
         charter = maybe_enrich_charter(charter, task_summary)
         artifacts.charter = charter
 
-        # scope map
-        scope_map = ScopeMapBuilder(config).build(charter, plan)
+        # scope map -- deterministic write-scope derivation/validation
+        # (agent_baton.core.engine.planning.scope_contract). Ambiguous
+        # write-scope diagnostics land on artifacts.warnings regardless of
+        # strict_scope; strict_scope additionally turns them (and any
+        # contradictory allowed/blocked collision) into a raised
+        # ScopeContractError before any sidecar is written.
+        scope_map = ScopeMapBuilder(config).build(
+            charter,
+            plan,
+            project_root=self.project_root,
+            strict=self.strict_scope,
+            diagnostics=artifacts.warnings,
+        )
         artifacts.scope_map = scope_map
 
         # Positional phase -> workstream correspondence (ScopeMapBuilder
@@ -285,6 +321,7 @@ class ManagerModePlanner:
                 contract = ScopeContractBuilder(config).build(
                     step, contract_workstream, role_card, scope_map=scope_map
                 )
+                contract = self._apply_scope_contract_policy(step, contract, artifacts.warnings)
                 contract_md = contract_to_markdown(contract)
                 artifacts.scope_contracts[step.step_id] = contract
                 artifacts.scope_contracts_md[step.step_id] = contract_md
@@ -308,8 +345,60 @@ class ManagerModePlanner:
                     prior_handoff_paths,
                     role_card_path=role_card_path,
                     task_id=plan.task_id,
+                    # Estimate the contract/role-card must-read tokens from
+                    # the rendered text itself, never from re-reading the
+                    # file at the target path: during `build()` (dry-run
+                    # preview and the transactional rebuild_and_publish /
+                    # PMO-Forge path) those files do not exist yet, and
+                    # during an amendment rebuild the on-disk copy is the
+                    # PREVIOUS revision's bytes. The estimate is identical
+                    # to the published file's size once written (see
+                    # _text_token_estimate), so CLI and PMO bundles agree.
+                    contract_text=contract_md,
+                    role_card_text=artifacts.role_cards_md[role_card.role],
                 )
                 artifacts.context_bundles[step.step_id] = bundle
+
+    def _apply_scope_contract_policy(
+        self,
+        step: "PlanStep",
+        contract: "ScopeContract",
+        warnings: list[str],
+    ) -> "ScopeContract":
+        """Enforce the deterministic scope-contract policy on *contract*.
+
+        ``ScopeContractBuilder.build`` (context_bundles.py) falls back to
+        ``workstream.allowed_paths`` whenever a step has no explicit
+        ``allowed_paths`` of its own -- correct for write-capable steps
+        (they inherit their workstream's derived write scope), but wrong
+        for an intentionally read-only step (``scope_contract.
+        READ_ONLY_STEP_TYPES`` -- e.g. an injected adversarial-review
+        step): inheriting the workstream's write paths would silently
+        grant a reviewer write access it never asked for and was never
+        meant to have. This strips the contract back to the step's own
+        explicit paths (empty, if it declared none) for read-only steps --
+        the valid representation of "this step does not write" -- before
+        the resulting contract is diagnosed like every other step's.
+
+        Diagnostics (missing/contradictory write scope) are always
+        appended to *warnings*; ``self.strict_scope`` additionally raises
+        :class:`ScopeContractError` for a missing (ambiguous) finding.
+        Contradictory scope (allowed/blocked collision) always raises,
+        regardless of ``strict_scope`` -- a step is never simultaneously
+        permitted and forbidden to touch the same area.
+        """
+        if is_intentionally_read_only(step.step_type) and not step.allowed_paths:
+            contract = contract.model_copy(update={"allowed_paths": []})
+
+        diagnostic = diagnose_step_scope(
+            step.step_id, step.step_type, contract.allowed_paths, step.blocked_paths
+        )
+        if diagnostic is not None:
+            warnings.append(str(diagnostic))
+            if diagnostic.severity == "critical" or self.strict_scope:
+                raise ScopeContractError(str(diagnostic))
+
+        return contract
 
 
 def _resolve_role_card(

@@ -328,3 +328,52 @@ class TestToolsParsing:
         registry.load_directory(agents_dir)
         agent = registry.get("test-agent")
         assert agent.tools == expected_tools
+
+
+class TestRegisterGeneratedAgent:
+    """Talent-factory's ``registry_reload: immediate`` primitive (P5.2).
+
+    See agent_baton.core.engine.planning.talent_factory.
+    """
+
+    def test_registers_a_new_agent_immediately(self, tmp_path: Path) -> None:
+        registry = AgentRegistry()
+        assert registry.get("widget-specialist") is None
+
+        path = tmp_path / "widget-specialist.md"
+        path.write_text(
+            "---\nname: widget-specialist\ndescription: builds widgets\nmodel: sonnet\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        agent = registry.register_generated_agent(path)
+
+        assert agent is not None
+        assert agent.name == "widget-specialist"
+        assert registry.get("widget-specialist") is agent
+        assert "widget-specialist" in registry.names
+
+    def test_overrides_an_existing_in_memory_entry(self, tmp_path: Path) -> None:
+        registry = AgentRegistry()
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "widget-specialist.md").write_text(
+            "---\nname: widget-specialist\ndescription: old\nmodel: sonnet\n---\nold body\n",
+            encoding="utf-8",
+        )
+        registry.load_directory(agents_dir)
+        assert registry.get("widget-specialist").description == "old"
+
+        new_path = tmp_path / "regenerated.md"
+        new_path.write_text(
+            "---\nname: widget-specialist\ndescription: new\nmodel: opus\n---\nnew body\n",
+            encoding="utf-8",
+        )
+        registry.register_generated_agent(new_path)
+
+        assert registry.get("widget-specialist").description == "new"
+
+    def test_unreadable_file_returns_none(self, tmp_path: Path) -> None:
+        registry = AgentRegistry()
+        missing = tmp_path / "does-not-exist.md"
+        assert registry.register_generated_agent(missing) is None

@@ -18,7 +18,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_baton.core.config.manager import ManagerConfig
+from agent_baton.core.engine.planning.scope_contract import ScopeContractError
 from agent_baton.core.manager.artifacts import ManagerArtifacts
 from agent_baton.core.manager.paths import ManagerArtifactPaths
 from agent_baton.core.manager.planner import ManagerModePlanner
@@ -351,6 +354,89 @@ def test_save_writes_all_sidecars(tmp_path: Path) -> None:
     contract_ref = next(r for r in bundle.must_read if r.reason == "scope contract")
     assert contract_ref.token_estimate > 0
     assert not any("Missing file for token estimate" in w for w in bundle.truncation_warnings)
+
+
+def _ambiguous_scope_plan(task_id: str = "task-ambiguous-scope") -> MachinePlan:
+    """A single write-capable step with zero derivable path evidence."""
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="do the thing",
+        task_type="feature",
+        complexity="medium",
+        risk_level="LOW",
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Do the thing.",
+                        deliverables=["the thing"],
+                        step_type="developing",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 "Make scope contracts authoritative" -- manager-planner-level
+# scope-contract validation/diagnostics.
+# ---------------------------------------------------------------------------
+
+
+def test_ambiguous_write_scope_recorded_as_warning_by_default(tmp_path: Path) -> None:
+    """Default (strict_scope=False, unchanged for existing callers): a
+    write-capable step with no derivable allowed_paths does not fail
+    composition, but is recorded on artifacts.warnings."""
+    plan = _ambiguous_scope_plan()
+    planner = _planner(tmp_path)
+
+    artifacts = planner.build(plan, plan.task_summary)
+
+    assert artifacts.scope_contracts["1.1"].allowed_paths == []
+    assert any("write_scope_missing" in w for w in artifacts.warnings)
+
+
+def test_strict_scope_raises_for_ambiguous_write_scope(tmp_path: Path) -> None:
+    """strict_scope=True turns the same ambiguous scope into a planning
+    error raised before any sidecar is written."""
+    plan = _ambiguous_scope_plan()
+    planner = ManagerModePlanner(
+        ManagerConfig(),
+        project_root=tmp_path,
+        team_context_dir=tmp_path / ".claude" / "team-context",
+        knowledge_registry=_empty_registry(),
+        strict_scope=True,
+    )
+
+    with pytest.raises(ScopeContractError, match="write_scope_missing"):
+        planner.build(plan, plan.task_summary)
+
+
+def test_review_step_contract_never_inherits_workstream_write_paths(tmp_path: Path) -> None:
+    """Binding rule: an injected review step (step_type='reviewing', no
+    explicit allowed_paths of its own) must be represented with an empty
+    allowed_paths -- never the phase's write-capable workstream paths
+    that ScopeContractBuilder's naive `step.allowed_paths or
+    workstream.allowed_paths` fallback would otherwise hand it."""
+    plan = _two_phase_plan()
+    planner = _planner(tmp_path)
+
+    artifacts = planner.build(plan, plan.task_summary)
+
+    for review_step_id in ("review-1", "review-2", "review-2-final"):
+        contract = artifacts.scope_contracts[review_step_id]
+        assert contract.allowed_paths == [], (
+            f"{review_step_id} must not inherit write-capable workstream paths"
+        )
+
+    # The implementation steps keep their own explicit write scope.
+    assert artifacts.scope_contracts["1.1"].allowed_paths == ["app/reporting/**"]
+    assert artifacts.scope_contracts["2.1"].allowed_paths == ["tests/reporting/**"]
 
 
 def test_dry_run_and_save_produce_equivalent_artifacts(tmp_path: Path) -> None:

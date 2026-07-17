@@ -136,6 +136,33 @@ class ContextManager:
             return self.plan_path.read_text(encoding="utf-8")
         return None
 
+    def load_plan(self) -> MachinePlan | None:
+        """Load ``plan.json`` and parse it back into a :class:`MachinePlan`.
+
+        Complements :meth:`read_plan` (which returns the human-oriented
+        Markdown rendering) with the machine-consumable counterpart: callers
+        that need the structured plan (e.g. the PMO manager-mode read API,
+        which must never read an arbitrary caller-supplied path -- see
+        ``agent_baton/api/routes/pmo_manager.py``) get it through this one
+        conventional path instead of re-implementing ``plan.json`` parsing
+        at each call site.
+
+        Returns ``None`` when the file is absent or fails to parse --
+        callers must treat that as "no plan available", not raise.
+        """
+        import json
+
+        if not self.plan_json_path.exists():
+            return None
+        try:
+            data = json.loads(self.plan_json_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        try:
+            return MachinePlan.from_dict(data)
+        except (TypeError, ValueError, KeyError):
+            return None
+
     # ── Shared Context ─────────────────────────────────────
 
     @property

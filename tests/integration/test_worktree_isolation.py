@@ -10,10 +10,25 @@ New tests motivated by dogfood bugs observed this session:
   - test_no_parent_tree_contamination_under_concurrent_subagents (bd-36a6)
   - test_baton_db_isolation_under_worktree (bd-543e)
   - test_worktree_path_walks_up_to_parent_baton_db (bd-e1ae / feedback_schema_project_id.md)
+
+Phase 1 1.2 additions (regression coverage for the bd-1.1 silent-loss fix):
+  - TestRealGitEndToEndWorktreeCommit — drives ClaudeCodeLauncher (a
+    deterministic fake ``claude`` executable) against a real worktree, then
+    feeds the launcher's own commit_hash/files_changed through
+    ExecutionEngine.record_step_result() (real WorktreeManager, no mocks) and
+    asserts the parent repo receives exactly that commit and the worktree is
+    only cleaned up after a successful fold.  Does not mock ``git rev-parse``
+    or ``git diff`` anywhere in the chain.
+  - TestUnverifiableProvenanceFailsClosed — a "successful" step (subprocess
+    exit 0) that reports a commit_hash which cannot be verified as real work
+    inside its own worktree must fail closed: step status becomes "failed",
+    the worktree is retained on disk, and the parent branch never advances.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -24,8 +39,13 @@ import pytest
 from agent_baton.core.engine.dispatcher import PromptDispatcher
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.worktree_manager import (
+    WorktreeCleanupError,
     WorktreeHandle,
     WorktreeManager,
+)
+from agent_baton.core.runtime.claude_launcher import (
+    ClaudeCodeConfig,
+    ClaudeCodeLauncher,
 )
 from agent_baton.models.execution import (
     ActionType,
@@ -959,3 +979,797 @@ class TestRecordStepResultRetriesCleanupWithForce:
         state_final = engine._load_execution()
         assert state_final is not None
         assert "1.1" not in getattr(state_final, "step_worktrees", {})
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.2 — real-git end-to-end worktree regression (bd-1.1 fix coverage)
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the FULL chain: a real ``claude`` subprocess (a
+# deterministic fake executable) committing inside a REAL git worktree,
+# discovered by the real (unmocked) ``ClaudeCodeLauncher._git_rev_parse`` /
+# ``_git_diff_files`` calls, fed through the real
+# ``ExecutionEngine.record_step_result()`` -> ``WorktreeManager.fold_back()``
+# -> ``WorktreeManager.cleanup()`` chain.  No ``git rev-parse`` or
+# ``git diff`` call anywhere below is mocked.
+#
+# NOTE on fold strategy (history): when this regression was first written,
+# ``fold_back()`` defaulted to the "rebase" strategy, whose fetch step git
+# always refuses for a live worktree ("refusing to fetch into branch ...
+# checked out" -- the worktree's branch stays checked out for its entire
+# lifetime), so the test had to pin strategy="none" to route around it.
+# Phase 1 1.3 (commit "fix default fold strategy always failing for real
+# worktree commits") changed the default to "merge", which merges the
+# commit by SHA (worktrees of one repository share one object database, so
+# no fetch is needed) into the branch checked out in the canonical repo.
+# The positive test below therefore now drives ``record_step_result()``
+# end to end with the REAL production default -- no fold override, no git
+# call mocked anywhere.
+
+
+def _write_fake_claude_committing_in_cwd(
+    script_path: Path,
+    *,
+    filename: str = "agent_work.txt",
+    content: str = "hello from agent",
+) -> Path:
+    """Write a deterministic fake ``claude`` executable.
+
+    Ignores every CLI flag/prompt it is invoked with.  Commits *filename*
+    into whatever directory it is invoked from (its own process ``cwd`` --
+    the worktree, when launched with ``cwd_override``) and prints a
+    well-formed ``claude --output-format json`` success payload on stdout.
+    Deterministic: same filename/content/JSON every invocation.
+    """
+    script_path.write_text(
+        "#!/bin/sh\n"
+        "set -e\n"
+        f'echo "{content}" > {filename}\n'
+        f"git add {filename}\n"
+        "git commit -m 'agent commit inside worktree' --quiet\n"
+        "cat <<'JSONEOF'\n"
+        '{"is_error": false, "result": "committed agent_work.txt", '
+        '"duration_ms": 5, "usage": {"input_tokens": 3, "output_tokens": 2}}\n'
+        "JSONEOF\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+    return script_path
+
+
+class TestRealGitEndToEndWorktreeCommit:
+    """Real ``claude`` subprocess + real worktree + real fold-back + real
+    cleanup.  Regression for the bd-1.1 silent-loss path: before that fix,
+    ``ClaudeCodeLauncher`` probed the parent repo instead of
+    ``cwd_override`` for pre/post HEAD capture, so a real commit made
+    inside the worktree was invisible (``commit_hash``/``files_changed``
+    came back empty) and the executor's "no commit -> clean up" branch
+    silently deleted the worktree, discarding the agent's work.  This test
+    fails on that old code (the launcher would report no commit, so the
+    fold below never happens and the parent never receives
+    ``agent_work.txt``) and passes only when commit discovery, fold-back,
+    and cleanup all target the correct (worktree) repository.
+    """
+
+    def test_worktree_commit_discovered_folded_and_cleaned_up(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-real-git-e2e")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state_mid = engine._load_execution()
+        assert state_mid is not None
+        handle_dict = getattr(state_mid, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None, "worktree must be created on dispatch"
+        wt_path = Path(handle_dict["path"])
+        base_sha = handle_dict["base_sha"]
+        assert wt_path.is_dir()
+
+        # Deterministic fake `claude` executable that commits ONLY inside
+        # whatever directory it's invoked in (the worktree, via
+        # cwd_override) -- never the parent repository.
+        fake_claude = _write_fake_claude_committing_in_cwd(
+            tmp_path / "fake_claude.sh"
+        )
+        config = ClaudeCodeConfig(
+            claude_path=str(fake_claude), working_directory=tmp_git_repo
+        )
+        launcher = ClaudeCodeLauncher(config)
+
+        async def _run():
+            return await launcher.launch(
+                "backend-engineer",
+                "sonnet",
+                "implement the thing",
+                "1.1",
+                cwd_override=str(wt_path),
+                task_id="task-real-git-e2e",
+            )
+
+        result = asyncio.run(_run())
+
+        # Launcher-level assertions: real, unmocked git rev-parse (pre/post
+        # HEAD capture) + git diff (files_changed) targeting the worktree.
+        assert result.status == "complete"
+        assert result.commit_hash, "launcher must report the worktree's new commit"
+        assert result.commit_hash != base_sha, (
+            "launcher must not report the parent repo's unchanged HEAD as a "
+            "commit -- this is exactly the bd-1.1 silent-loss signature"
+        )
+        assert result.files_changed == ["agent_work.txt"]
+
+        # Drive the executor through record_step_result() + fold-back with
+        # the launcher's own (real, unmocked) commit_hash/files_changed and
+        # the REAL production-default fold strategy (merge) -- nothing in
+        # the fold path is overridden or mocked.
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome=result.outcome,
+            commit_hash=result.commit_hash,
+            files_changed=result.files_changed,
+            duration_seconds=result.duration_seconds,
+            estimated_tokens=result.estimated_tokens,
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "complete", (
+            f"step must record complete after a genuine fold; got "
+            f"{step_result.status!r} error={step_result.error!r}"
+        )
+
+        # The parent branch receives EXACTLY that commit: the default
+        # (merge) strategy lands it via a --no-ff merge, so the agent's
+        # commit must now be an ancestor of main and main must have moved
+        # past base_sha.
+        parent_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head != base_sha, "parent branch must have advanced"
+        is_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", result.commit_hash, parent_head],
+            cwd=tmp_git_repo,
+            capture_output=True,
+        )
+        assert is_ancestor.returncode == 0, (
+            "the worktree's commit must be folded into (reachable from) the "
+            f"parent branch; main={parent_head!r} commit={result.commit_hash!r}"
+        )
+        # The executor persists the folded tip for downstream consumers.
+        assert getattr(state_final, "working_branch_head", "") == parent_head, (
+            "working_branch_head must equal the parent tip after fold"
+        )
+        show = subprocess.run(
+            ["git", "show", f"{parent_head}:agent_work.txt"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert show.returncode == 0, (
+            "agent_work.txt must be reachable from parent HEAD after fold-back"
+        )
+
+        # The worktree is cleaned up ONLY after successful fold-back +
+        # recovery -- never before, never on a discarded/failed fold.
+        assert not wt_path.exists(), (
+            "worktree directory must be removed after a successful fold"
+        )
+        assert "1.1" not in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must drop the handle once cleanup succeeds"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.2 — unverifiable-provenance retention regression
+# ---------------------------------------------------------------------------
+
+
+class TestUnverifiableProvenanceFailsClosed:
+    """A step whose subprocess succeeded (status="complete", exit 0) but
+    whose reported ``commit_hash`` cannot be verified as real, new work
+    inside its own worktree must fail closed via the real (unmocked)
+    ``WorktreeManager._assert_commit_provenance()`` guard: the step is
+    recorded as failed, the worktree is retained on disk (never folded,
+    never cleaned up), its handle stays in ``step_worktrees`` for recovery,
+    and the parent branch never advances.
+
+    This is the defense-in-depth guard from the bd-1.1 fix: even if some
+    future launcher bug (or a caller further up the stack) reports a
+    ``commit_hash`` for a "successful" run that does not actually exist as
+    new work in the worktree it claims to come from, the worktree lifecycle
+    must fail closed instead of silently folding/discarding.
+    """
+
+    def test_bogus_commit_hash_fails_closed_and_retains_worktree(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(engine, "_detect_branch", lambda: "main")
+
+        plan = _plan(task_id="task-unverifiable-prov")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state_mid = engine._load_execution()
+        assert state_mid is not None
+        handle_dict = getattr(state_mid, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        base_sha = handle_dict["base_sha"]
+        assert wt_path.is_dir()
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head_before == base_sha
+
+        # A "successful" step (subprocess exit 0, status="complete") that
+        # reports a commit_hash that is not a real object anywhere -- the
+        # signature of a launcher bug (e.g. wrong-directory HEAD capture) or
+        # any other caller reporting phantom provenance. No git call is
+        # mocked: the real _assert_commit_provenance() must reject this by
+        # actually inspecting the worktree.
+        bogus_commit = "f" * 40
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims to have committed",
+            commit_hash=bogus_commit,
+            files_changed=["phantom.txt"],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "a step reporting an unverifiable commit_hash must fail closed; "
+            f"got status={step_result.status!r}"
+        )
+        assert "WorktreeProvenanceError" in (step_result.error or ""), (
+            f"failure must be attributed to the provenance guard; got "
+            f"error={step_result.error!r}"
+        )
+
+        # Recoverable state retained: worktree never deleted, handle stays
+        # in step_worktrees for forensic recovery / takeover.
+        assert wt_path.is_dir(), "worktree must be retained for recovery"
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )
+
+        # The parent branch must NOT have advanced -- the phantom commit was
+        # never folded in.
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert parent_head_after == base_sha == parent_head_before, (
+            "parent branch must not advance when provenance is unverifiable"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.3 — resume_from_takeover must not discard work on fold failure
+# ---------------------------------------------------------------------------
+#
+# Regression for a defect found reviewing the bd-1.1 fold-back fail-closed
+# guards: resume_from_takeover() marked the TakeoverRecord "resumed_at" /
+# "resolution=completed" and returned True BEFORE checking whether
+# WorktreeManager.fold_back() actually succeeded, and any exception it
+# raised was caught and merely logged. A rebase conflict or a provenance
+# failure during resume therefore looked like a successful resume to every
+# caller (CLI, state on disk), while the developer's commits stayed
+# stranded in a worktree that nothing further protected from later
+# reclamation (gc_stale has no reason to retain a worktree whose takeover
+# record claims to be resolved).
+
+
+def _force_gate_failed(engine: "ExecutionEngine") -> None:
+    state = engine._load_execution()
+    assert state is not None
+    state.status = "gate_failed"
+    engine._save_execution(state)
+
+
+class TestResumeFromTakeoverFoldFailureDoesNotDiscardWork:
+    """A fold-back failure during resume_from_takeover must fail closed:
+    the takeover record must stay active, the worktree must be retained on
+    disk (never cleaned up), and the call must return False -- never a
+    silently-logged "success"."""
+
+    def test_fold_back_exception_leaves_record_active_and_worktree_intact(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("BATON_TAKEOVER_ENABLED", "1")
+        from agent_baton.core.engine.takeover import TakeoverRecord
+        from agent_baton.core.engine.worktree_manager import WorktreeFoldError
+
+        plan = _plan(task_id="task-resume-fold-fail")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        _force_gate_failed(engine)
+        record = engine.start_takeover("1.1", reason="test-fold-fail", pid=0)
+        assert record is not None
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Developer commits inside the worktree so HEAD advances past
+        # last_known_worktree_head -- resume must attempt a real fold.
+        (wt_path / "dev_fix.py").write_text("# developer fix\n")
+        subprocess.run(["git", "add", "dev_fix.py"], cwd=wt_path, check=True,
+                        capture_output=True)
+        subprocess.run(["git", "commit", "-m", "developer fix"], cwd=wt_path,
+                        check=True, capture_output=True)
+
+        # Simulate the documented rebase-fold defect (git refuses to fetch
+        # into a branch checked out in its own worktree) without depending
+        # on that specific git failure mode being reproducible everywhere.
+        def _always_conflicts(self, handle, *, commit_hash="", strategy="rebase"):
+            raise WorktreeFoldError(f"simulated conflict for step={handle.step_id}")
+
+        monkeypatch.setattr(
+            type(engine._worktree_mgr), "fold_back", _always_conflicts
+        )
+
+        result = engine.resume_from_takeover("1.1", rerun_gate=False, abort=False)
+
+        assert result is False, (
+            "resume_from_takeover must report failure when fold-back fails "
+            "-- it must never claim success for work that was not folded"
+        )
+
+        state_after = engine._load_execution()
+        assert state_after is not None
+
+        # The takeover record must remain ACTIVE (not silently marked
+        # resolved) so the operator knows the resume did not truly land.
+        last_record_dict = None
+        for r in state_after.takeover_records:
+            if r.get("step_id") == "1.1":
+                last_record_dict = r
+        assert last_record_dict is not None
+        last_record = TakeoverRecord.from_dict(last_record_dict)
+        assert last_record.is_active(), (
+            "takeover record must stay active after a failed fold-back -- "
+            f"got resumed_at={last_record.resumed_at!r} "
+            f"resolution={last_record.resolution!r}"
+        )
+
+        # The worktree (and the developer's commit inside it) must be
+        # retained on disk -- never cleaned up when the fold never landed.
+        assert wt_path.is_dir(), (
+            "worktree must be retained on disk when fold-back fails; "
+            "deleting it here would permanently discard the developer's commit"
+        )
+        assert (wt_path / "dev_fix.py").exists()
+
+        # The handle must still be tracked in step_worktrees so later
+        # lifecycle code (straggler sweep, forensic recovery) still knows
+        # about it -- it must not be silently dropped as if folded.
+        assert "1.1" in getattr(state_after, "step_worktrees", {}), (
+            "step_worktrees must still reference the un-folded worktree"
+        )
+
+        # The parent branch must NOT have advanced -- nothing was folded.
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head_after == parent_head_before, (
+            "parent branch must not advance when fold-back failed"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 1.3 — unmodeled fold/discard-check exceptions must also fail closed
+# ---------------------------------------------------------------------------
+#
+# record_step_result()'s worktree lifecycle block only caught the two
+# *modeled* failure types (WorktreeProvenanceError, WorktreeFoldError) around
+# fold_back()/_verify_safe_to_discard(). Any OTHER exception type (e.g. the
+# git binary vanishing mid-operation, a permissions error, or any bug)
+# escaped those inner handlers into the outer catch-all, which only logs a
+# warning and leaves `result.status` exactly as the caller passed it in
+# (typically "complete") -- silently recording success without ever knowing
+# whether the commit actually reached the parent branch, or whether the
+# worktree was actually safe to discard.
+
+
+class TestUnexpectedFoldExceptionFailsClosed:
+    """An unmodeled exception from ``WorktreeManager.fold_back()`` during a
+    complete step with a reported commit must still fail the step closed:
+    status becomes "failed", the worktree is retained (cleanup never runs),
+    and the parent branch never advances."""
+
+    def test_unexpected_exception_during_fold_marks_step_failed(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plan = _plan(task_id="task-unexpected-fold-exc")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        assert wt_path.is_dir()
+
+        parent_head_before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        def _boom(self, handle, *, commit_hash="", strategy="rebase"):
+            raise RuntimeError("simulated unmodeled fold failure")
+
+        monkeypatch.setattr(type(engine._worktree_mgr), "fold_back", _boom)
+
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims success",
+            commit_hash="deadbeef" * 5,
+            files_changed=["f.txt"],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "an unmodeled exception from fold_back() must fail the step "
+            f"closed, not silently record success; got {step_result.status!r}"
+        )
+
+        assert wt_path.is_dir(), (
+            "worktree must be retained when the fold outcome is unknown"
+        )
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )
+
+        parent_head_after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head_after == parent_head_before, (
+            "parent branch must not advance when the fold outcome is unknown"
+        )
+
+
+class TestUnexpectedDiscardCheckExceptionFailsClosed:
+    """An unmodeled exception from ``WorktreeManager._verify_safe_to_discard()``
+    on the "no commit reported" success path must fail the step closed
+    rather than silently proceeding to delete the worktree."""
+
+    def test_unexpected_exception_during_discard_check_marks_step_failed(
+        self,
+        engine: ExecutionEngine,
+        tmp_git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plan = _plan(task_id="task-unexpected-discard-exc")
+        engine.start(plan)
+        engine.mark_dispatched("1.1", "backend-engineer")
+
+        state = engine._load_execution()
+        assert state is not None
+        handle_dict = getattr(state, "step_worktrees", {}).get("1.1")
+        assert handle_dict is not None
+        wt_path = Path(handle_dict["path"])
+        assert wt_path.is_dir()
+
+        def _boom(self, handle):
+            raise RuntimeError("simulated unmodeled discard-check failure")
+
+        monkeypatch.setattr(
+            type(engine._worktree_mgr), "_verify_safe_to_discard", _boom
+        )
+
+        # status="complete" with NO commit_hash -> the "no commit reported"
+        # discard-check path.
+        engine.record_step_result(
+            step_id="1.1",
+            agent_name="backend-engineer",
+            status="complete",
+            outcome="claims success, no commit",
+            commit_hash="",
+            files_changed=[],
+        )
+
+        state_final = engine._load_execution()
+        assert state_final is not None
+        step_result = state_final.get_step_result("1.1")
+        assert step_result is not None
+        assert step_result.status == "failed", (
+            "an unmodeled exception from the discard-safety check must fail "
+            f"the step closed; got {step_result.status!r}"
+        )
+
+        assert wt_path.is_dir(), (
+            "worktree must be retained -- it must never be deleted while "
+            "the safety check's outcome is unknown"
+        )
+        assert "1.1" in getattr(state_final, "step_worktrees", {}), (
+            "step_worktrees must retain the handle for forensic recovery"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 "Make scope contracts authoritative", step 3.3 — security review:
+# scope-boundary threat model regressions.
+# ---------------------------------------------------------------------------
+
+
+class TestScopeGuardResistsMidSessionSymlinkEscape:
+    """Threat: an agent whose declared ``allowed_paths`` sandbox it to,
+    say, ``app/``, creates a symlink inside that sandbox pointing outside
+    the repository (``app/link -> /etc``), then targets a SECOND write
+    through that symlink (``app/link/passwd``). The write's literal path
+    string still starts with ``app/`` -- a guard that only string-matches
+    ``$CLAUDE_TOOL_INPUT_FILE_PATH`` against the allowed/blocked regex
+    would let it through even though the real destination is outside the
+    repository entirely.
+
+    ``ClaudeCodeLauncher._build_bash_path_guard`` closes this by
+    canonicalizing (``readlink -f``) the write's real destination against
+    the subprocess's own working directory before running the
+    allowed/blocked regex, and rejecting outright anything that resolves
+    outside that root. These tests drive the guard as a real bash
+    subprocess (not a mock) so they exercise the exact command string a
+    dispatched agent's ``PreToolUse`` hook would run.
+    """
+
+    @staticmethod
+    def _run_guard(guard_cmd: str, *, cwd: Path, file_path: str) -> subprocess.CompletedProcess:
+        import os as _os
+
+        inner = guard_cmd.split("bash -c '", 1)[1][:-1]
+        env = dict(_os.environ)
+        env["CLAUDE_TOOL_INPUT_FILE_PATH"] = file_path
+        return subprocess.run(
+            ["bash", "-c", inner], cwd=str(cwd), env=env,
+            capture_output=True, text=True,
+        )
+
+    def test_write_through_symlink_escaping_repo_root_is_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        outside = tmp_path.parent / f"outside-{tmp_path.name}"
+        outside.mkdir()
+        (tmp_path / "app" / "escape_hatch").symlink_to(outside, target_is_directory=True)
+
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(
+            guard, cwd=tmp_path, file_path="app/escape_hatch/malicious.txt"
+        )
+        assert result.returncode == 2, (
+            "a write through a symlink planted inside the allowed sandbox "
+            "must be blocked once it is resolved to its real, outside-the-"
+            f"repo destination; guard stderr: {result.stderr}"
+        )
+        assert "BLOCKED" in result.stderr
+
+    def test_legitimate_write_inside_allowed_path_still_passes(
+        self, tmp_path: Path
+    ) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(guard, cwd=tmp_path, file_path="app/service.py")
+        assert result.returncode == 0, result.stderr
+
+    def test_new_nested_file_under_allowed_path_still_passes(
+        self, tmp_path: Path
+    ) -> None:
+        """A write to a not-yet-existing nested path (the common case: an
+        agent creating a brand new file/directory) must not be rejected
+        by the symlink-resolution step -- ``readlink -f`` resolves a
+        nonexistent trailing component without erroring."""
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(
+            guard, cwd=tmp_path, file_path="app/brand/new/module.py"
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_absolute_path_escaping_root_is_blocked(self, tmp_path: Path) -> None:
+        from agent_baton.core.runtime.claude_launcher import (
+            _build_bash_path_guard,
+            _resolve_path_scope,
+        )
+
+        (tmp_path / "app").mkdir()
+        scope = _resolve_path_scope(str(tmp_path), ["app"], [])
+        guard = _build_bash_path_guard(scope)
+        assert guard is not None
+
+        result = self._run_guard(guard, cwd=tmp_path, file_path="/etc/passwd")
+        assert result.returncode == 2
+
+
+class TestResolveScopeExpansionPartialFailureIsAtomic:
+    """Threat: "partial approval failure" -- a human approves a scope
+    expansion, but the sidecar write sequence
+    (``apply_scope_amendment``) fails partway through (disk full,
+    permission error, concurrent deletion of the decisions directory,
+    etc). The authoritative in-memory plan (``PlanStep.allowed_paths``)
+    and the durable ``ExecutionState`` (worktree registry, failed
+    ``StepResult``) must never reflect a widened scope the sidecars/
+    decision log don't also durably agree on -- see
+    ``agent_baton.core.manager.scope_amendment``'s module docstring for
+    the ordering contract this test pins.
+    """
+
+    def test_sidecar_write_failure_leaves_plan_and_worktree_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.e2e.test_manager_mode_execution_dry_run import (
+            _engine_with_fake_beads,
+            _paths,
+            _routing_plan,
+        )
+
+        task_id = "task-partial-approve"
+        worktree_dir = tmp_path / "wt"
+        worktree_dir.mkdir()
+        repo = str(worktree_dir)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (worktree_dir / "app").mkdir()
+        (worktree_dir / "app" / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        (worktree_dir / "infra").mkdir()
+        (worktree_dir / "infra" / "deploy.yml").write_text("deploy: true\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "sneak in infra change"], cwd=repo, check=True)
+
+        plan = _routing_plan(task_id)
+        plan.phases[0].steps[0].allowed_paths = ["app"]
+        ctx_dir = tmp_path / ".claude" / "team-context"
+
+        engine, _ = _engine_with_fake_beads(ctx_dir, task_id, monkeypatch)
+        engine._worktree_mgr = MagicMock()
+        engine._worktree_mgr._bead_store = None
+        engine.start(plan)
+
+        state = engine._load_state()
+        from agent_baton.core.engine.worktree_manager import WorktreeHandle
+        state.step_worktrees["1.1"] = WorktreeHandle(
+            task_id=task_id, step_id="1.1", path=Path(repo),
+            branch=f"worktree/{task_id}/1.1", base_branch="main",
+            base_sha=base_sha, created_at="2026-07-10T00:00:00Z",
+            parent_repo=Path(repo),
+        ).to_dict()
+        engine._save_execution(state)
+
+        engine.record_step_result(
+            step_id="1.1", agent_name="backend-engineer",
+            status="complete", outcome="All good.",
+        )
+
+        paths = _paths(tmp_path, task_id)
+        log_entries = [
+            json.loads(line)
+            for line in paths.decision_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        decision_id = next(
+            e["decision_id"] for e in log_entries if e["decision_type"] == "scope_expansion"
+        )
+
+        # Simulate a mid-sequence sidecar write failure (e.g. disk full,
+        # permission error) inside apply_scope_amendment's atomic-write
+        # helper.
+        import agent_baton.core.manager.scope_amendment as scope_amendment_mod
+
+        def _flaky_atomic_write(path, text):
+            raise OSError("simulated disk-full mid-amendment")
+
+        monkeypatch.setattr(scope_amendment_mod, "_atomic_write_text", _flaky_atomic_write)
+
+        result = engine.resolve_scope_expansion(decision_id, "approve")
+
+        assert result["applied"] is False, (
+            "a sidecar write failure must be surfaced as a failed "
+            "amendment, never silently treated as success"
+        )
+        assert "error" in result
+
+        state_after = engine._load_state()
+        step = state_after.plan.phases[0].steps[0]
+        assert step.allowed_paths == ["app"], (
+            "the authoritative in-memory plan must NOT reflect a widened "
+            "scope when the sidecar write sequence backing that widening "
+            "failed partway through"
+        )
+        # The failed StepResult and the retained worktree pointer are left
+        # exactly as the original violation left them -- fully recoverable,
+        # not silently cleared as if approval had gone through.
+        failed_result = state_after.get_step_result("1.1")
+        assert failed_result is not None
+        assert failed_result.status == "failed"
+        assert "1.1" in state_after.step_worktrees
+
+        # The decision itself must remain resolvable (not silently marked
+        # resolved by the failed attempt) so an operator can retry.
+        decision_after = scope_amendment_mod.load_decision(paths, decision_id)
+        assert decision_after is not None
+        assert not decision_after.resolved_at, (
+            "a decision must not be marked resolved when the amendment "
+            "it names failed to apply"
+        )

@@ -678,6 +678,144 @@ class TestSavePlan:
 
 
 # ---------------------------------------------------------------------------
+# save_plan — manager mode (Phase 7 "Turn PMO into the director console")
+# ---------------------------------------------------------------------------
+
+def _manager_plan(task_id: str = "mgr-task") -> MachinePlan:
+    return MachinePlan(
+        task_id=task_id,
+        task_summary="Add a reporting endpoint with tests",
+        task_type="feature",
+        complexity="medium",
+        risk_level="MEDIUM",
+        manager_mode=True,
+        phases=[
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Implement the reporting endpoint.",
+                        allowed_paths=["app/reporting/**"],
+                        step_type="developing",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+class TestSavePlanManagerMode:
+    def test_manager_mode_plan_writes_full_sidecar_set(self, tmp_path: Path):
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        planner = _mock_planner()
+        forge = _forge(planner, store)
+
+        plan = _manager_plan()
+        forge.save_plan(plan, project)
+
+        context_root = Path(project.path) / ".claude" / "team-context"
+        paths = ManagerArtifactPaths(context_root, plan.task_id)
+
+        assert paths.charter.exists()
+        assert paths.scope_map.exists()
+        assert paths.team_blueprint.exists()
+        assert paths.knowledge_plan.exists()
+        assert paths.manager_brief.exists()
+        assert paths.revision_manifest.exists()
+        assert list(paths.scope_contracts_dir.glob("*.json")), "expected at least one scope contract"
+        assert list(paths.context_bundles_dir.glob("*.json")), "expected at least one context bundle"
+
+    def test_manager_mode_plan_is_persisted_after_policy_mutation(self, tmp_path: Path):
+        """build_and_write runs BEFORE plan.json is written, so any
+        adversarial-review step PhasePolicyApplier injects (default config:
+        "always") is already present in the persisted plan.json -- mirrors
+        `baton plan --manager-mode --save`'s CLI ordering
+        (cli/commands/execution/plan_cmd.py)."""
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        planner = _mock_planner()
+        forge = _forge(planner, store)
+
+        plan = _manager_plan()
+        assert len(plan.phases[0].steps) == 1  # sanity: no review step yet
+
+        path = forge.save_plan(plan, project)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        persisted_step_ids = {s["step_id"] for p in data["phases"] for s in p["steps"]}
+        # `plan` itself was mutated in place by build_and_write.
+        mutated_step_ids = {s.step_id for p in plan.phases for s in p.steps}
+        assert len(mutated_step_ids) > 1, "default ManagerConfig injects a review step"
+        assert persisted_step_ids == mutated_step_ids
+
+    def test_manager_mode_plan_return_path_unchanged_contract(self, tmp_path: Path):
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        planner = _mock_planner()
+        forge = _forge(planner, store)
+
+        path = forge.save_plan(_manager_plan(), project)
+        assert path.name == "plan.json"
+        assert path.exists()
+
+    def test_non_manager_mode_plan_writes_no_sidecars(self, tmp_path: Path):
+        """Regression: manager_mode=False (the default `_plan()` factory)
+        must be completely unaffected by this feature."""
+        from agent_baton.core.manager.paths import ManagerArtifactPaths
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        planner = _mock_planner()
+        forge = _forge(planner, store)
+
+        plan = _plan(task_id="non-manager-task")
+        assert plan.manager_mode is False
+        forge.save_plan(plan, project)
+
+        context_root = Path(project.path) / ".claude" / "team-context"
+        paths = ManagerArtifactPaths(context_root, plan.task_id)
+        assert not paths.charter.exists()
+        assert not paths.scope_map.exists()
+        assert not paths.team_blueprint.exists()
+        assert not paths.knowledge_plan.exists()
+        assert not paths.manager_brief.exists()
+        assert not paths.revision_manifest.exists()
+
+    def test_manager_mode_plan_uses_provided_manager_config(self, tmp_path: Path):
+        """A caller-supplied ManagerConfig (e.g. loaded from the project's
+        baton.yaml by the API route) is threaded through to
+        ManagerModePlanner rather than always using built-in defaults."""
+        from agent_baton.core.config.manager import ManagerConfig
+
+        store = _store(tmp_path)
+        project = _project(tmp_path)
+        planner = _mock_planner()
+        forge = _forge(planner, store)
+
+        # "off" adversarial review -- no review step is injected -- proves
+        # `manager_config` was actually used (default config injects one,
+        # per test_manager_mode_plan_is_persisted_after_policy_mutation).
+        cfg = ManagerConfig.from_dict({
+            "policies": {
+                "phase_completion": {"adversarial_review": "off"},
+                "project_completion": {"adversarial_review": "off"},
+            }
+        })
+
+        plan = _manager_plan()
+        forge.save_plan(plan, project, manager_config=cfg)
+
+        step_ids = {s.step_id for p in plan.phases for s in p.steps}
+        assert step_ids == {"1.1"}, "no review step should be injected when policy is 'off'"
+
+
+# ---------------------------------------------------------------------------
 # signal_to_plan
 # ---------------------------------------------------------------------------
 

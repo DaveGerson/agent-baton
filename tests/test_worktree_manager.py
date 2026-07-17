@@ -24,6 +24,7 @@ from agent_baton.core.engine.worktree_manager import (
     WorktreeFoldError,
     WorktreeHandle,
     WorktreeManager,
+    WorktreeProvenanceError,
 )
 
 
@@ -290,6 +291,95 @@ class TestWorktreeFoldBackClean:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 1.3 — default fold strategy must actually succeed for a real
+# worktree commit (bd-1.1 follow-up: "rebase" was the hardcoded default and
+# always failed for a real worktree commit because create() leaves
+# handle.branch checked out inside the worktree for its entire lifetime, and
+# git refuses `git fetch <path> branch:branch` into a ref name that is
+# checked out anywhere in the repository. This was masked in the existing
+# suite because every real-git fold test pinned strategy="none"/"rebase"
+# explicitly and never exercised the default. "merge" is now the default:
+# it merges the commit by SHA (no fetch needed -- worktrees of one
+# repository share one object database) and only ever updates whichever
+# branch is currently checked out in the canonical repo.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldBackDefaultStrategySucceeds:
+    """fold_back(handle) with NO explicit strategy must actually land the
+    worktree's commit in the parent branch for a real, unmocked worktree
+    commit -- not raise WorktreeFoldError."""
+
+    def test_default_strategy_merges_real_worktree_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-fold-default", step_id="1.1", base_branch="main")
+        agent_sha = _commit_file(handle.path, "default_strategy.txt", "agent output")
+
+        # No strategy kwarg -- exercises whatever fold_back() defaults to.
+        new_head = mgr.fold_back(handle, commit_hash=agent_sha)
+
+        assert new_head, "default strategy must produce a new parent HEAD"
+
+        parent_head = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent_head == new_head
+
+        show = subprocess.run(
+            ["git", "show", f"{parent_head}:default_strategy.txt"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        )
+        assert show.returncode == 0, (
+            "the agent's file must be reachable from the parent branch "
+            "after a default-strategy fold; got fold error instead of a "
+            "successful merge" if show.returncode != 0 else ""
+        )
+        assert show.stdout == "agent output"
+
+        # The canonical repo's own working directory must reflect the fold
+        # (merge, unlike raw update-ref, syncs the checkout) -- no
+        # dirty/desynced parent left behind.
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout
+        assert "default_strategy.txt" not in status or status.strip() == ""
+
+    def test_default_strategy_refuses_wrong_checked_out_branch(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """If the canonical repo has switched off base_branch by the time
+        fold-back runs, the merge default must fail closed rather than
+        attributing the commit to whatever happens to be checked out."""
+        handle = mgr.create(task_id="task-fold-wrongbranch", step_id="1.1", base_branch="main")
+        agent_sha = _commit_file(handle.path, "wrong_branch.txt", "agent output")
+
+        subprocess.run(
+            ["git", "switch", "-c", "other-branch"], cwd=tmp_git_repo,
+            check=True, capture_output=True,
+        )
+
+        with pytest.raises(WorktreeFoldError, match="checked out"):
+            mgr.fold_back(handle, commit_hash=agent_sha)
+
+        # Nothing must have been merged into the wrong branch.
+        other_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        show = subprocess.run(
+            ["git", "show", f"{other_head}:wrong_branch.txt"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        )
+        assert show.returncode != 0, (
+            "the agent's commit must not be attributed to the wrong "
+            "currently-checked-out branch"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 5 — test_worktree_fold_back_conflict
 # ---------------------------------------------------------------------------
 
@@ -334,6 +424,187 @@ class TestWorktreeFoldBackConflict:
 
         # Worktree directory must still exist after a fold conflict
         assert handle.path.is_dir(), "Worktree must be retained after fold conflict"
+
+
+# ---------------------------------------------------------------------------
+# Commit provenance guard — a worktree's fold-back / cleanup must never
+# succeed when the caller-reported commit_hash (or its absence) disagrees
+# with the worktree's own ground-truth git state. Regression coverage for
+# the "successful agent commit silently discarded" defect: a launcher that
+# probes the wrong directory (e.g. the parent repo) for pre/post HEAD
+# capture can report an empty or stale commit_hash even though the
+# worktree genuinely has new work — these guards make that fail closed
+# instead of silently folding a phantom commit or deleting real work.
+# ---------------------------------------------------------------------------
+
+
+class TestFoldBackRejectsUnverifiableCommit:
+    """fold_back() must refuse to fold a commit_hash it cannot verify as
+    real, new work that exists inside the worktree — and must leave the
+    worktree completely intact when it refuses."""
+
+    def test_rejects_commit_not_present_anywhere(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov1", step_id="1.1", base_branch="main")
+        bogus = "f" * 40  # fabricated hash — not a real object anywhere
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=bogus)
+        assert handle.path.is_dir(), "Worktree must be retained after provenance failure"
+
+    def test_rejects_commit_equal_to_base_sha(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """A commit_hash that equals the worktree's own base_sha represents
+        no new work — the signature of a caller that read HEAD from the
+        parent repository instead of the worktree."""
+        handle = mgr.create(task_id="task-prov2", step_id="1.1", base_branch="main")
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=handle.base_sha)
+        assert handle.path.is_dir()
+
+    def test_rejects_commit_that_predates_base_sha(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """A commit_hash that is an ancestor of base_sha predates the
+        worktree entirely — also evidence of a parent-repository read."""
+        first_sha = _commit_file(tmp_git_repo, "a.txt", "1")
+        second_sha = _commit_file(tmp_git_repo, "b.txt", "2")
+        handle = mgr.create(task_id="task-prov3", step_id="1.1", base_branch="main")
+        assert handle.base_sha == second_sha
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=first_sha)
+        assert handle.path.is_dir()
+
+    def test_rejects_parent_repo_descendant_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Phase 1 review regression: a commit made in the PARENT repo
+        after worktree creation (a descendant of base_sha) exists in the
+        shared object database, is not equal to base_sha, and is not an
+        ancestor of base_sha — yet it is NOT this worktree's work. Before
+        the fix it passed the provenance guard, "folded" as a no-op merge
+        ("Already up to date"), and the success-path cleanup then deleted
+        the worktree containing the agent's real, unfolded commit —
+        silent worktree loss. The guard must reject any commit that is
+        not reachable from the worktree's own HEAD."""
+        handle = mgr.create(task_id="task-prov-desc", step_id="1.1", base_branch="main")
+        # Real agent work inside the worktree.
+        agent_sha = _commit_file(handle.path, "agent_work.txt", "real work")
+        # Parent repo advances past base_sha (e.g. a sibling step folded).
+        parent_sha = _commit_file(tmp_git_repo, "parent_advance.txt", "parent")
+        assert parent_sha != agent_sha
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=parent_sha)
+
+        # Worktree (and the agent's real commit) retained for recovery.
+        assert handle.path.is_dir()
+        wt_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=handle.path,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert wt_head == agent_sha
+
+    def test_rejects_parent_descendant_even_without_worktree_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Same wrong-report signature when the agent made NO commit at
+        all: the parent's advanced HEAD must never be claimed as the
+        worktree result."""
+        handle = mgr.create(task_id="task-prov-desc2", step_id="1.1", base_branch="main")
+        parent_sha = _commit_file(tmp_git_repo, "parent_only.txt", "parent")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr.fold_back(handle, commit_hash=parent_sha)
+        assert handle.path.is_dir()
+
+    def test_accepts_genuine_new_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Sanity check: a real, new commit inside the worktree still folds
+        cleanly — the guard must not reject legitimate work."""
+        handle = mgr.create(task_id="task-prov4", step_id="1.1", base_branch="main")
+        subprocess.run(
+            ["git", "switch", handle.branch], cwd=handle.path,
+            check=True, capture_output=True,
+        )
+        agent_sha = _commit_file(handle.path, "real.txt", "real work")
+
+        new_head = mgr.fold_back(handle, commit_hash=agent_sha, strategy="none")
+        assert new_head == agent_sha
+
+
+class TestVerifySafeToDiscard:
+    """_verify_safe_to_discard() is the fail-closed guard consulted before
+    a worktree is permanently deleted with no commit to fold."""
+
+    def test_rejects_unreported_commit(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov5", step_id="1.1", base_branch="main")
+        subprocess.run(
+            ["git", "switch", handle.branch], cwd=handle.path,
+            check=True, capture_output=True,
+        )
+        _commit_file(handle.path, "surprise.txt", "unreported work")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "Worktree must be retained when a commit went unreported"
+
+    def test_rejects_dirty_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        handle = mgr.create(task_id="task-prov6", step_id="1.1", base_branch="main")
+        (handle.path / "uncommitted.txt").write_text("wip", encoding="utf-8")
+
+        with pytest.raises(WorktreeProvenanceError):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "Worktree must be retained when it has uncommitted changes"
+
+    def test_fails_closed_when_git_cannot_inspect_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Phase 1 review regression: when the worktree directory exists
+        but git cannot inspect it (broken/pruned .git linkage → rev-parse
+        rc=128), whether real work would be lost is UNKNOWN. Before the
+        fix both probes were silently skipped on nonzero returncode and
+        the caller proceeded to delete the directory — fail-open in a
+        fail-closed guard. Ambiguous state must raise and retain."""
+        handle = mgr.create(task_id="task-prov-broken", step_id="1.1", base_branch="main")
+        # Agent work that would be lost if the directory were deleted.
+        (handle.path / "wip.txt").write_text("uncommitted agent work", encoding="utf-8")
+        # Corrupt the worktree's git linkage so rev-parse/status fail.
+        (handle.path / ".git").write_text("gitdir: /nonexistent/broken", encoding="utf-8")
+
+        with pytest.raises(WorktreeProvenanceError, match="cannot be inspected"):
+            mgr._verify_safe_to_discard(handle)
+        assert handle.path.is_dir(), "uninspectable worktree must be retained"
+        assert (handle.path / "wip.txt").exists()
+
+    def test_allows_genuinely_clean_worktree(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """No new commit, no dirty changes — must NOT raise (preserves the
+        existing no-op worktree cleanup path)."""
+        handle = mgr.create(task_id="task-prov7", step_id="1.1", base_branch="main")
+        mgr._verify_safe_to_discard(handle)  # must not raise
+
+    def test_noop_when_disabled(self, tmp_git_repo: Path) -> None:
+        mgr = WorktreeManager(project_root=tmp_git_repo, enabled=False)
+        handle = mgr.create(task_id="task-prov8", step_id="1.1", base_branch="main")
+        mgr._verify_safe_to_discard(handle)  # dummy /dev/null handle — no-op
+
+    def test_noop_when_path_already_gone(
+        self, mgr: WorktreeManager, tmp_git_repo: Path
+    ) -> None:
+        """Nothing left to protect once the directory no longer exists."""
+        handle = mgr.create(task_id="task-prov9", step_id="1.1", base_branch="main")
+        mgr.cleanup(handle, on_failure=False)
+        assert not handle.path.exists()
+        mgr._verify_safe_to_discard(handle)  # must not raise
 
 
 # ---------------------------------------------------------------------------

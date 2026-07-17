@@ -17,6 +17,9 @@ The scenario:
 """
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,7 +27,7 @@ import pytest
 from agent_baton.core.engine.bead_selector import BeadSelector
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.team_board import TeamBoard
-from agent_baton.core.engine.team_tools import team_send_message
+from agent_baton.core.engine.team_tools import team_dispatch, team_send_message
 from agent_baton.core.storage.sqlite_backend import SqliteStorage
 from agent_baton.models.execution import (
     ActionType,
@@ -107,10 +110,71 @@ def _two_leader_plan_with_nested_team() -> MachinePlan:
     )
 
 
+class _FakeBeadStore:
+    """In-memory stand-in for ``BdBeadStore``.
+
+    Implements just the surface :class:`TeamBoard` /
+    :class:`BeadSelector` use (``write``, ``read``, ``close``, ``query``)
+    so this end-to-end test doesn't require the external ``bd`` binary to
+    be installed — tests must stay hermetic per ``tests/CLAUDE.md``. Mirrors
+    the established pattern in ``tests/test_team_tools.py``'s
+    ``_FakeBeadStore``.
+    """
+
+    def __init__(self) -> None:
+        self._beads: dict = {}
+
+    def write(self, bead) -> str:
+        self._beads[bead.bead_id] = bead
+        return bead.bead_id
+
+    def read(self, bead_id: str):
+        return self._beads.get(bead_id)
+
+    def close(self, bead_id: str, summary: str) -> None:
+        bead = self._beads.get(bead_id)
+        if bead is None:
+            return
+        bead.status = "closed"
+
+    def query(
+        self,
+        *,
+        task_id: str | None = None,
+        agent_name: str | None = None,
+        bead_type: str | None = None,
+        status: str | None = None,
+        tags: list | None = None,
+        limit: int = 100,
+    ) -> list:
+        out = []
+        for bead in self._beads.values():
+            if task_id is not None and bead.task_id != task_id:
+                continue
+            if agent_name is not None and bead.agent_name != agent_name:
+                continue
+            if bead_type is not None and bead.bead_type != bead_type:
+                continue
+            if status is not None and bead.status != status:
+                continue
+            if tags and not set(tags).issubset(set(bead.tags or [])):
+                continue
+            out.append(bead)
+        out.sort(key=lambda b: b.created_at, reverse=True)
+        return out[:limit]
+
+
 @pytest.fixture
 def engine(tmp_path: Path) -> ExecutionEngine:
     storage = SqliteStorage(tmp_path / "baton.db")
     eng = ExecutionEngine(team_context_root=tmp_path, storage=storage)
+    # Hermetic bead store — see _FakeBeadStore docstring. Without this,
+    # engine._bead_store stays None whenever the external `bd` binary is
+    # not on PATH (ExecutionEngine's make_bead_store() call degrades
+    # gracefully), which then makes every team_tools call that needs the
+    # bead store (e.g. team_send_message) raise TeamToolError instead of
+    # exercising the actual messaging/selection behavior under test.
+    eng._bead_store = _FakeBeadStore()  # type: ignore[attr-defined]
     eng.start(_two_leader_plan_with_nested_team())
     return eng
 
@@ -269,3 +333,152 @@ class TestMultiTeamE2E:
         assert action.action_type != ActionType.DISPATCH or action.step_id not in (
             "1.1", "1.2", "1.1.a", "1.1.a.b", "1.1.a.c", "1.1.b", "1.2.a", "1.2.b",
         )
+
+
+# ---------------------------------------------------------------------------
+# Real local team tool boundary — a deterministic "team member process" is
+# a genuine OS subprocess invoking the ACTUAL installed `baton team` console
+# script (not a mocked handler call, not a Python function call in-process).
+# This is the exact boundary a dispatched agent's Bash tool crosses per
+# docs/internal/team-runtime-contract.md §2.2/§9.1.
+#
+# Scope: the read-only `resource="teams"` path and the CLI's own usage/
+# authorization validation never touch the bead store, so they run for real
+# here without requiring the external `bd` binary. Verb calls that DO need
+# a bead-store write (team update/claim/send/read) exercise the documented
+# fail-closed contract (§7.3 exit code 5) against this sandbox's actual
+# environment — which genuinely has no `bd` on PATH — rather than mocking
+# that reality away; see tests/test_team_tools.py for restart-persistence
+# coverage of the bead-backed verbs against a hermetic in-process store.
+# ---------------------------------------------------------------------------
+
+
+class TestRealCliBoundarySubprocess:
+    """Deterministic member processes against the real `baton team` CLI."""
+
+    @staticmethod
+    def _context_root(tmp_path: Path) -> Path:
+        root = tmp_path / ".claude" / "team-context"
+        root.mkdir(parents=True)
+        return root
+
+    @staticmethod
+    def _bootstrap_nested_teams(context_root: Path) -> None:
+        """Start a plan, register team-1.1/team-1.2, and stand up a nested
+        child team under 1.1's lead — all via the real engine, in-process
+        (team_dispatch has no CLI surface yet, by design; see the doc)."""
+        storage = SqliteStorage(context_root / "baton.db")
+        engine = ExecutionEngine(team_context_root=context_root, storage=storage)
+        engine.start(_two_leader_plan_with_nested_team())
+        engine.next_actions()  # registers team-1.1 / team-1.2 (+ nested 1.1::1.1.a)
+        team_dispatch(
+            engine, task_id="task-e2e", parent_team_id="team-1.1",
+            caller_member_id="1.1.a",
+            members=[{"agent_name": "docs-writer", "member_id": "1.1.a.z"}],
+        )
+
+    @staticmethod
+    def _run_baton_team(
+        *args: str, context_root: Path, extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["BATON_TEAM_CONTEXT_ROOT"] = str(context_root)
+        env.pop("BATON_TASK_ID", None)
+        env.pop("BATON_TEAM_MEMBER_ID", None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["baton", "team", *args],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+
+    def test_real_subprocess_sees_nested_team_after_restart(
+        self, tmp_path: Path,
+    ) -> None:
+        """A brand-new OS process — a fresh interpreter, sharing nothing but
+        the persisted SQLite db, exactly what a dispatched team member's
+        Bash tool spawns — sees the nested child team a PRIOR process
+        registered. Restart persistence AND nested-team visibility,
+        exercised through the actual `baton` executable, not a mock."""
+        context_root = self._context_root(tmp_path)
+        self._bootstrap_nested_teams(context_root)
+
+        result = self._run_baton_team(
+            "list", "--task-id", "task-e2e", "--team-id", "team-1.1",
+            "--resource", "teams", "--json",
+            context_root=context_root,
+        )
+        assert result.returncode == 0, result.stderr
+        teams = json.loads(result.stdout)
+        assert [t["team_id"] for t in teams] == ["1.1::1.1.a"]
+        assert teams[0]["leader_member_id"] == "1.1.a"
+
+    def test_real_subprocess_unknown_team_id_exits_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        context_root = self._context_root(tmp_path)
+        self._bootstrap_nested_teams(context_root)
+
+        result = self._run_baton_team(
+            "list", "--task-id", "task-e2e", "--team-id", "team-does-not-exist",
+            "--member-id", "1.1.a", "--json",
+            context_root=context_root,
+        )
+        assert result.returncode == 2, result.stdout
+        assert "team-does-not-exist" in result.stderr
+
+    def test_real_subprocess_missing_member_id_exits_usage(
+        self, tmp_path: Path,
+    ) -> None:
+        """Malformed call: no --member-id and no $BATON_TEAM_MEMBER_ID."""
+        context_root = self._context_root(tmp_path)
+        self._bootstrap_nested_teams(context_root)
+
+        result = self._run_baton_team(
+            "claim", "--task-id", "task-e2e", "--team-id", "team-1.1",
+            "--task-bead-id", "bd-x", "--json",
+            context_root=context_root,
+        )
+        assert result.returncode == 2, result.stdout
+        assert "member_id" in result.stderr
+
+    def test_real_subprocess_write_verb_fails_closed_without_bd(
+        self, tmp_path: Path,
+    ) -> None:
+        """A real `baton team update` subprocess in an environment with no
+        `bd` on PATH must exit with the documented backend-unavailable
+        code — never a raw traceback, never a silent no-op success."""
+        context_root = self._context_root(tmp_path)
+        self._bootstrap_nested_teams(context_root)
+
+        result = self._run_baton_team(
+            "update", "--task-id", "task-e2e", "--team-id", "team-1.1",
+            "--member-id", "1.1.a", "--title", "t", "--json",
+            context_root=context_root,
+        )
+        # If a real `bd` binary happens to be on PATH in some other
+        # environment this test runs in, the write would succeed (0)
+        # instead — either way the process must not crash uncontrolled.
+        assert result.returncode in (0, 5), result.stderr
+        if result.returncode == 5:
+            assert "unavailable" in result.stderr.lower()
+
+    def test_real_subprocess_member_id_resolved_from_env(
+        self, tmp_path: Path,
+    ) -> None:
+        """$BATON_TEAM_MEMBER_ID (the launcher-injected env var) is honored
+        by the real subprocess exactly as documented — the CLI reaches the
+        authorization/usage checks rather than bailing on 'member_id is
+        required', proving the env-var resolution path actually works
+        end-to-end and not just at the unit level."""
+        context_root = self._context_root(tmp_path)
+        self._bootstrap_nested_teams(context_root)
+
+        result = self._run_baton_team(
+            "list", "--task-id", "task-e2e", "--team-id", "team-1.1", "--json",
+            context_root=context_root,
+            extra_env={"BATON_TEAM_MEMBER_ID": "1.1.a"},
+        )
+        # Reaches the bead-store-backed "tasks" resource (member_id resolved
+        # from env, not omitted) — fails closed at 5 (no bd), not at usage.
+        assert result.returncode in (0, 5), result.stderr

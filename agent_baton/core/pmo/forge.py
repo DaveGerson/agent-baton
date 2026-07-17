@@ -35,7 +35,9 @@ from agent_baton.models.execution import MachinePlan
 from agent_baton.models.pmo import InterviewQuestion, InterviewAnswer, PmoProject
 
 if TYPE_CHECKING:
+    from agent_baton.core.config.manager import ManagerConfig
     from agent_baton.core.engine.planner import IntelligentPlanner
+    from agent_baton.core.orchestration.knowledge_registry import KnowledgeRegistry
     from agent_baton.core.storage.pmo_sqlite import PmoSqliteStore
 
 logger = logging.getLogger(__name__)
@@ -178,6 +180,10 @@ class ForgeSession:
         self,
         plan: MachinePlan,
         project: PmoProject,
+        *,
+        manager_config: "ManagerConfig | None" = None,
+        knowledge_registry: "KnowledgeRegistry | None" = None,
+        cli_gate_scope_explicit: bool = False,
     ) -> Path:
         """Save an approved plan to the project's team-context directory.
 
@@ -188,15 +194,93 @@ class ForgeSession:
         Does NOT create an ``ExecutionState`` — that happens when
         ``baton execute start`` is run.
 
+        Manager-mode parity (Phase 7 "Turn PMO into the director console"):
+        when ``plan.manager_mode`` is ``True``, this runs the SAME
+        ``ManagerModePlanner`` composition CLI planning uses (``baton plan
+        --manager-mode --save`` -> ``ManagerModePlanner.build()``, see
+        ``agent_baton.cli.commands.execution.plan_cmd``) BEFORE writing
+        ``plan.json``/``plan.md`` -- the composition mutates *plan* in
+        place (``PhasePolicyApplier`` may inject adversarial-review steps
+        and rescale gates), so the persisted plan must reflect the FINAL,
+        policy-applied step list, exactly like the CLI's ``--save`` path
+        does.
+
+        Unlike the CLI (which calls ``build_and_write`` directly), this
+        publishes through
+        ``agent_baton.core.manager.rebuild.rebuild_and_publish`` -- the
+        same transactional, validated publish path runtime amendments
+        (``ExecutionEngine.amend_plan``, ``resolve_scope_expansion``) use.
+        This is a strict superset of what ``build_and_write`` guarantees
+        (cross-artifact reference validation via
+        ``validate_manager_artifacts``, atomic staged writes) and, unlike
+        ``build_and_write``, records an ``artifact-revision.json``
+        manifest for this initial publish (revision 1) -- so the PMO
+        manager-mode read API's version/validation endpoints
+        (``agent_baton/api/routes/pmo_manager.py``) have something to
+        report immediately after a plan is approved via Forge, not only
+        after a later runtime amendment. The resulting sidecar set is
+        written to the same conventional locations
+        (``agent_baton.core.manager.paths.ManagerArtifactPaths``) a CLI
+        ``baton plan --manager-mode --save`` would use.
+
+        A non-manager-mode plan (the default) is entirely unaffected --
+        this branch is skipped and behavior is identical to before.
+
         Args:
             plan: The approved plan to persist.
             project: The target project (provides the filesystem path).
+            manager_config: Manager-mode configuration to use when
+                ``plan.manager_mode`` is set. Defaults to
+                ``ManagerConfig()`` (built-in defaults) when omitted --
+                callers that need project-specific config (``baton.yaml``)
+                should load and pass it explicitly.
+            knowledge_registry: Optional pre-loaded knowledge registry;
+                built lazily by ``ManagerModePlanner`` when omitted.
+            cli_gate_scope_explicit: Mirrors the CLI's ``--gate-scope``
+                explicit-vs-default distinction (see ``plan_cmd.py``).
+                Defaults to ``False`` (project-configured default applies).
 
         Returns:
             The absolute path to the written ``plan.json`` file.
+
+        Raises:
+            agent_baton.core.manager.rebuild.ManagerArtifactPublishError:
+                The manager-mode artifact set could not be built/validated/
+                published. Nothing is written -- neither the sidecars nor
+                ``plan.json``/``plan.md`` -- when this is raised.
         """
         from agent_baton.core.orchestration.context import ContextManager
         context_root = Path(project.path) / ".claude" / "team-context"
+
+        if plan.manager_mode:
+            from agent_baton.core.config.manager import ManagerConfig
+            from agent_baton.core.manager.rebuild import (
+                ManagerArtifactPublishError,
+                rebuild_and_publish,
+            )
+
+            cfg = manager_config if manager_config is not None else ManagerConfig()
+            # Mutates `plan` in place (injected review steps, rescaled
+            # gates) and, on success, writes + publishes every manager-mode
+            # sidecar plus the revision manifest -- must run BEFORE
+            # plan.json/plan.md below so the persisted plan and the
+            # persisted sidecars agree on the exact same step list.
+            result = rebuild_and_publish(
+                plan,
+                plan.task_summary,
+                config=cfg,
+                project_root=Path(project.path),
+                team_context_dir=context_root,
+                trigger="forge_approve",
+                knowledge_registry=knowledge_registry,
+                cli_gate_scope_explicit=cli_gate_scope_explicit,
+            )
+            if not result.ok:
+                raise ManagerArtifactPublishError(
+                    f"manager-mode artifact build failed for task "
+                    f"{plan.task_id!r}: {'; '.join(result.errors) or 'unknown error'}"
+                )
+
         # Write into task-scoped directory
         ctx = ContextManager(
             team_context_dir=context_root,

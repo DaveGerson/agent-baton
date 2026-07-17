@@ -233,3 +233,144 @@ class TestNestedMemberIdRegex:
         d = action.to_dict()
         assert d["is_team_member"] is True
         assert d["parent_step_id"] == "1.1"
+
+
+# ---------------------------------------------------------------------------
+# TestNestedTeamRestartBetweenDispatchAndResult — a brand-new ExecutionEngine
+# instance (fresh interpreter state, same on-disk persistence) must pick up
+# a nested team exactly where a prior instance left off: no duplicate
+# dispatch, no lost member results, correct completion once the restarted
+# engine finishes recording the roster.
+# ---------------------------------------------------------------------------
+
+
+class TestNestedTeamRestartBetweenDispatchAndResult:
+
+    def test_resume_after_dispatch_returns_same_wave_without_duplication(
+        self, tmp_path: Path,
+    ) -> None:
+        engine1 = _engine(tmp_path)
+        action1 = engine1.start(_plan())
+        dispatched_1 = {action1.step_id} | {a.step_id for a in action1.parallel_actions}
+
+        # Simulate a crash: brand-new engine object, same on-disk state.
+        engine2 = _engine(tmp_path)
+        action2 = engine2.resume()
+
+        assert action2.action_type == ActionType.DISPATCH
+        dispatched_2 = {action2.step_id} | {a.step_id for a in action2.parallel_actions}
+        assert dispatched_2 == dispatched_1 == {
+            "1.1.a", "1.1.a.b", "1.1.a.c", "1.1.a.d",
+        }
+
+    def test_partial_result_recorded_before_crash_survives_restart(
+        self, tmp_path: Path,
+    ) -> None:
+        engine1 = _engine(tmp_path)
+        engine1.start(_plan())
+        engine1.record_team_member_result(
+            "1.1", "1.1.a.b", "backend-engineer",
+            status="complete", outcome="service built",
+            files_changed=["src/service.py"],
+        )
+
+        # Crash + restart: fresh engine object, same tmp_path persistence.
+        engine2 = _engine(tmp_path)
+        state = engine2._load_state()
+        parent = state.get_step_result("1.1")
+        assert parent is not None
+        assert parent.status == "dispatched"
+        assert {m.member_id for m in parent.member_results} == {"1.1.a.b"}
+
+        # Execution continues normally from the restarted engine — the
+        # remaining members complete the nested team.
+        engine2.record_team_member_result(
+            "1.1", "1.1.a.c", "test-engineer",
+            status="complete", outcome="tests passed",
+            files_changed=["tests/test_service.py"],
+        )
+        engine2.record_team_member_result(
+            "1.1", "1.1.a.d", "frontend-engineer",
+            status="complete", outcome="ui built",
+            files_changed=["src/ui.tsx"],
+        )
+        engine2.record_team_member_result(
+            "1.1", "1.1.a", "architect",
+            status="complete", outcome="coordination done",
+            files_changed=["docs/plan.md"],
+        )
+
+        # Yet another restart confirms the final completion persisted.
+        engine3 = _engine(tmp_path)
+        state3 = engine3._load_state()
+        parent3 = state3.get_step_result("1.1")
+        assert parent3 is not None
+        assert parent3.status == "complete"
+        assert {m.member_id for m in parent3.member_results} == {
+            "1.1.a", "1.1.a.b", "1.1.a.c", "1.1.a.d",
+        }
+
+
+# ---------------------------------------------------------------------------
+# TestNestedTeamMemberFailurePropagation
+# ---------------------------------------------------------------------------
+
+
+class TestNestedTeamMemberFailurePropagation:
+
+    def test_subteam_member_failure_fails_parent_and_preserves_sibling_results(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = _engine(tmp_path)
+        engine.start(_plan())
+
+        engine.record_team_member_result(
+            "1.1", "1.1.a.b", "backend-engineer",
+            status="complete", outcome="service built",
+            files_changed=["src/service.py"],
+        )
+        engine.record_team_member_result(
+            "1.1", "1.1.a.c", "test-engineer",
+            status="failed", outcome="flaky test suite",
+        )
+
+        state = engine._load_state()
+        parent = state.get_step_result("1.1")
+        assert parent is not None
+        assert parent.status == "failed"
+        assert "1.1.a.c" in parent.error
+
+        # The sibling's successful result is preserved, not discarded, by
+        # the failure — a downstream retrospective/handoff still needs it.
+        member_ids = {m.member_id for m in parent.member_results}
+        assert {"1.1.a.b", "1.1.a.c"} <= member_ids
+        succeeded = next(m for m in parent.member_results if m.member_id == "1.1.a.b")
+        assert succeeded.status == "complete"
+        assert succeeded.files_changed == ["src/service.py"]
+
+    def test_lead_failure_fails_parent_even_when_whole_subteam_succeeded(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = _engine(tmp_path)
+        engine.start(_plan())
+
+        for mid, agent in [
+            ("1.1.a.b", "backend-engineer"),
+            ("1.1.a.c", "test-engineer"),
+            ("1.1.a.d", "frontend-engineer"),
+        ]:
+            engine.record_team_member_result(
+                "1.1", mid, agent, status="complete", outcome="done",
+            )
+        engine.record_team_member_result(
+            "1.1", "1.1.a", "architect",
+            status="failed", outcome="could not integrate the pieces",
+        )
+
+        state = engine._load_state()
+        parent = state.get_step_result("1.1")
+        assert parent is not None
+        assert parent.status == "failed"
+        assert "1.1.a" in parent.error
+        # All three successful sub-team results remain recorded.
+        assert len(parent.member_results) == 4

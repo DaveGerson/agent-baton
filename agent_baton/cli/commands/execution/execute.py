@@ -616,6 +616,24 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
         ACTION: FAILED
           <failure summary>
 
+    **CHECKPOINT** -- Safe, already-persisted pause point to avoid context
+    rot (Phase 6.2).  NOT completion or failure -- start a fresh session
+    and resume with the printed command; the engine's dedup guard ensures
+    the same boundary is never checkpointed twice and no completed work is
+    redispatched::
+
+        ACTION: CHECKPOINT
+          Phase:   <phase_id>
+          Trigger: <phase_interval|turn_threshold|token_threshold>
+          Message: <description>
+
+        --- Handoff ---
+        <goal, completed outcomes, decisions, scope, changed files,
+         unresolved risks, next actions>
+        --- End Handoff ---
+
+        <exact 'baton execute resume --task-id ...' command>
+
     Note:
         ``CANCELLED`` is **not** an action type emitted by ``next``.  It is a
         status transition applied directly to :class:`ExecutionState` by the
@@ -780,6 +798,42 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
     elif atype == ActionType.FAILED.value:
         print(f"ACTION: FAILED")
         print(f"  {action.get('summary', msg)}")
+
+    elif atype == ActionType.CHECKPOINT.value:
+        handoff = action.get("checkpoint_handoff", {}) or {}
+        resume_cmd = handoff.get("resume_command") or action.get("summary", "")
+        print(f"ACTION: CHECKPOINT")
+        print(f"  Phase:   {action.get('phase_id', '')}")
+        print(f"  Trigger: {handoff.get('trigger', '')}")
+        print(f"  Message: {msg}")
+        print()
+        print("--- Handoff ---")
+        print(f"  Goal: {handoff.get('goal', '')}")
+        if handoff.get("completed_outcomes"):
+            print("  Completed outcomes:")
+            for o in handoff["completed_outcomes"]:
+                print(f"    - {o}")
+        if handoff.get("decisions"):
+            print("  Decisions:")
+            for d in handoff["decisions"]:
+                print(f"    - {d}")
+        if handoff.get("scope"):
+            print(f"  Scope: {', '.join(handoff['scope'])}")
+        if handoff.get("changed_files"):
+            print(f"  Changed files: {', '.join(handoff['changed_files'])}")
+        if handoff.get("unresolved_risks"):
+            print("  Unresolved risks:")
+            for r in handoff["unresolved_risks"]:
+                print(f"    - {r}")
+        print(f"  Next actions: {handoff.get('next_actions', '')}")
+        print("--- End Handoff ---")
+        print()
+        print(
+            "This execution has reached a safe checkpoint boundary to avoid "
+            "context rot. Completed work and decisions are persisted -- "
+            "start a FRESH session and resume with:"
+        )
+        print(f"  {resume_cmd}")
 
     elif atype == ActionType.INTERACT.value:
         step_id = action.get("interact_step_id", "")
@@ -2511,6 +2565,7 @@ def _handle_run(args: argparse.Namespace) -> None:
             model_override=model_override,
             task_id=task_id,
             steps_executed=steps_executed,
+            context_root=context_root,
         )
     finally:
         # Issue 3: clean up any launcher subprocesses that are still alive
@@ -2524,6 +2579,69 @@ def _handle_run(args: argparse.Namespace) -> None:
                 pass
 
 
+def _pending_decision_request_id(task_id: str | None, kind: str, *parts: object) -> str:
+    """Build the deterministic decision request_id for a headless pause.
+
+    Thin wrapper over :func:`agent_baton.core.runtime.decisions.deterministic_decision_id`
+    so ``_run_loop`` doesn't need the import at every call site.
+    """
+    from agent_baton.core.runtime.decisions import deterministic_decision_id
+
+    return deterministic_decision_id(task_id or "", kind, *parts)
+
+
+def _ensure_pending_decision(
+    *,
+    context_root: Path | None,
+    request_id: str,
+    task_id: str,
+    decision_type: str,
+    summary: str,
+    options: list[str],
+) -> dict | None:
+    """Idempotently record a durable pending decision for a headless pause.
+
+    This is what makes ``baton execute run`` (and, by delegation, ``baton
+    run``) pause on the same durable decision record the daemon and PMO use
+    instead of exiting as a failed job (see
+    ``docs/internal/execution-runtime-contract.md``).  The decisions
+    directory lives under the resolved team-context root, matching the
+    location ``api/deps.py`` binds the shared decisions REST API to and
+    the location ``core/runtime/worker.py``'s ``TaskWorker`` uses when a
+    supervisor injects a ``DecisionManager`` — so any of the four surfaces
+    can create, discover, or resolve this same request.
+
+    Returns:
+        The resolution dict (``chosen_option``/``rationale``/...) if this
+        request has already been resolved by another surface (the REST
+        API, ``baton decide --resolve``, the PMO decision inbox) since it
+        was created — letting the caller apply it and continue in this
+        same process instead of pausing again.  ``None`` if the request is
+        still pending (freshly created or found already pending).
+    """
+    from agent_baton.core.runtime.decisions import DecisionManager
+    from agent_baton.models.decision import DecisionRequest
+
+    root = context_root or _resolve_context_root()
+    dm = DecisionManager(decisions_dir=root / "decisions", safe_read_root=root)
+
+    existing = dm.get(request_id)
+    if existing is not None and existing.status == "resolved":
+        return dm.get_resolution(request_id) or {}
+
+    if existing is None:
+        dm.request(
+            DecisionRequest(
+                request_id=request_id,
+                task_id=task_id,
+                decision_type=decision_type,
+                summary=summary,
+                options=options,
+            )
+        )
+    return None
+
+
 def _run_loop(
     *,
     engine: ExecutionEngine,
@@ -2534,6 +2652,7 @@ def _run_loop(
     model_override: str,
     task_id: str | None,
     steps_executed: int = 0,
+    context_root: Path | None = None,
 ) -> None:
     """Inner execution loop extracted so _handle_run can wrap it in try/finally."""
     import subprocess as _subprocess
@@ -2566,6 +2685,22 @@ def _run_loop(
         if atype == ActionType.FAILED.value:
             print(f"\n{color_error('FAILED')}: {action_dict.get('summary', action_dict.get('message', ''))}", file=sys.stderr)
             sys.exit(1)
+
+        if atype == ActionType.CHECKPOINT.value:
+            # Phase 6.2: a safe, already-persisted pause point -- not
+            # completion, not failure.  Exit cleanly (code 0) so a fresh
+            # invocation of 'baton execute run' / 'baton execute resume'
+            # continues without redispatching completed work; the dedup
+            # guard on the engine side means this exact boundary will not
+            # checkpoint again.
+            handoff = action_dict.get("checkpoint_handoff", {}) or {}
+            resume_cmd = handoff.get("resume_command") or action_dict.get("summary", "")
+            print(f"\n{color_info('CHECKPOINT')}: {action_dict.get('message', '')}", file=sys.stderr)
+            print(f"  Safe boundary persisted at phase {action_dict.get('phase_id', '')}.", file=sys.stderr)
+            if handoff.get("next_actions"):
+                print(f"  Next: {handoff['next_actions']}", file=sys.stderr)
+            print(f"  Resume in a fresh session with: {resume_cmd}", file=sys.stderr)
+            return
 
         if steps_executed >= max_steps:
             print(f"\n{warning('ABORTED')}: reached max-steps limit ({max_steps})", file=sys.stderr)
@@ -2846,44 +2981,234 @@ def _run_loop(
                 # and leave state untouched so the operator can record an
                 # explicit decision via `baton execute approve`.
                 if not sys.stdin.isatty():
+                    request_id = _pending_decision_request_id(task_id, "approval", phase_id)
+                    resolution = _ensure_pending_decision(
+                        context_root=context_root,
+                        request_id=request_id,
+                        task_id=task_id or "",
+                        decision_type="phase_approval",
+                        summary=msg or f"Phase {phase_id} requires approval",
+                        options=["approve", "reject", "approve-with-feedback"],
+                    )
+                    if resolution is not None:
+                        result = resolution.get("chosen_option", "approve")
+                        feedback = resolution.get("rationale") or ""
+                        engine.record_approval_result(
+                            phase_id=phase_id, result=result, feedback=feedback,
+                        )
+                        print(
+                            f"  [APPROVAL] resolved via pending decision "
+                            f"{request_id}: {result}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"\n{color_error('ERROR')}: pending approval for phase "
+                            f"{phase_id} requires an explicit decision, but stdin "
+                            "is not a TTY so 'baton execute run' cannot prompt.",
+                            file=sys.stderr,
+                        )
+                        print(
+                            "  Run: baton execute approve "
+                            f"--phase-id {phase_id} --result approve|reject "
+                            "[--feedback TEXT]",
+                            file=sys.stderr,
+                        )
+                        print(
+                            f"  Pending decision recorded: {request_id} "
+                            "(also resolvable via the /decisions REST API or "
+                            "the PMO decision inbox).",
+                            file=sys.stderr,
+                        )
+                        print(
+                            "  Then re-invoke 'baton execute run' to continue.",
+                            file=sys.stderr,
+                        )
+                        # Do NOT mutate execution state — execution remains
+                        # in approval_pending for the operator to resolve.
+                        sys.exit(2)
+                else:
+                    # Interactive approval prompt
+                    print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
+                    try:
+                        choice = input("  Decision> ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        choice = "reject"
+                    feedback = ""
+                    if choice == "approve-with-feedback":
+                        try:
+                            feedback = input("  Feedback> ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            feedback = ""
+                    if choice not in ("approve", "reject", "approve-with-feedback"):
+                        choice = "approve"
+                    engine.record_approval_result(
+                        phase_id=phase_id, result=choice, feedback=feedback,
+                    )
+                    print(f"  [APPROVAL] {choice}", file=sys.stderr)
+
+        elif atype == ActionType.FEEDBACK.value:
+            phase_id = action_dict.get("phase_id", 0)
+            msg = action_dict.get("message", "")
+            questions = action_dict.get("feedback_questions", [])
+
+            print(f"\n  [FEEDBACK REQUIRED] Phase {phase_id}", file=sys.stderr)
+            if msg:
+                print(f"    {msg}", file=sys.stderr)
+
+            if not questions:
+                # Nothing to answer — fall through and re-evaluate
+                # next_action() rather than looping on an empty question set.
+                pass
+            else:
+                question = questions[0]
+                question_id = question.get("question_id", "")
+                q_text = question.get("question", "")
+                options = question.get("options", [])
+
+                if dry_run:
+                    print(f"  [DRY RUN] Auto-selecting option 0 for '{question_id}'", file=sys.stderr)
+                    engine.record_feedback_result(
+                        phase_id=phase_id, question_id=question_id, chosen_index=0,
+                    )
+                elif sys.stdin.isatty():
+                    print(f"    {q_text}", file=sys.stderr)
+                    for idx, opt in enumerate(options):
+                        print(f"      [{idx}] {opt}", file=sys.stderr)
+                    try:
+                        chosen_index = int(input("  Choice> ").strip())
+                    except (EOFError, KeyboardInterrupt, ValueError):
+                        chosen_index = 0
+                    engine.record_feedback_result(
+                        phase_id=phase_id, question_id=question_id, chosen_index=chosen_index,
+                    )
+                    print(f"  [FEEDBACK] recorded option {chosen_index}", file=sys.stderr)
+                else:
+                    request_id = _pending_decision_request_id(
+                        task_id, "feedback", phase_id, question_id,
+                    )
+                    resolution = _ensure_pending_decision(
+                        context_root=context_root,
+                        request_id=request_id,
+                        task_id=task_id or "",
+                        decision_type="feedback_response",
+                        summary=msg or f"Feedback question '{question_id}' for phase {phase_id}",
+                        options=[str(i) for i in range(len(options))] or ["0"],
+                    )
+                    if resolution is not None:
+                        try:
+                            chosen_index = int(resolution.get("chosen_option", "0"))
+                        except (TypeError, ValueError):
+                            chosen_index = 0
+                        engine.record_feedback_result(
+                            phase_id=phase_id, question_id=question_id, chosen_index=chosen_index,
+                        )
+                        print(
+                            f"  [FEEDBACK] resolved via pending decision "
+                            f"{request_id}: option {chosen_index}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"\n{color_error('ERROR')}: pending feedback question "
+                            f"'{question_id}' for phase {phase_id} requires an "
+                            "explicit decision, but stdin is not a TTY so "
+                            "'baton execute run' cannot prompt.",
+                            file=sys.stderr,
+                        )
+                        print(
+                            f"  Run: baton execute feedback --phase-id {phase_id} "
+                            f"--question-id {question_id} --chosen-index N",
+                            file=sys.stderr,
+                        )
+                        print(
+                            f"  Pending decision recorded: {request_id} "
+                            "(also resolvable via the /decisions REST API or "
+                            "the PMO decision inbox).",
+                            file=sys.stderr,
+                        )
+                        print(
+                            "  Then re-invoke 'baton execute run' to continue.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(2)
+
+        elif atype == ActionType.INTERACT.value:
+            step_id = action_dict.get("interact_step_id", "") or action_dict.get("step_id", "")
+            msg = action_dict.get("message", "")
+
+            print(f"\n  [INTERACT REQUIRED] Step {step_id}", file=sys.stderr)
+            if msg:
+                print(f"    {msg}", file=sys.stderr)
+
+            if dry_run:
+                print("  [DRY RUN] Auto-completing interaction", file=sys.stderr)
+                try:
+                    engine.complete_interaction(step_id=step_id)
+                except (RuntimeError, ValueError) as exc:
+                    print(f"    skipped (engine refused): {exc}", file=sys.stderr)
+            elif sys.stdin.isatty():
+                print("  Type your input, or 'done' to finish the interaction.", file=sys.stderr)
+                try:
+                    text = input("  Input> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    text = "done"
+                if text.lower() == "done":
+                    engine.complete_interaction(step_id=step_id)
+                else:
+                    engine.provide_interact_input(step_id=step_id, input_text=text)
+                print("  [INTERACT] recorded", file=sys.stderr)
+            else:
+                # Turn-scoped ID: the same step_id re-presents on every
+                # interaction turn, so a (task, step)-only ID would match
+                # turn 1's already-resolved decision on turn 2 and replay
+                # the same input forever without asking the human again.
+                turn = action_dict.get("interact_turn", 0)
+                request_id = _pending_decision_request_id(
+                    task_id, "interact", step_id, turn,
+                )
+                resolution = _ensure_pending_decision(
+                    context_root=context_root,
+                    request_id=request_id,
+                    task_id=task_id or "",
+                    decision_type="interact_response",
+                    summary=msg or f"Interactive step {step_id} awaiting human input",
+                    options=["done"],
+                )
+                if resolution is not None:
+                    chosen = resolution.get("chosen_option", "done")
+                    if chosen == "done":
+                        engine.complete_interaction(step_id=step_id)
+                    else:
+                        rationale = resolution.get("rationale") or chosen
+                        engine.provide_interact_input(step_id=step_id, input_text=rationale)
                     print(
-                        f"\n{color_error('ERROR')}: pending approval for phase "
-                        f"{phase_id} requires an explicit decision, but stdin "
-                        "is not a TTY so 'baton execute run' cannot prompt.",
+                        f"  [INTERACT] resolved via pending decision {request_id}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"\n{color_error('ERROR')}: interactive step '{step_id}' "
+                        "requires human input, but stdin is not a TTY so "
+                        "'baton execute run' cannot prompt.",
                         file=sys.stderr,
                     )
                     print(
-                        "  Run: baton execute approve "
-                        f"--phase-id {phase_id} --result approve|reject "
-                        "[--feedback TEXT]",
+                        f"  Run: baton execute interact --step-id {step_id} "
+                        "--input \"...\" or --done",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"  Pending decision recorded: {request_id} "
+                        "(also resolvable via the /decisions REST API or "
+                        "the PMO decision inbox).",
                         file=sys.stderr,
                     )
                     print(
                         "  Then re-invoke 'baton execute run' to continue.",
                         file=sys.stderr,
                     )
-                    # Do NOT mutate execution state — execution remains in
-                    # approval_pending for the operator to resolve.
                     sys.exit(2)
-
-                # Interactive approval prompt
-                print("  Options: approve, reject, approve-with-feedback", file=sys.stderr)
-                try:
-                    choice = input("  Decision> ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    choice = "reject"
-                feedback = ""
-                if choice == "approve-with-feedback":
-                    try:
-                        feedback = input("  Feedback> ").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        feedback = ""
-                if choice not in ("approve", "reject", "approve-with-feedback"):
-                    choice = "approve"
-                engine.record_approval_result(
-                    phase_id=phase_id, result=choice, feedback=feedback,
-                )
-                print(f"  [APPROVAL] {choice}", file=sys.stderr)
 
         # Get next action
         try:
@@ -3165,6 +3490,7 @@ _HANDOFF_NUDGE_TYPES = frozenset({
     ActionType.COMPLETE.value,
     ActionType.APPROVAL.value,
     ActionType.FAILED.value,
+    ActionType.CHECKPOINT.value,
     "gate_fail",
     "complete",
 })

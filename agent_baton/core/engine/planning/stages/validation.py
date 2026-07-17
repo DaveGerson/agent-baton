@@ -54,6 +54,7 @@ from agent_baton.core.engine.planning.utils.phase_builder import (
     is_team_phase,
 )
 from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
+from agent_baton.core.engine.planning.scope_contract import diagnose_step_scope
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
     audit_coverage_requirement,
     assess_risk,
@@ -71,6 +72,41 @@ if TYPE_CHECKING:
     from agent_baton.models.execution import MachinePlan, PlanPhase
 
 logger = logging.getLogger(__name__)
+
+
+# Heavy-task-only shallow-decomposition signals (see
+# ValidationStage._detect_shallow_decomposition). Two independent tiers,
+# deliberately kept apart because they carry very different confidence:
+#
+# 1. _PLACEHOLDER_MARKER_RE -- a small, curated set of literal placeholder
+#    markers that are vanishingly unlikely to appear in genuine task
+#    content ("tbd", "todo", "placeholder", "lorem ipsum"). Unambiguous
+#    -- flagged critical (blocking).
+# 2. _BARE_TEMPLATE_SUFFIX_RE -- the literal bare fallback
+#    ``phase_builder.step_description`` emits when neither an
+#    "expert"-tier agent definition nor a STEP_TEMPLATES entry applies
+#    for a given agent/phase pair: ``f"{verb}: {scoped} (as
+#    {agent_name})"``. This IS a real signal of "the repository-grounded
+#    decomposition pipeline had nothing to work with" -- but
+#    STEP_TEMPLATES's per-agent/per-phase coverage has real, currently-
+#    legitimate gaps (e.g. frontend-engineer on a Test-type phase), so a
+#    real, otherwise-fine plan can legitimately hit it. Flagged warning
+#    (surfaced as a diagnostic, non-blocking) rather than critical for
+#    that reason -- see _detect_shallow_decomposition.
+# "todo" and "placeholder" are also legitimate product nouns ("build a
+# todo list application", "add placeholder text to the search box") --
+# blocking those would refuse to plan real, common heavy tasks. Negative
+# lookaheads exempt exactly the compound-noun usages where the word is
+# modifying a feature noun; a bare/annotated marker ("TODO: scope this",
+# "details tbd", "this is a placeholder") still matches.
+_PLACEHOLDER_MARKER_RE = re.compile(
+    r"\btbd\b"
+    r"|\btodo\b(?![ \-](?:app|application|list|item|manager|tracker)s?\b)"
+    r"|\bplaceholder\b(?![ \-](?:text|image|value|content|avatar|logo|data|component)s?\b)"
+    r"|\blorem ipsum\b",
+    re.IGNORECASE,
+)
+_BARE_TEMPLATE_SUFFIX_RE = re.compile(r"\(as [\w\-]+\)\s*$")
 
 
 def _collect_member_agent_names(member: object) -> list[str]:
@@ -155,6 +191,15 @@ class ValidationStage:
         )
         draft.extracted_paths = extracted_paths
         draft.review_result = review_result
+
+        # Reconcile the roster with what actually landed in phases, now
+        # that every agent-dropping mutation (RosterStage's subtask-union,
+        # EnrichmentStage's concern-split, and this stage's own
+        # reviewer-filtering team consolidation) has had its turn.
+        # ``_agent_bases`` below folds ``resolved_agents`` into its
+        # review/audit-coverage evidence, so a candidate that was never
+        # actually assigned a step must not still masquerade as "routed".
+        self._prune_unused_resolved_agents(draft)
 
         # Compute defects from the assembled plan + reviewer result.
         defects = self._detect_defects(draft)
@@ -248,6 +293,25 @@ class ValidationStage:
 
         return budget_tier
 
+    @staticmethod
+    def _remap_depends_on(plan_phases: list, remap: dict[str, str]) -> None:
+        """Rewrite ``step.depends_on`` entries per *remap*, de-duplicating.
+
+        Used after team-step consolidation folds several step_ids into
+        one survivor -- every downstream ``depends_on`` pointing at one of
+        the folded ids must follow it to the survivor, not dangle.
+        """
+        for phase in plan_phases:
+            for step in phase.steps:
+                if not step.depends_on:
+                    continue
+                new_deps: list[str] = []
+                for dep in step.depends_on:
+                    mapped = remap.get(dep, dep)
+                    if mapped != step.step_id and mapped not in new_deps:
+                        new_deps.append(mapped)
+                step.depends_on = new_deps
+
     def _consolidate_team(
         self,
         *,
@@ -277,7 +341,27 @@ class ValidationStage:
             if phase.phase_id in split_phase_ids:
                 continue
             if is_team_phase(phase, task_summary):
-                phase.steps = [consolidate_team_step(phase)]
+                original_step_ids = [s.step_id for s in phase.steps]
+                consolidated = consolidate_team_step(phase)
+                phase.steps = [consolidated]
+                # Folding N steps into one collapses their step_ids into a
+                # single new one (phase_builder.py's
+                # ``consolidate_team_step`` -- the originals survive only
+                # as nested ``TeamMember`` entries, not top-level steps).
+                # A later phase's step may have declared ``depends_on`` a
+                # specific one of those now-gone ids (e.g. the
+                # "investigative" archetype's Verify step depends on the
+                # Fix phase's implementer step) -- left unrewritten, that
+                # reference dangles and MachinePlan's plan-graph invariant
+                # check rejects the whole plan. Point every such reference
+                # at the surviving consolidated step_id instead.
+                remap = {
+                    sid: consolidated.step_id
+                    for sid in original_step_ids
+                    if sid != consolidated.step_id
+                }
+                if remap:
+                    self._remap_depends_on(plan_phases, remap)
 
         # 12c.4. Extract file paths
         extracted_paths = extract_file_paths(task_summary)
@@ -344,6 +428,7 @@ class ValidationStage:
         """Inspect the assembled draft and return the list of defects."""
         defects: list[PlanDefect] = []
         agent_bases = self._agent_bases(draft)
+        explicit_phase_agent_pairs = self._explicit_phase_agent_pairs(draft)
 
         # 1. review_skipped
         review = draft.review_result
@@ -446,7 +531,7 @@ class ValidationStage:
             if blocked:
                 for step in phase.steps:
                     base = (step.agent_name or "").split("--")[0]
-                    if base in blocked:
+                    if base in blocked and (phase.name, base) not in explicit_phase_agent_pairs:
                         defects.append(PlanDefect(
                             code="agent_phase_mismatch",
                             severity="critical",
@@ -480,6 +565,146 @@ class ValidationStage:
                                 ),
                             ))
 
+        defects.extend(self._detect_shallow_decomposition(draft))
+
+        return defects
+
+    @staticmethod
+    def _explicit_phase_agent_pairs(draft: PlanDraft) -> set[tuple[str, str]]:
+        """(phase_name, agent_base) pairs the *caller* explicitly requested
+        via ``phases=[{"name": ..., "agents": [...]}]``.
+
+        ``PHASE_BLOCKED_ROLES`` (agent_phase_mismatch #4) exists to catch
+        the planner's own auto-routing mistakes (bd-0e36: architect
+        auto-landing on Implement). It must not veto a caller's explicit,
+        deliberate choice — RosterStage / EnrichmentStage already honour
+        ``phases is not None`` as "trust the caller" for concern-splitting
+        and roster expansion (see TestEnrichmentStageExplicitPhasesGuard);
+        this stage needs the same carve-out or it silently re-rejects the
+        very override those stages just agreed to preserve.
+
+        Scoped to the exact (phase name, agent) pairs the caller wrote —
+        not a blanket "phases is not None" bypass — so a dict with an
+        empty ``agents`` list (auto-routed via
+        ``phase_builder.assign_agents_to_phases`` fallback) still gets the
+        full auto-routing check.
+        """
+        raw_phases = draft.phases
+        if not raw_phases:
+            return set()
+        pairs: set[tuple[str, str]] = set()
+        for entry in raw_phases:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not name:
+                continue
+            for agent in entry.get("agents", []) or []:
+                pairs.add((name, str(agent).split("--")[0]))
+        return pairs
+
+    def _detect_shallow_decomposition(self, draft: PlanDraft) -> list[PlanDefect]:
+        """Heavy-task-only: flag generic placeholder language and empty
+        deliverables/write-scope.
+
+        ``planning.utils.repo_grounding`` grounds heavy-task steps in
+        concrete repository evidence when it's available; when it isn't
+        (or a step's grounding produced nothing), the pre-existing
+        generic-template fallback in ``phase_builder`` fires unchanged.
+        That fallback is fine for light/medium tasks -- it's the wrong
+        outcome for a task the pipeline itself classified as heavy. This
+        surfaces that outcome as a blocking defect instead of silently
+        shipping a plan with N steps of "Implement: <same summary> (as
+        backend-engineer)" as their entire brief. Never runs for light or
+        medium plans -- template-only descriptions are the expected,
+        acceptable behavior there.
+        """
+        defects: list[PlanDefect] = []
+        if draft.inferred_complexity != "heavy":
+            return defects
+
+        for phase in draft.plan_phases:
+            phase_key = self._phase_key(phase.name)
+            is_implement_phase = phase_key in self._IMPLEMENT_PHASE_KEYS
+            for step in phase.steps:
+                desc = step.task_description or ""
+                if _PLACEHOLDER_MARKER_RE.search(desc):
+                    defects.append(PlanDefect(
+                        code="generic_placeholder",
+                        severity="critical",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task step description contains a literal "
+                            f"placeholder marker: {desc[:160]!r}. Remediation: "
+                            "replace the placeholder with the actual concrete "
+                            "work package before this plan is dispatched."
+                        ),
+                    ))
+                elif _BARE_TEMPLATE_SUFFIX_RE.search(desc):
+                    defects.append(PlanDefect(
+                        code="bare_agent_template",
+                        # Warning, not critical -- see module-level
+                        # _BARE_TEMPLATE_SUFFIX_RE docstring: STEP_TEMPLATES
+                        # coverage gaps make this a real, currently-
+                        # legitimate outcome for some agent/phase pairs, so
+                        # it's a diagnostic signal, not a blocking one.
+                        severity="warning",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task step description reads as a generic "
+                            f"template rather than a concrete work package: "
+                            f"{desc[:160]!r}. Remediation: ground the step in "
+                            "concrete repository artifacts (files, symbols, "
+                            "tests) — see planning.utils.repo_grounding — or "
+                            "supply an explicit phases/agents override with "
+                            "real task detail."
+                        ),
+                    ))
+
+                if is_implement_phase and not step.deliverables:
+                    defects.append(PlanDefect(
+                        code="empty_deliverables",
+                        # Warning, not critical: unlike generic_placeholder
+                        # (an unambiguous quality bug), an empty deliverable
+                        # list can be entirely legitimate for a heavy task
+                        # with no project_root to ground against (dry-run
+                        # planning, a brand-new repo, CLI callers that don't
+                        # pass --project-root). Still surfaced as a
+                        # diagnostic (score_warnings / plan_diagnostics) so
+                        # it's visible, just not blocking.
+                        severity="warning",
+                        message=(
+                            f"task_id={draft.task_id} phase_id={phase.phase_id} "
+                            f"step_id={step.step_id} agent={step.agent_name!r}. "
+                            "Heavy-task implementation step has no "
+                            "deliverables. Remediation: populate concrete, "
+                            "file- or artifact-anchored deliverables for this "
+                            "step."
+                        ),
+                    ))
+
+                diag = diagnose_step_scope(step.step_id, step.step_type, step.allowed_paths)
+                if diag is not None and diag.code == "write_scope_missing":
+                    defects.append(PlanDefect(
+                        code="empty_scope",
+                        # Warning, not critical -- see empty_deliverables
+                        # above: ambiguous write scope is common and
+                        # legitimate whenever no project_root was supplied
+                        # to ground against, so this stays a surfaced
+                        # diagnostic rather than a blocking gate.
+                        severity="warning",
+                        message=self._with_remediation(
+                            f"task_id={draft.task_id} {diag.message}",
+                            "Remediation: populate step.allowed_paths from "
+                            "repository evidence (deliverables, context "
+                            "files, or confirmed repo topology) — see "
+                            "planning.utils.repo_grounding / "
+                            "planning.scope_contract.derive_allowed_paths.",
+                        ),
+                    ))
+
         return defects
 
     def _review_required(self, draft: PlanDraft, agent_bases: set[str]) -> bool:
@@ -501,8 +726,24 @@ class ValidationStage:
         )
 
     def _has_review_coverage(self, draft: PlanDraft) -> bool:
+        """A reviewer-class step outside an implement-type phase counts.
+
+        The canonical case is a phase literally named "Review", but
+        several archetypes route a reviewer into a differently-named
+        terminal phase in substance -- e.g. the "investigation"
+        archetype's "Verify" phase, or an explicit ``--agents`` roster
+        applied wholesale across compound-task subtask phases ("Test",
+        "Document", ...). Excluding only ``_IMPLEMENT_PHASE_KEYS`` (rather
+        than requiring an allow-listed name) keeps this in sync with the
+        *other* half of the same rule: a reviewer-class agent inside an
+        implement-type phase is independently flagged as
+        ``agent_phase_mismatch`` above and is filtered out of
+        implement/fix/draft/migrate team-steps by
+        ``consolidate_team_step`` before this runs, so it can never
+        double as coverage by accident.
+        """
         for phase in draft.plan_phases:
-            if self._phase_key(phase.name) != "review":
+            if self._phase_key(phase.name) in self._IMPLEMENT_PHASE_KEYS:
                 continue
             for step in phase.steps:
                 if self._step_agent_bases(step) & self._REVIEWER_BASES:
@@ -535,6 +776,40 @@ class ValidationStage:
             return "develop"
         return key
 
+    def _prune_unused_resolved_agents(self, draft: PlanDraft) -> None:
+        """Drop ``resolved_agents`` entries that never landed in any step.
+
+        Several upstream stages narrow a multi-candidate roster down to
+        fewer agents than ``resolved_agents`` still carries: RosterStage's
+        subtask-union (each subtask only uses its own slice),
+        EnrichmentStage's concern-split (one best-fit agent per concern),
+        and this stage's own team consolidation (``_consolidate_team``
+        filters reviewer-class agents out of Implement/Fix team-steps).
+        Left un-reconciled, the unpicked candidates become phantom roster
+        members: ``_agent_bases`` folds ``resolved_agents`` into its
+        review/audit-coverage evidence, so an agent that was never
+        actually assigned any work still trips a "needs a Review/Audit
+        phase" false positive (review_missing/audit_missing). Only ever
+        removes -- never adds -- so it cannot mask an agent genuinely
+        still needed by the roster.
+        """
+        resolved_agents = getattr(draft, "resolved_agents", None)
+        if not resolved_agents:
+            return
+        used_bases: set[str] = set()
+        for phase in draft.plan_phases:
+            for step in phase.steps:
+                used_bases.update(self._step_agent_bases(step))
+        pruned = [a for a in resolved_agents if (a or "").split("--")[0] in used_bases]
+        if pruned == resolved_agents:
+            return
+        dropped = [a for a in resolved_agents if a not in pruned]
+        draft.routing_notes.append(
+            f"[validation] Pruned unused roster candidate(s) {dropped} — "
+            "never assigned to a phase step."
+        )
+        draft.resolved_agents = pruned
+
     def _agent_bases(self, draft: PlanDraft) -> set[str]:
         bases = {
             (agent or "").split("--")[0]
@@ -550,7 +825,14 @@ class ValidationStage:
     def _step_agent_bases(self, step: object) -> set[str]:
         bases: set[str] = set()
         agent_name = getattr(step, "agent_name", "")
-        if agent_name:
+        # "team" is the consolidated-team-step sentinel (phase_builder.py
+        # ``consolidate_team_step``), never a real agent -- the actual
+        # members live in ``step.team`` and are collected below. Other
+        # call sites (planner.py's own agent-name walks) already exclude
+        # it; this one didn't, so a consolidated team step silently
+        # leaked a fake "team" base name into every downstream
+        # review/audit-coverage check.
+        if agent_name and agent_name != "team":
             bases.add(agent_name.split("--")[0])
         for member in getattr(step, "team", []) or []:
             for name in _collect_member_agent_names(member):

@@ -27,6 +27,12 @@ The models are organized into groups:
   ``AdoWorkItemResponse``, ``AdoSearchResponse``
 - **Forge actions**: ``ForgeApproveResponse``, ``ExecuteCardResponse``
 - **Gate errors**: ``ApprovalErrorResponse``
+- **Manager-mode PMO API**: ``ManagerCharterResponse``, ``ManagerScopeMapResponse``,
+  ``ManagerWorkstreamsResponse``, ``ManagerTeamBlueprintResponse``,
+  ``ManagerRoleCardsResponse``, ``ManagerKnowledgePlanResponse``,
+  ``ManagerScopeContractsResponse``, ``ManagerContextBundlesResponse``,
+  ``ManagerReportResponse``, ``ManagerDecisionListResponse``,
+  ``ManagerVersionResponse``, ``ManagerValidationResponse``
 """
 from __future__ import annotations
 
@@ -868,6 +874,23 @@ class ForgeApproveResponse(BaseModel):
 
     saved: bool = Field(..., description="True when the plan was written successfully.")
     path: str = Field(..., description="Absolute path to the saved plan.json file.")
+    manager_mode: bool = Field(
+        default=False,
+        description=(
+            "True when the approved plan carried manager_mode=True and the "
+            "full ManagerModePlanner sidecar set (charter, scope map, team "
+            "blueprint, role cards, knowledge plan, scope contracts, "
+            "context bundles) was built and persisted alongside plan.json."
+        ),
+    )
+    manager_revision: Optional[int] = Field(
+        default=None,
+        description=(
+            "Revision number recorded in artifact-revision.json for this "
+            "publish, when manager_mode is True. See GET "
+            "/pmo/manager/{card_id}/version."
+        ),
+    )
 
 
 class ExecuteCardResponse(BaseModel):
@@ -1531,3 +1554,292 @@ class FireSpecDraftResponse(BaseModel):
     spec_id: str = Field(..., description="ID of the spec draft that was fired.")
     task_id: str = Field(..., description="Execution task ID of the generated plan.")
     status: str = Field(default="fired", description="Always 'fired' on success.")
+
+
+# ---------------------------------------------------------------------------
+# Manager-mode PMO API (Phase 7 "Turn PMO into the director console")
+#
+# Every artifact this section wraps is itself a stable, JSON-round-trippable
+# ``agent_baton.models.manager.ManagerModel`` (``.to_dict()``/``.from_dict()``
+# -- see that module). Rather than hand-duplicate every nested field into a
+# parallel HTTP-shape model (a large surface that would drift the moment the
+# manager-mode builders gain a field), these responses wrap the artifact's
+# own ``to_dict()`` output as a typed ``dict`` field -- the same convention
+# already used for ``PmoCardDetailResponse.plan`` and
+# ``ForgePlanResponse.plan`` above. What IS modeled explicitly here is the
+# envelope every manager-mode read shares: which task/card it belongs to and
+# which published revision it came from, so a UI can always tell whether two
+# fetched artifacts are looking at the same version of the plan.
+# ---------------------------------------------------------------------------
+
+
+class ManagerArtifactEnvelope(BaseModel):
+    """Common envelope for a single manager-mode artifact read.
+
+    ``revision``/``published_at`` are ``None`` when no
+    ``artifact-revision.json`` manifest has ever been published for this
+    task (e.g. the plan predates manager mode, or was built with
+    ``ManagerModePlanner.build()`` -- preview only -- and never
+    ``build_and_write``/``rebuild_and_publish``). A UI should treat that as
+    "artifacts exist but are unversioned", not as an error.
+    """
+
+    task_id: str = Field(..., description="Task/card ID this artifact belongs to.")
+    revision: Optional[int] = Field(
+        default=None,
+        description="Published revision number (artifact-revision.json), or None if unversioned.",
+    )
+    published_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 timestamp of the last publish, or None if unversioned.",
+    )
+
+
+class ManagerCharterResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/charter``.
+
+    Unlike scope map / team blueprint / knowledge plan / scope contracts /
+    context bundles, the project charter is persisted ONLY as rendered
+    Markdown (``project-charter.md`` -- see
+    ``agent_baton.core.manager.artifacts.render_all``; there is no
+    ``project-charter.json`` sidecar), so this response carries the
+    Markdown, not a structured dict.
+    """
+
+    markdown: str = Field(..., description="Rendered project-charter.md contents.")
+
+
+class ManagerScopeMapResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/scope-map``."""
+
+    scope_map: dict = Field(..., description="ScopeMap.to_dict() shape (includes workstreams).")
+
+
+class ManagerWorkstreamPhaseLink(BaseModel):
+    """One phase <-> workstream correspondence (positional, per
+    ``ManagerModePlanner._compose``: one ``Workstream`` per ``plan.phases``
+    entry, in order)."""
+
+    phase_id: int = Field(..., description="MachinePlan phase_id.")
+    phase_name: str = Field(default="", description="MachinePlan phase name.")
+    workstream: dict = Field(..., description="Workstream.to_dict() shape.")
+
+
+class ManagerWorkstreamsResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/workstreams``.
+
+    The phase/workstream correspondence a UI needs to render "which team
+    owns which phase" -- derived by zipping the persisted plan's phases
+    with the persisted scope map's workstreams, exactly like
+    ``ManagerModePlanner._compose`` does internally.
+    """
+
+    links: list[ManagerWorkstreamPhaseLink] = Field(default_factory=list)
+
+
+class ManagerTeamBlueprintResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/team-blueprint``."""
+
+    team_blueprint: dict = Field(..., description="TeamBlueprint.to_dict() shape.")
+
+
+class ManagerRoleCardResponse(BaseModel):
+    """One role card, as rendered Markdown (the canonical dispatch form)."""
+
+    role: str = Field(..., description="Role identifier.")
+    markdown: str = Field(default="", description="Rendered role-card Markdown.")
+
+
+class ManagerRoleCardsResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/role-cards``."""
+
+    role_cards: list[ManagerRoleCardResponse] = Field(default_factory=list)
+
+
+class ManagerKnowledgePlanResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/knowledge-plan``."""
+
+    knowledge_plan: dict = Field(..., description="KnowledgePlan.to_dict() shape.")
+
+
+class ManagerScopeContractSummary(BaseModel):
+    """One step's scope-contract listing entry."""
+
+    step_id: str = Field(..., description="PlanStep step_id this contract covers.")
+    agent_name: str = Field(default="", description="Dispatch agent for this step.")
+    workstream_id: str = Field(default="", description="Owning workstream id.")
+    allowed_paths: list[str] = Field(default_factory=list)
+
+
+class ManagerScopeContractsResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/scope-contracts``."""
+
+    contracts: list[ManagerScopeContractSummary] = Field(default_factory=list)
+
+
+class ManagerScopeContractResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/scope-contracts/{step_id}``."""
+
+    step_id: str = Field(..., description="PlanStep step_id this contract covers.")
+    contract: dict = Field(..., description="ScopeContract.to_dict() shape.")
+    markdown: str = Field(default="", description="Rendered scope-contract Markdown.")
+
+
+class ManagerContextBundleSummary(BaseModel):
+    """Metadata-only view of a per-step context bundle (no full document
+    bodies -- see ``GET .../context-bundles/{step_id}`` for the full
+    bundle)."""
+
+    step_id: str = Field(..., description="PlanStep step_id this bundle covers.")
+    agent_name: str = Field(default="", description="Dispatch agent for this step.")
+    must_read_count: int = Field(default=0, description="Number of must-read references.")
+    reference_only_count: int = Field(default=0, description="Number of reference-only entries.")
+    knowledge_pack_count: int = Field(default=0, description="Number of attached knowledge packs.")
+    token_budget: int = Field(default=0, description="Configured per-step token budget.")
+    estimated_tokens: int = Field(default=0, description="Estimated tokens this bundle consumes.")
+    truncation_warnings: list[str] = Field(default_factory=list)
+
+
+class ManagerContextBundlesResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/context-bundles``."""
+
+    bundles: list[ManagerContextBundleSummary] = Field(default_factory=list)
+
+
+class ManagerContextBundleResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/context-bundles/{step_id}``."""
+
+    step_id: str = Field(..., description="PlanStep step_id this bundle covers.")
+    bundle: dict = Field(..., description="ContextBundle.to_dict() shape.")
+
+
+class ManagerReportResponse(ManagerArtifactEnvelope):
+    """Response from ``GET /pmo/manager/{card_id}/report``."""
+
+    manager_brief: str = Field(default="", description="manager-brief.md contents.")
+    manager_report: str = Field(
+        default="",
+        description="manager-report.md contents (retrospective; only present post-execution).",
+    )
+
+
+class ManagerDecisionResponse(BaseModel):
+    """One entry from ``decision-log.jsonl`` (a :class:`ManagerDecision`)."""
+
+    decision_id: str = Field(..., description="Deterministic 'dec-<8 hex>' identifier.")
+    decision_type: str = Field(..., description="scope_expansion | ambiguity | knowledge_gap | review_veto | approval.")
+    task_id: str = Field(default="", description="Task/card this decision belongs to.")
+    summary: str = Field(default="")
+    context: str = Field(default="")
+    options: list[str] = Field(default_factory=list)
+    recommended_option: str = Field(default="")
+    created_at: str = Field(default="")
+    resolved_at: Optional[str] = Field(default=None)
+    resolution: Optional[str] = Field(default=None)
+    markdown: str = Field(default="", description="Rendered decision-packet Markdown.")
+
+    @classmethod
+    def from_manager_decision(cls, decision: Any, markdown: str = "") -> "ManagerDecisionResponse":
+        """Convert from ``agent_baton.models.manager.ManagerDecision``."""
+        return cls(
+            decision_id=decision.decision_id,
+            decision_type=decision.decision_type,
+            task_id=decision.task_id,
+            summary=decision.summary,
+            context=decision.context,
+            options=list(decision.options),
+            recommended_option=decision.recommended_option,
+            created_at=decision.created_at,
+            resolved_at=decision.resolved_at,
+            resolution=decision.resolution,
+            markdown=markdown,
+        )
+
+
+class ManagerDecisionListResponse(BaseModel):
+    """Response from ``GET /pmo/manager/{card_id}/decisions``."""
+
+    task_id: str = Field(..., description="Task/card ID these decisions belong to.")
+    count: int = Field(..., description="Number of decisions in the list.")
+    decisions: list[ManagerDecisionResponse] = Field(default_factory=list)
+
+
+class ManagerDecisionResolveResponse(BaseModel):
+    """Response from
+    ``POST /pmo/manager/{card_id}/decisions/{decision_id}/resolve``.
+
+    Mirrors the ``dict`` returned by
+    ``ExecutionEngine.resolve_scope_expansion`` -- see that method for the
+    exact field semantics per ``resolution``.
+    """
+
+    applied: bool = Field(..., description="Whether the resolution was successfully applied.")
+    resolution: Optional[str] = Field(default=None, description="'approve' or 'reject', echoed back.")
+    step_id: str = Field(default="", description="The step the decision concerned.")
+    decision_id: str = Field(default="", description="The decision that was resolved.")
+    new_allowed_paths: list[str] = Field(
+        default_factory=list,
+        description="The step's widened allowed_paths, when resolution='approve'.",
+    )
+    error: Optional[str] = Field(default=None, description="Failure reason when applied=False.")
+
+
+class ManagerVersionResponse(BaseModel):
+    """Response from ``GET /pmo/manager/{card_id}/version``.
+
+    Wraps ``artifact-revision.json`` -- the monotonic version record
+    written by every successful
+    ``agent_baton.core.manager.rebuild.rebuild_and_publish`` call, including
+    a plan's INITIAL manager-mode publish when it was created via Forge
+    (``ForgeSession.save_plan`` -> ``rebuild_and_publish``, revision 1 --
+    see ``agent_baton/core/pmo/forge.py``). A manager-mode plan created via
+    ``baton plan --manager-mode --save`` instead (which calls
+    ``ManagerModePlanner.build_and_write`` directly, not
+    ``rebuild_and_publish``) has no manifest until its first runtime
+    amendment -- ``published=False`` in that case is expected, not an
+    error; every artifact is still fully readable via the other
+    ``/pmo/manager/{card_id}/...`` endpoints regardless.
+    """
+
+    task_id: str = Field(..., description="Task/card ID this version record belongs to.")
+    published: bool = Field(..., description="False when no manifest has ever been published.")
+    revision: int = Field(default=0, description="Monotonic revision number.")
+    prior_revision: int = Field(default=0, description="Revision this one superseded.")
+    trigger: str = Field(default="", description="What triggered this publish (e.g. 'manual', 'scope_expansion_resolved').")
+    created_at: str = Field(default="", description="ISO-8601 publish timestamp.")
+    plan_fingerprint: str = Field(default="", description="Digest of the plan shape this revision was built from.")
+    phase_count: int = Field(default=0)
+    step_count: int = Field(default=0)
+    published_paths: list[str] = Field(default_factory=list)
+
+
+class ManagerValidationResponse(BaseModel):
+    """Response from ``GET /pmo/manager/{card_id}/validation``.
+
+    Answers "is the currently-published manager-mode artifact set still
+    version-consistent with the plan currently on disk" without re-running
+    the full ``ManagerModePlanner`` composition: it recomputes
+    ``agent_baton.core.manager.rebuild.plan_fingerprint`` over the CURRENT
+    plan and compares it against the fingerprint recorded in the last
+    published ``artifact-revision.json``.
+
+    ``valid=False`` with an empty ``errors`` list plus
+    ``fingerprint_match=False`` means "sidecars are stale relative to the
+    plan" (typically: a plan mutation happened without going through
+    ``rebuild_and_publish``/``amend_plan``/``resolve_scope_expansion`` --
+    should not occur via any endpoint this API exposes, but is checked
+    defensively). ``published=False`` means manager mode was never
+    published for this task at all.
+    """
+
+    task_id: str = Field(..., description="Task/card ID validated.")
+    published: bool = Field(..., description="False when no manifest has ever been published.")
+    valid: bool = Field(..., description="True when published and version-consistent.")
+    fingerprint_match: bool = Field(
+        default=False,
+        description="True when the manifest's plan_fingerprint matches the current plan.",
+    )
+    revision: int = Field(default=0, description="Published revision number, or 0 if unpublished.")
+    current_plan_fingerprint: str = Field(default="", description="Fingerprint of the plan currently on disk.")
+    published_plan_fingerprint: str = Field(default="", description="Fingerprint recorded in the last publish.")
+    errors: list[str] = Field(default_factory=list, description="Human-readable inconsistency descriptions.")

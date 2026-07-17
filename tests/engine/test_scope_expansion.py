@@ -130,6 +130,71 @@ class TestGenerateExpansionPhase:
         phase = generate_expansion_phase(desc, plan, trigger_phase_id=1)
         assert len(phase.name) < 100
 
+    def test_generated_step_has_no_allowed_paths_and_is_write_capable(self):
+        """Threat model (Phase 3 'Make scope contracts authoritative',
+        3.3): an adaptively-generated expansion phase must NOT end up
+        with implicit, unbounded write access. This module never sets
+        ``allowed_paths`` (it has no repo-topology evidence to derive
+        one from -- it only has a free-text description), and the
+        generated step's default ``step_type`` ('developing') is
+        write-capable. That combination is exactly what
+        ``ClaudeCodeLauncher.configure_step_scope``'s fail-closed
+        PATH_SCOPE_EMPTY check exists to catch downstream -- pinned here
+        so this module and the launcher's contract cannot silently drift
+        apart (e.g. a future edit here that changes the default
+        step_type without also adding scope-derivation would otherwise
+        go unnoticed)."""
+        from agent_baton.core.engine.planning.scope_contract import is_write_capable
+
+        plan = self._make_plan()
+        phase = generate_expansion_phase("Add API endpoint for reports", plan, trigger_phase_id=1)
+        step = phase.steps[0]
+        assert step.allowed_paths == []
+        assert is_write_capable(step.step_type)
+
+    def test_generated_step_is_refused_at_dispatch_not_silently_unbounded(self):
+        """End-to-end with the real launcher: a write-capable step with
+        no allowed_paths must never reach the ``claude`` subprocess with
+        unbounded (whole-repo) write access -- it must be refused
+        fail-closed instead."""
+        import asyncio
+
+        from agent_baton.core.runtime.claude_launcher import (
+            ClaudeCodeConfig,
+            ClaudeCodeLauncher,
+        )
+
+        plan = self._make_plan()
+        phase = generate_expansion_phase("Add API endpoint for reports", plan, trigger_phase_id=1)
+        step = phase.steps[0]
+
+        launcher = ClaudeCodeLauncher(ClaudeCodeConfig(claude_path="echo"))
+        launcher.configure_step_scope(
+            step.step_id, step.allowed_paths, step.blocked_paths,
+            write_capable=is_write_capable_default_true(step.step_type),
+        )
+        result = asyncio.run(
+            launcher.launch(
+                agent_name=step.agent_name, model="sonnet",
+                prompt="do work", step_id=step.step_id,
+            )
+        )
+        assert result.status == "failed"
+        assert "PATH_SCOPE_EMPTY" in (result.error or "")
+
+
+def is_write_capable_default_true(step_type: str) -> bool:
+    """Mirror the production call site's semantics: TaskWorker always
+    passes ``write_capable=True`` unless the step_type is intentionally
+    read-only (see scope_contract.READ_ONLY_STEP_TYPES); the launcher's
+    own default is also True, so this simply names that contract for the
+    test above rather than hardcoding a bare ``True``."""
+    from agent_baton.core.engine.planning.scope_contract import (
+        is_intentionally_read_only,
+    )
+
+    return not is_intentionally_read_only(step_type)
+
 
 class TestExecutionStateExpansionFields:
     def test_serialization_roundtrip(self):

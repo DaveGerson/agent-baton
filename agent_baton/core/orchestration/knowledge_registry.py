@@ -420,6 +420,44 @@ class KnowledgeRegistry:
         count += self.load_directory(project_dir, override=True)
         return count
 
+    def register_generated_pack(self, pack_dir: Path) -> KnowledgePack | None:
+        """Load and register a single knowledge-pack directory, in place.
+
+        Used by the talent-factory lifecycle
+        (``agent_baton.core.engine.planning.talent_factory``) after
+        atomically installing a validated generated knowledge pack --
+        mirrors :meth:`AgentRegistry.register_generated_agent`'s
+        ``registry_reload: immediate`` semantics (see
+        docs/internal/talent-factory-contract.md §4): the in-process
+        registry instance picks up the new pack right away, without a
+        full :meth:`load_default_paths` rescan.
+
+        Always overrides any existing pack with the same name -- the
+        caller has already applied name-collision policy before writing
+        the directory. Returns the parsed :class:`KnowledgePack`, or
+        ``None`` if the directory does not exist or could not be parsed
+        (caller should treat this as an install failure and roll back).
+        """
+        if not pack_dir.is_dir():
+            return None
+        try:
+            loaded = self._load_pack(pack_dir)
+        except Exception as exc:
+            logger.warning(
+                "register_generated_pack: failed to load %s: %s", pack_dir, exc
+            )
+            return None
+        if loaded is None:
+            return None
+        pack, degraded = loaded
+        self._packs[pack.name] = pack
+        if degraded:
+            self._degraded_pack_names.add(pack.name)
+        else:
+            self._degraded_pack_names.discard(pack.name)
+        self._rebuild_tfidf()
+        return pack
+
     # ------------------------------------------------------------------
     # Exact lookups
     # ------------------------------------------------------------------

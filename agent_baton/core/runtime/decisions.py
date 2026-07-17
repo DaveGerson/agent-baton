@@ -24,6 +24,209 @@ from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
 
 
+_ID_SEP = "::"
+
+
+def deterministic_decision_id(task_id: str, kind: str, *parts: object) -> str:
+    """Build a stable ``DecisionRequest.request_id`` from ``(task_id, kind, parts)``.
+
+    ``DecisionRequest.create()`` mints a random UUID fragment for every call,
+    which means two callers asking about the "same" human decision (e.g. the
+    daemon's ``TaskWorker`` and a headless ``baton execute run`` subprocess
+    re-invoked after a crash) would otherwise create two independent pending
+    requests for one logical decision.  A deterministic ID keyed on the
+    task/kind/identifying-parts tuple lets every surface converge on the
+    same request file, and lets :func:`parse_decision_id` recover which
+    task/phase/step a resolved decision was about without needing a
+    separate structured field on :class:`~agent_baton.models.decision.DecisionRequest`.
+
+    Args:
+        task_id: The execution this decision belongs to.
+        kind: A short category tag -- e.g. ``"gate"``, ``"approval"``,
+            ``"feedback"``, ``"interact"``.
+        *parts: Additional identifying values (phase_id, step_id,
+            question_id, ...) stringified and joined into the ID.
+
+    Returns:
+        A request_id of the form ``"<task_id>::<kind>::<part1>::<part2>..."``.
+    """
+    tail = _ID_SEP.join(str(p) for p in parts)
+    if tail:
+        return f"{task_id}{_ID_SEP}{kind}{_ID_SEP}{tail}"
+    return f"{task_id}{_ID_SEP}{kind}"
+
+
+def parse_decision_id(request_id: str) -> tuple[str, str, list[str]] | None:
+    """Inverse of :func:`deterministic_decision_id`.
+
+    Returns ``(task_id, kind, parts)`` when *request_id* follows the
+    deterministic scheme, or ``None`` when it does not (e.g. a legacy
+    random-UUID ID minted by ``DecisionRequest.create()``) so callers can
+    fall back gracefully instead of raising.
+    """
+    segments = request_id.split(_ID_SEP)
+    if len(segments) < 2:
+        return None
+    task_id, kind, *rest = segments
+    if not task_id or not kind:
+        return None
+    return task_id, kind, rest
+
+
+def apply_decision_resolution(
+    *,
+    team_context_root: Path,
+    task_id: str,
+    kind: str,
+    parts: list[str],
+    chosen_option: str,
+    rationale: str | None = None,
+    bus: EventBus | None = None,
+) -> bool:
+    """Apply a resolved decision's outcome directly to the execution engine.
+
+    This is what makes a decision resolved through an out-of-band surface
+    (the REST API, ``baton decide --resolve``) actually take effect when
+    there is no live ``TaskWorker`` polling the same :class:`DecisionManager`
+    to notice the resolution itself -- the common case for a headless
+    ``baton execute run`` subprocess that already exited after recording the
+    pending decision (see ``cli/commands/execution/execute.py::_run_loop``).
+
+    Idempotent by construction: if the engine is no longer in the state the
+    decision expects (for example because a live worker already applied the
+    same resolution concurrently), the engine call raises and this function
+    swallows it, returning ``False`` rather than surfacing an error to a
+    caller who already successfully persisted the human's answer.
+
+    Args:
+        team_context_root: The project's ``.claude/team-context`` directory.
+        task_id: The execution this decision belongs to.
+        kind: One of ``"gate"``, ``"approval"``, ``"feedback"``,
+            ``"interact"`` -- as produced by :func:`deterministic_decision_id`.
+        parts: The identifying parts recovered by :func:`parse_decision_id`
+            (phase_id, question_id, step_id, ...).
+        chosen_option: The option the human selected.
+        rationale: Optional free-text rationale/feedback/input text.
+        bus: Optional shared EventBus so engine-emitted events are visible
+            to any connected SSE stream.
+
+    Returns:
+        ``True`` if the resolution was applied to the engine, ``False`` if
+        it was a no-op (unknown *kind*, malformed *parts*, or the engine
+        rejected the call because it was no longer in the expected state).
+    """
+    from agent_baton.core.engine.executor import ExecutionEngine
+    from agent_baton.core.storage import detect_backend, get_project_storage
+
+    try:
+        backend = detect_backend(team_context_root)
+        storage = get_project_storage(team_context_root, backend=backend)
+        engine = ExecutionEngine(
+            team_context_root=team_context_root,
+            bus=bus,
+            task_id=task_id,
+            storage=storage,
+        )
+        if kind == "gate":
+            engine.record_gate_result(
+                phase_id=int(parts[0]),
+                passed=chosen_option in ("approve", "pass"),
+                output=f"Resolved via decisions API: {chosen_option}",
+            )
+        elif kind == "approval":
+            engine.record_approval_result(
+                phase_id=int(parts[0]),
+                result=chosen_option,
+                feedback=rationale or "",
+            )
+        elif kind == "feedback":
+            question_id = parts[1] if len(parts) > 1 else ""
+            try:
+                chosen_index = int(chosen_option)
+            except (TypeError, ValueError):
+                chosen_index = 0
+            engine.record_feedback_result(
+                phase_id=int(parts[0]),
+                question_id=question_id,
+                chosen_index=chosen_index,
+            )
+        elif kind == "interact":
+            step_id = parts[0] if parts else ""
+            if chosen_option == "done":
+                engine.complete_interaction(step_id=step_id)
+            else:
+                engine.provide_interact_input(
+                    step_id=step_id,
+                    input_text=rationale or chosen_option,
+                )
+        else:
+            return False
+        return True
+    except Exception:
+        # See docstring: any engine rejection here means the decision no
+        # longer needs applying (or never mapped to a real engine call),
+        # not that the API call itself failed.
+        return False
+
+
+def resume_task_headless(*, team_context_root: Path, task_id: str) -> bool:
+    """Ensure *task_id* is being actively driven forward, exactly once.
+
+    Idempotency guard: if a worker (daemon-managed or a previously spawned
+    headless runner) is already alive for *task_id* -- detected via its
+    ``executions/<task_id>/worker.pid`` file -- this is a no-op; we do not
+    spawn a second process that would race the first on ``next_action()``/
+    ``record_step_result()``.  Otherwise it launches a fresh headless
+    ``baton execute run --task-id <task_id>`` subprocess (mirroring
+    ``api/routes/pmo.py::execute_card``'s launch mechanism) which resolves
+    the same active/resumable execution via the standard task-id resolution
+    chain and continues from exactly where it paused.
+
+    Returns:
+        ``True`` if the task is (now, or already) being driven by a worker
+        process; ``False`` if a new process could not be spawned.
+    """
+    import os
+    import subprocess
+    import sys as _sys
+
+    # Two PID locations to probe (see WorkerSupervisor.pid_path): the
+    # task-namespaced ``executions/<task_id>/worker.pid``, and the legacy
+    # ``<root>/daemon.pid`` written by ``baton daemon start`` without
+    # ``--task-id`` (including ``--serve`` mode, whose in-process worker
+    # polls this same decisions directory).  Missing the legacy file would
+    # spawn a second headless runner racing that live daemon worker.
+    pid_paths = (
+        team_context_root / "executions" / task_id / "worker.pid",
+        team_context_root / "daemon.pid",
+    )
+    for pid_path in pid_paths:
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text().strip())
+                os.kill(pid, 0)  # probe -- raises if the process is gone
+                return True
+            except (ValueError, OSError):
+                pass  # stale PID file -- keep probing / relaunch headless.
+
+    project_root = team_context_root.parent.parent
+    cmd = [
+        _sys.executable, "-m", "agent_baton", "execute", "run",
+        "--task-id", task_id,
+    ]
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    return True
+
+
 class DecisionManager:
     """Manage human decision requests during async execution.
 

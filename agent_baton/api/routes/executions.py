@@ -477,6 +477,15 @@ def _collect_next_actions(engine: ExecutionEngine) -> list[ActionResponse]:
     stay resumable. Pinned by
     ``test_unknown_backend_mid_run_keeps_execution_running``.
 
+    Phase 6.2 (CHECKPOINT): ``next_actions()`` returns an empty list when a
+    checkpoint boundary is due but not yet emitted (see
+    ``ExecutionEngine._checkpoint_trigger``), so the fallback below to
+    ``next_action()`` (singular) is what actually surfaces the
+    ``action_type: "checkpoint"`` response — a paused-for-refresh signal,
+    never treated as complete or failed by this endpoint.  API clients
+    should resume with the ``summary`` field (the exact
+    ``baton execute resume`` command) rather than re-polling in a loop.
+
     Args:
         engine: The ``ExecutionEngine`` to query.
 

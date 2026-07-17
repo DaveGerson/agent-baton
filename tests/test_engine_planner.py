@@ -17,6 +17,35 @@ from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanS
 from agent_baton.models.pattern import LearnedPattern
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_task_classifier(monkeypatch: object) -> None:
+    """Prevent live ``claude`` CLI classification calls in this file.
+
+    ``IntelligentPlanner()``/``IntelligentPlanner(team_context_root=...)``
+    built with no explicit ``task_classifier`` default to
+    ``FallbackClassifier`` (agent_baton/core/engine/classifier.py), which
+    tries a real Sonnet call via ``HeadlessClaude`` whenever the ``claude``
+    binary is on PATH -- ``_talent_agent_available()`` only checks binary
+    presence, not any opt-in flag. In a sandbox where ``claude`` is
+    reachable (this repo's own dev containers included), that made
+    ``create_plan()`` calls with no explicit ``agents``/``task_type``
+    silently nondeterministic: the live model is free to recommend a
+    reviewer-class agent (e.g. ``security-reviewer``, now a registered
+    agent in ``tmp_agents_dir``) for an Implement-type phase, which
+    ``ValidationStage``'s ``agent_phase_mismatch`` check then correctly
+    rejects -- observed as an intermittent ``PlanQualityError`` on
+    byte-identical input (phase-5 gate repair). tests/CLAUDE.md requires
+    this suite be hermetic (no real network/CLI calls); force the
+    TalentAgent probe unavailable so classification always falls through
+    to the deterministic ``KeywordClassifier``.
+    """
+    import agent_baton.core.engine.classifier as classifier_mod
+
+    monkeypatch.setattr(
+        classifier_mod, "_talent_agent_available", lambda: (False, None)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -60,6 +89,13 @@ def tmp_agents_dir(tmp_path: Path) -> Path:
         ("data-analyst", "Data analysis specialist.", "sonnet"),
         ("auditor", "Audit and compliance specialist.", "opus"),
         ("backend-engineer", "Generic backend engineer.", "sonnet"),
+        # Registered so risk-elevation tests exercise the devops risk
+        # keyword heuristic in isolation, without also tripping the
+        # capability-gap/talent-factory machinery for an "unknown to the
+        # registry" agent name (see TestRiskAssessmentStructural).
+        ("devops-engineer", "Infrastructure and deployment specialist.", "sonnet"),
+        ("devops-specialist", "Infrastructure and deployment specialist.", "sonnet"),
+        ("security-reviewer", "Security-focused code review specialist.", "opus"),
     ]
     for name, desc, model in agents:
         content = (

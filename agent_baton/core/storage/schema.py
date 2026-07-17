@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1412,6 +1412,24 @@ ALTER TABLE plans ADD COLUMN manager_mode INTEGER NOT NULL DEFAULT 0;
 -- published, so databases migrated by master must still receive this column.
 ALTER TABLE plans ADD COLUMN plan_diagnostics TEXT NOT NULL DEFAULT '{}';
 """,
+    48: """
+-- v48: persist team-synthesis dispatch state (Phase 4, 4.3 -- wire real
+-- team coordination and synthesis, docs/internal/team-runtime-contract.md
+-- Section 8).
+--
+-- ``synthesis_state`` mirrors agent_baton.models.execution.SynthesisState
+-- (empty string = not applicable -- a non-team step, or a team step whose
+-- synthesis.strategy is not "agent_synthesis").  ``synthesis_dispatched``
+-- guards against re-dispatching the synthesis agent on every subsequent
+-- next_action()/next_actions() poll while its result is still in flight.
+-- Both round-trip through the ordinary StepResult carry-forward in
+-- ExecutionEngine.record_step_result so a crash/restart mid-synthesis
+-- resumes correctly instead of re-dispatching or losing member_results.
+-- Additive-only, matches the v3/v9/v12/v13 step_results column-addition
+-- precedent in this file. Applied to BOTH project and central databases.
+ALTER TABLE step_results ADD COLUMN synthesis_state TEXT NOT NULL DEFAULT '';
+ALTER TABLE step_results ADD COLUMN synthesis_dispatched INTEGER NOT NULL DEFAULT 0;
+""",
 }
 
 # =====================================================================
@@ -1656,6 +1674,9 @@ CREATE TABLE IF NOT EXISTS step_results (
     model_id               TEXT NOT NULL DEFAULT '',
     session_id             TEXT NOT NULL DEFAULT '',
     step_started_at        TEXT NOT NULL DEFAULT '',
+    -- v48: team-synthesis dispatch state (see MIGRATIONS[48] docstring).
+    synthesis_state         TEXT NOT NULL DEFAULT '',
+    synthesis_dispatched    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id) REFERENCES executions(task_id) ON DELETE CASCADE
 );
@@ -2765,6 +2786,9 @@ CREATE TABLE IF NOT EXISTS step_results (
     model_id               TEXT NOT NULL DEFAULT '',
     session_id             TEXT NOT NULL DEFAULT '',
     step_started_at        TEXT NOT NULL DEFAULT '',
+    -- v48: team-synthesis dispatch state (see MIGRATIONS[48] docstring).
+    synthesis_state         TEXT NOT NULL DEFAULT '',
+    synthesis_dispatched    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_step_results_status ON step_results(status);

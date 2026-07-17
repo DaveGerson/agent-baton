@@ -17,7 +17,12 @@ from agent_baton.api.models.responses import (
     DecisionResponse,
     ResolveResponse,
 )
-from agent_baton.core.runtime.decisions import DecisionManager
+from agent_baton.core.runtime.decisions import (
+    DecisionManager,
+    apply_decision_resolution,
+    parse_decision_id,
+    resume_task_headless,
+)
 
 router = APIRouter()
 
@@ -189,7 +194,10 @@ async def resolve_decision(
         decision_manager: Injected ``DecisionManager`` singleton.
 
     Returns:
-        A ``ResolveResponse`` confirming the resolution.
+        A ``ResolveResponse`` confirming the resolution.  ``execution_resumed``
+        is ``True`` when this call was able to apply the decision directly
+        to the execution engine and confirm (or launch) a worker actively
+        driving the task forward -- see "Atomic apply + resume" below.
 
     Raises:
         HTTPException 400: If the decision has already been resolved
@@ -198,6 +206,27 @@ async def resolve_decision(
             exists.
         HTTPException 409: If a concurrent modification prevented the
             resolution from being written.
+
+    Atomic apply + resume:
+        A resolved decision is only useful if something acts on it.  A live
+        ``TaskWorker`` (daemon mode) polls the same :class:`DecisionManager`
+        and notices the resolution on its own, but a headless ``baton
+        execute run`` subprocess (the mechanism ``POST
+        /pmo/execute/{card_id}`` uses) already exited after recording the
+        pending decision -- nothing is polling.  So once the resolution is
+        durably persisted, this endpoint also:
+
+        1. Applies the resolution directly to the execution engine via
+           :func:`apply_decision_resolution` (parses the deterministic
+           ``request_id`` -- see
+           :func:`~agent_baton.core.runtime.decisions.deterministic_decision_id`
+           -- back into ``(task_id, kind, parts)``; a no-op, not an error,
+           for legacy random-UUID request_ids or if a live worker already
+           applied the same resolution concurrently).
+        2. Ensures the task is actively being driven forward via
+           :func:`resume_task_headless`, which is idempotent: it checks the
+           execution's ``worker.pid`` before spawning a new headless runner,
+           so this never launches two processes racing on the same task.
     """
     existing = decision_manager.get(request_id)
     if existing is None:
@@ -231,6 +260,22 @@ async def resolve_decision(
             detail=f"Decision '{request_id}' could not be resolved (concurrent modification).",
         )
 
-    # execution_resumed is optimistic — the bus event was published but we
-    # don't verify a worker is listening.  Callers should poll /executions.
-    return ResolveResponse(resolved=True, execution_resumed=False)
+    execution_resumed = False
+    parsed = parse_decision_id(request_id)
+    if parsed is not None:
+        task_id, kind, parts = parsed
+        team_context_root = decision_manager.decisions_dir.parent
+        applied = apply_decision_resolution(
+            team_context_root=team_context_root,
+            task_id=task_id,
+            kind=kind,
+            parts=parts,
+            chosen_option=body.option,
+            rationale=body.rationale,
+        )
+        if applied:
+            execution_resumed = resume_task_headless(
+                team_context_root=team_context_root, task_id=task_id,
+            )
+
+    return ResolveResponse(resolved=True, execution_resumed=execution_resumed)

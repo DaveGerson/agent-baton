@@ -122,7 +122,73 @@ class ReportingConfig(_Section):
     include_raw_logs_by_default: bool = False
 
 
-_KNOWN_SECTIONS = {"version", "manager_mode", "team", "scoping", "context", "knowledge_packs", "policies", "gates", "reporting"}
+class TalentFactoryConfig(_Section):
+    """Bounded talent-factory generation lifecycle — spec:
+
+    docs/internal/talent-factory-contract.md. Governs what
+    ``talent-builder`` is permitted to produce for a detected capability
+    gap (``agent_baton.core.engine.planning.capability_gap``), and how
+    generated artifacts are validated, named, and rolled back.
+
+    ``team.allow_talent_builder`` (on :class:`TeamConfig`) remains the
+    master on/off switch for talent-builder participation in the roster
+    at all — kept there for backward compatibility. This section governs
+    the *generation lifecycle* once talent-builder is otherwise permitted
+    to run.
+    """
+
+    #: Artifact kinds talent-builder may produce by default for a
+    #: capability gap. Skills/plugins are intentionally absent — they are
+    #: only permitted when a caller explicitly requests them (see
+    #: ``CapabilityGap.permitted_artifacts`` overrides), never as a
+    #: default product of a bare capability gap.
+    default_permitted_artifacts: list[str] = Field(
+        default_factory=lambda: ["agent", "knowledge_pack"]
+    )
+    #: Maximum generation attempts per capability gap within one plan
+    #: before the lifecycle escalates to ``queue_for_manager`` instead of
+    #: retrying. See ``decide_talent_lifecycle(retry_budget=...)``.
+    retry_budget: int = 1
+    #: Maximum recursion depth permitted when a capability gap was itself
+    #: discovered while resolving a prior talent-builder-generated
+    #: artifact. 0 (default) means talent-builder may never generate from
+    #: a gap descended from its own output — re-planning
+    #: (``queue_for_manager``) is used instead of deeper nesting. The
+    #: "talent-builder can never generate talent-builder" rule is
+    #: enforced unconditionally in code
+    #: (``capability_gap.NON_GENERABLE_CAPABILITIES``) and is not
+    #: controlled by this value.
+    max_recursion_depth: int = 0
+    #: Whether a generated artifact must pass validation
+    #: (frontmatter/body-contract checks for agents, structural checks
+    #: for knowledge packs) before it is registered/used. Fail-closed by
+    #: default — an invalid artifact rolls back rather than being used
+    #: unvalidated.
+    require_validation: bool = True
+    #: What happens to a generated artifact that fails validation.
+    #: ``rollback`` discards the artifact and falls back per the gap's
+    #: ``fallback`` field; ``quarantine`` keeps the file on disk with a
+    #: ``status: draft`` / rejected marker for human review but does not
+    #: register it for use.
+    on_validation_failure: Literal["rollback", "quarantine"] = "rollback"
+    #: How a generated artifact whose name collides with an existing
+    #: agent/pack is handled. ``reject`` refuses to write and falls back;
+    #: ``version_suffix`` writes as ``<name>--v2`` (etc.) instead of
+    #: overwriting; ``manual_review`` writes to a quarantine path and
+    #: queues for a human to reconcile. Never silently overwrites.
+    name_collision_policy: Literal["reject", "version_suffix", "manual_review"] = "reject"
+    #: How the registry picks up a newly generated (and validated) agent.
+    #: ``immediate`` reloads the in-process ``AgentRegistry`` so the same
+    #: plan/run can use the new agent right away; ``next_plan`` defers
+    #: pickup to the next ``baton plan`` invocation (simpler, no
+    #: mid-run mutation of a frozen registry).
+    registry_reload: Literal["immediate", "next_plan"] = "immediate"
+
+
+_KNOWN_SECTIONS = {
+    "version", "manager_mode", "team", "scoping", "context",
+    "knowledge_packs", "policies", "gates", "reporting", "talent_factory",
+}
 _PROJECT_CONFIG_KEYS = {"default_agents", "default_gates", "default_risk_level", "auto_route_rules", "excluded_paths", "default_isolation"}
 
 
@@ -136,6 +202,7 @@ class ManagerConfig(_Section):
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
     gates: GatesConfig = Field(default_factory=GatesConfig)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
+    talent_factory: TalentFactoryConfig = Field(default_factory=TalentFactoryConfig)
     source_path: Path | None = Field(default=None, exclude=True)
     warnings: list[str] = Field(default_factory=list, exclude=True)
 
