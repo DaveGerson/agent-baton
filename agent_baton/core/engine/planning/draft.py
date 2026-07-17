@@ -72,6 +72,13 @@ class PlanDraft:
     risk_level_enum: "RiskLevel | None" = None
     git_strategy: str = ""
     planning_archetype: str = "phased"  # direct | phased | investigative
+    # Phase names RiskStage._ensure_safety_roster appended to host injected
+    # safety agents (e.g. "Audit" for auditor). EnrichmentStage's
+    # concern-splitting must never restructure these slots — they exist
+    # purely to give a reviewer-class agent a phase home, and splitting one
+    # replaces its oversight step with per-concern implementation steps
+    # (evaporating the auditor and hard-blocking the plan on audit_missing).
+    safety_appended_phases: list[str] = field(default_factory=list)
 
     # --- ResearchStage outputs ---
     research_concerns: list[tuple[str, str]] | None = None  # (marker, text) tuples from research

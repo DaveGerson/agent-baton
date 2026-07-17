@@ -297,6 +297,108 @@ class TestAuditAssessPhaseNamesAreSplittable:
 
 
 # ---------------------------------------------------------------------------
+# Test 3b — Phase 6 review regression: safety-appended phase slots are
+# never concern-split
+# ---------------------------------------------------------------------------
+
+class TestSafetyAppendedPhasesNotSplit:
+    """RiskStage._ensure_safety_roster may append an "Audit" (or "Review")
+    phase purely as a home for an injected safety agent. Concern-splitting
+    such a slot replaces the auditor's oversight step with per-concern
+    implementation steps — the auditor evaporates and ValidationStage
+    hard-blocks the plan on ``audit_missing`` (regression surfaced by
+    ``tests/test_engine_planner.py::TestConcernSplitting::
+    test_four_concern_summary_produces_four_parallel_steps`` after the
+    phase-6 gate-repair made RiskStage materialize default phase templates).
+    A genuine Audit-as-work phase (see the classes above) is never in
+    ``safety_appended_phases`` and must keep splitting."""
+
+    def test_safety_appended_audit_slot_is_not_split(self) -> None:
+        phases = [_audit_phase()]
+        stage = EnrichmentStage()
+
+        stage._apply_approval_gates(
+            phases,
+            risk_level_enum=None,
+            task_summary="Implement F0.1 spec entity, F0.2 tenancy, with audit log",
+            resolved_agents=["backend-engineer", "auditor"],
+            research_concerns=_TWO_CONCERNS,
+            safety_appended_phases=["Audit"],
+        )
+
+        audit = phases[0]
+        assert len(audit.steps) == 1, (
+            "safety-appended Audit slot must not be concern-split"
+        )
+        assert audit.steps[0].agent_name == "auditor"
+
+    def test_non_safety_audit_phase_still_splits(self) -> None:
+        phases = [_audit_phase()]
+        stage = EnrichmentStage()
+
+        stage._apply_approval_gates(
+            phases,
+            risk_level_enum=None,
+            task_summary="Audit all components",
+            resolved_agents=["auditor"],
+            research_concerns=_TWO_CONCERNS,
+            safety_appended_phases=[],
+        )
+
+        assert len(phases[0].steps) == 2
+
+    def test_full_pipeline_compliance_concern_plan_keeps_auditor(self, tmp_path) -> None:
+        """End-to-end: a multi-concern task with a compliance keyword
+        ("audit log") must produce a plan that BOTH concern-splits the
+        Implement phase AND retains an auditor-staffed Audit phase —
+        i.e. the safety slot survives concern-splitting."""
+        from pathlib import Path
+
+        from agent_baton.core.engine.planner import IntelligentPlanner
+        from agent_baton.core.orchestration.registry import AgentRegistry
+        from agent_baton.core.orchestration.router import AgentRouter
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        for name in ("architect", "backend-engineer", "test-engineer",
+                     "code-reviewer", "auditor"):
+            (agents_dir / f"{name}.md").write_text(
+                f"---\nname: {name}\ndescription: {name} specialist.\n"
+                "model: sonnet\npermissionMode: default\ntools: Read, Write\n---\n",
+                encoding="utf-8",
+            )
+        planner = IntelligentPlanner(team_context_root=tmp_path / "team-context")
+        reg = AgentRegistry()
+        reg.load_directory(agents_dir)
+        planner._registry = reg
+        planner._router = AgentRouter(reg)
+
+        plan = planner.create_plan(
+            "Implement Phase 0 foundations: F0.1 Spec entity (DB schema "
+            "and CRUD), F0.2 Tenancy hierarchy (org/team API endpoints), "
+            "F0.3 Hash-chain audit log (verifier), F0.4 Knowledge "
+            "telemetry (UI dashboard)",
+            task_type="new-feature",
+        )
+
+        impl = next(p for p in plan.phases if p.name.lower() == "implement")
+        assert len(impl.steps) == 4, (
+            f"expected 4 concern-split Implement steps, got "
+            f"{[(s.step_id, s.agent_name) for s in impl.steps]}"
+        )
+        audit_phases = [
+            p for p in plan.phases
+            if p.name.lower().split()[-1] == "audit"
+        ]
+        assert audit_phases, "compliance plan must retain an Audit phase"
+        assert any(
+            step.agent_name.split("--")[0] == "auditor"
+            for p in audit_phases
+            for step in p.steps
+        ), "the Audit phase must still be staffed by the auditor"
+
+
+# ---------------------------------------------------------------------------
 # Test 4 — PlanDraft carries research_concerns and research_context fields
 # ---------------------------------------------------------------------------
 

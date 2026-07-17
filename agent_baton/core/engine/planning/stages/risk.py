@@ -336,6 +336,10 @@ class RiskStage:
 
             if added:
                 draft.classified_phases = new_phases
+                # Record which names are pure safety slots so
+                # EnrichmentStage's concern-splitting leaves them alone
+                # (see PlanDraft.safety_appended_phases).
+                draft.safety_appended_phases = list(added)
                 draft.routing_notes.append(
                     f"safety-roster: appended {added} phase(s) to classified_phases "
                     "to host injected safety agent(s)"
