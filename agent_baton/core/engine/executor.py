@@ -5902,6 +5902,26 @@ class ExecutionEngine:
             feedback_results_snapshot = [r.model_copy(deep=True) for r in state.feedback_results]
 
         if new_phases:
+            # Phase 6, 6.1 — stale-reference repair for runtime amendments.
+            # ``_renumber_phases`` below rewrites phase_ids/step_ids for
+            # every phase after the insertion point, but (pre-6.1) left the
+            # plan's own internal references untouched: a later step's
+            # ``depends_on`` kept naming the OLD step_id (which after
+            # renumbering belongs to a *different* step — often the freshly
+            # inserted one), and the "Build on the ... output from phase N
+            # (<agents>)" sentence phase_builder bakes into
+            # ``task_description`` kept naming the old phase number. Same
+            # bug class ``planning.utils.phase_normalize`` fixed for
+            # foresight insertions at plan time; use the same snapshot/
+            # normalize bracket here (the module docstring explicitly
+            # prescribes this pattern for amendment call sites).
+            from agent_baton.core.engine.planning.utils.phase_normalize import (
+                normalize_phase_references,
+                snapshot_phase_state,
+            )
+
+            pre_phase_ids, pre_step_ids = snapshot_phase_state(state.plan.phases)
+
             # Determine insertion index.
             if insert_after_phase is not None:
                 insert_idx = next(
@@ -5918,6 +5938,11 @@ class ExecutionEngine:
                 amendment.phases_added.append(phase.phase_id)
 
             self._renumber_phases(state)
+            normalize_phase_references(
+                state.plan.phases,
+                pre_phase_ids=pre_phase_ids,
+                pre_step_ids=pre_step_ids,
+            )
 
         if new_steps and add_steps_to_phase is not None:
             target = next(

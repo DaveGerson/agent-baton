@@ -800,6 +800,105 @@ class TestPlanAmendments:
             engine.amend_plan(description="No state")
 
 
+class TestAmendmentReferenceNormalization:
+    """Phase 6, 6.1 -- "no stale references after ... amendment changes its
+    structure". ``_renumber_phases`` rewrites phase_ids/step_ids after a
+    mid-plan phase insertion, but before this fix it left the plan's own
+    internal references stale: a later step's ``depends_on`` kept naming the
+    OLD step_id (which after renumbering belongs to a different step --
+    typically the freshly inserted one), and the "from phase N (<agents>)"
+    sentence phase_builder bakes into ``task_description`` kept naming the
+    old phase number. Same bug class ``planning.utils.phase_normalize``
+    repairs for foresight insertions at plan time; ``amend_plan`` must
+    apply the same snapshot/normalize bracket."""
+
+    @staticmethod
+    def _four_phase_plan() -> MachinePlan:
+        design = _phase(phase_id=1, name="Design", steps=[_step("1.1", agent_name="architect")])
+        implement = _phase(phase_id=2, name="Implement", steps=[_step("2.1", agent_name="backend-engineer")])
+        test_step = _step(
+            "3.1",
+            agent_name="test-engineer",
+            task="Verify. Build on the Implement output from phase 2 (backend-engineer).",
+        )
+        test_step.depends_on = ["2.1"]
+        test = _phase(phase_id=3, name="Test", steps=[test_step])
+        review_step = _step(
+            "4.1",
+            agent_name="code-reviewer",
+            task="Review. Build on the Test output from phase 3 (test-engineer).",
+        )
+        review_step.depends_on = ["3.1"]
+        review = _phase(phase_id=4, name="Review", steps=[review_step])
+        return _plan(task_id="task-amend-norm", phases=[design, implement, test, review])
+
+    def test_depends_on_and_baked_phase_text_follow_amendment_renumbering(
+        self, tmp_path: Path,
+    ) -> None:
+        engine = _engine(tmp_path)
+        engine.start(self._four_phase_plan())
+        engine.record_step_result("1.1", "architect")
+
+        remediation = PlanPhase(
+            phase_id=99,
+            name="Remediation",
+            steps=[_step("99.1", agent_name="backend-engineer", task="Fix design gaps")],
+        )
+        engine.amend_plan(
+            description="remediate design",
+            new_phases=[remediation],
+            insert_after_phase=1,
+            trigger="approval_feedback",
+        )
+
+        state = engine._load_state()
+        names = [p.name for p in state.plan.phases]
+        assert names == ["Design", "Remediation", "Implement", "Test", "Review"]
+
+        implement = state.plan.phases[2].steps[0]
+        test = state.plan.phases[3].steps[0]
+        review = state.plan.phases[4].steps[0]
+        assert implement.step_id == "3.1"
+        assert test.step_id == "4.1"
+        assert review.step_id == "5.1"
+
+        # depends_on must track the renumbered ids -- NOT keep pointing at
+        # the old ids, which now belong to different steps (old "2.1" is
+        # now the inserted remediation step's id).
+        assert test.depends_on == ["3.1"]
+        assert review.depends_on == ["4.1"]
+
+        # The baked "from phase N (<agents>)" sentence must follow the
+        # renumbering too; "from phase 2" would now name Remediation.
+        assert "from phase 3 (backend-engineer)" in test.task_description
+        assert "from phase 2 (" not in test.task_description
+        assert "from phase 4 (test-engineer)" in review.task_description
+        assert "from phase 3 (" not in review.task_description
+
+    def test_append_at_end_leaves_references_untouched(self, tmp_path: Path) -> None:
+        """No renumbering happens when the phase is appended at the end --
+        normalization must be a strict no-op (nothing to diff)."""
+        engine = _engine(tmp_path)
+        engine.start(self._four_phase_plan())
+
+        extra = PlanPhase(
+            phase_id=99,
+            name="Extra",
+            steps=[_step("99.1", agent_name="backend-engineer")],
+        )
+        engine.amend_plan(
+            description="append", new_phases=[extra], insert_after_phase=4,
+        )
+
+        state = engine._load_state()
+        test = state.plan.phases[2].steps[0]
+        review = state.plan.phases[3].steps[0]
+        assert test.depends_on == ["2.1"]
+        assert "from phase 2 (backend-engineer)" in test.task_description
+        assert review.depends_on == ["3.1"]
+        assert "from phase 3 (test-engineer)" in review.task_description
+
+
 # ===========================================================================
 # TestManagerModeAmendmentPublish (Phase 6, 6.3 -- transactional manager
 # artifact regeneration + rollback-safe amendment publishing)
