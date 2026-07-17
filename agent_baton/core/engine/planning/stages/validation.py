@@ -93,8 +93,18 @@ logger = logging.getLogger(__name__)
 #    real, otherwise-fine plan can legitimately hit it. Flagged warning
 #    (surfaced as a diagnostic, non-blocking) rather than critical for
 #    that reason -- see _detect_shallow_decomposition.
+# "todo" and "placeholder" are also legitimate product nouns ("build a
+# todo list application", "add placeholder text to the search box") --
+# blocking those would refuse to plan real, common heavy tasks. Negative
+# lookaheads exempt exactly the compound-noun usages where the word is
+# modifying a feature noun; a bare/annotated marker ("TODO: scope this",
+# "details tbd", "this is a placeholder") still matches.
 _PLACEHOLDER_MARKER_RE = re.compile(
-    r"\btbd\b|\btodo\b|\bplaceholder\b|\blorem ipsum\b", re.IGNORECASE,
+    r"\btbd\b"
+    r"|\btodo\b(?![ \-](?:app|application|list|item|manager|tracker)s?\b)"
+    r"|\bplaceholder\b(?![ \-](?:text|image|value|content|avatar|logo|data|component)s?\b)"
+    r"|\blorem ipsum\b",
+    re.IGNORECASE,
 )
 _BARE_TEMPLATE_SUFFIX_RE = re.compile(r"\(as [\w\-]+\)\s*$")
 

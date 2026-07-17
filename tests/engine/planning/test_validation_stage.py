@@ -147,6 +147,46 @@ class TestShallowDecompositionDetection:
         defects = ValidationStage()._detect_defects(draft)
         assert "generic_placeholder" in [d.code for d in defects]
 
+    def test_todo_and_placeholder_as_product_nouns_are_not_flagged(self) -> None:
+        """Phase 6 review regression: "todo" and "placeholder" are also
+        legitimate product/feature nouns. A heavy plan for "build a todo
+        list application" (or "add placeholder text") must NOT be blocked
+        as generic_placeholder -- only genuine marker usages ("TODO: scope
+        this", "details tbd") should."""
+        for desc in (
+            "Implement: build a todo list application with sync",
+            "Implement the todo-app REST endpoints",
+            "Add placeholder text to the empty search results panel",
+            "Render a placeholder image while avatars load",
+        ):
+            step = PlanStep(
+                step_id="1.1",
+                agent_name="backend-engineer",
+                task_description=desc,
+                deliverables=["Concrete change in app/todo.py"],
+                allowed_paths=["app"],
+            )
+            draft = self._heavy_draft([step])
+            defects = ValidationStage()._detect_defects(draft)
+            assert "generic_placeholder" not in [d.code for d in defects], desc
+
+        # Genuine markers still blocked.
+        for desc in (
+            "TODO: scope this properly",
+            "Implement auth (details tbd)",
+            "This step is a placeholder for the real work package",
+        ):
+            step = PlanStep(
+                step_id="1.1",
+                agent_name="backend-engineer",
+                task_description=desc,
+                deliverables=["x"],
+                allowed_paths=["app"],
+            )
+            draft = self._heavy_draft([step])
+            defects = ValidationStage()._detect_defects(draft)
+            assert "generic_placeholder" in [d.code for d in defects], desc
+
     def test_concrete_description_is_not_flagged(self) -> None:
         step = PlanStep(
             step_id="1.1",
