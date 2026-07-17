@@ -399,7 +399,7 @@ class DecompositionStage:
         registry,
     ) -> list["PlanPhase"]:
         """DIRECT archetype: single Implement + Review, minimal overhead."""
-        from agent_baton.models.execution import PlanPhase, PlanStep, PlanGate
+        from agent_baton.models.execution import PlanPhase, PlanStep
 
         # Single implement step with the best-fit agent
         implement_agent = draft.resolved_agents[0] if draft.resolved_agents else "backend-engineer"
@@ -414,7 +414,14 @@ class DecompositionStage:
             phase_id=1,
             name="Implement",
             steps=[implement_step],
-            gate=PlanGate(gate_type="test", command="pytest --tb=short -q", description="Run tests"),
+            # Gate left unset (None) rather than a hardcoded command --
+            # EnrichmentStage._apply_gates only fills in ``default_gate``
+            # (which is where gate_scope/stack detection actually live)
+            # for phases whose gate is still None at that point. A
+            # hardcoded PlanGate here silently opted DIRECT-archetype
+            # plans out of gate_scope="full"/"smoke" entirely (bd-124f
+            # regression -- see tests/test_planner_gate_scoping.py
+            # TestCreatePlanGateScope).
         )
 
         # Lightweight review phase
@@ -515,11 +522,9 @@ class DecompositionStage:
                         depends_on=["3.1"],
                     ),
                 ],
-                gate=PlanGate(
-                    gate_type="test",
-                    command="pytest --tb=short -q",
-                    description="Regression test passes, existing tests pass",
-                ),
+                # Gate left unset -- see the "Implement" phase comment in
+                # _build_direct_phases above; EnrichmentStage._apply_gates
+                # fills this in via gate_scope-aware ``default_gate``.
             ),
             PlanPhase(
                 phase_id=4,

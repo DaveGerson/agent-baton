@@ -418,6 +418,7 @@ class ValidationStage:
         """Inspect the assembled draft and return the list of defects."""
         defects: list[PlanDefect] = []
         agent_bases = self._agent_bases(draft)
+        explicit_phase_agent_pairs = self._explicit_phase_agent_pairs(draft)
 
         # 1. review_skipped
         review = draft.review_result
@@ -520,7 +521,7 @@ class ValidationStage:
             if blocked:
                 for step in phase.steps:
                     base = (step.agent_name or "").split("--")[0]
-                    if base in blocked:
+                    if base in blocked and (phase.name, base) not in explicit_phase_agent_pairs:
                         defects.append(PlanDefect(
                             code="agent_phase_mismatch",
                             severity="critical",
@@ -557,6 +558,40 @@ class ValidationStage:
         defects.extend(self._detect_shallow_decomposition(draft))
 
         return defects
+
+    @staticmethod
+    def _explicit_phase_agent_pairs(draft: PlanDraft) -> set[tuple[str, str]]:
+        """(phase_name, agent_base) pairs the *caller* explicitly requested
+        via ``phases=[{"name": ..., "agents": [...]}]``.
+
+        ``PHASE_BLOCKED_ROLES`` (agent_phase_mismatch #4) exists to catch
+        the planner's own auto-routing mistakes (bd-0e36: architect
+        auto-landing on Implement). It must not veto a caller's explicit,
+        deliberate choice — RosterStage / EnrichmentStage already honour
+        ``phases is not None`` as "trust the caller" for concern-splitting
+        and roster expansion (see TestEnrichmentStageExplicitPhasesGuard);
+        this stage needs the same carve-out or it silently re-rejects the
+        very override those stages just agreed to preserve.
+
+        Scoped to the exact (phase name, agent) pairs the caller wrote —
+        not a blanket "phases is not None" bypass — so a dict with an
+        empty ``agents`` list (auto-routed via
+        ``phase_builder.assign_agents_to_phases`` fallback) still gets the
+        full auto-routing check.
+        """
+        raw_phases = draft.phases
+        if not raw_phases:
+            return set()
+        pairs: set[tuple[str, str]] = set()
+        for entry in raw_phases:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not name:
+                continue
+            for agent in entry.get("agents", []) or []:
+                pairs.add((name, str(agent).split("--")[0]))
+        return pairs
 
     def _detect_shallow_decomposition(self, draft: PlanDraft) -> list[PlanDefect]:
         """Heavy-task-only: flag generic placeholder language and empty

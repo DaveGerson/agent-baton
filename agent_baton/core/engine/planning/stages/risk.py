@@ -21,6 +21,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from agent_baton.core.engine.planning.draft import PlanDraft
+from agent_baton.core.engine.planning.rules.phase_templates import (
+    DEFAULT_PHASE_NAMES,
+    PHASE_NAMES,
+)
 from agent_baton.core.engine.planning.rules.risk_signals import RISK_ORDINAL
 from agent_baton.core.engine.planning.services import PlannerServices
 from agent_baton.core.engine.planning.utils.risk_and_policy import (
@@ -284,8 +288,34 @@ class RiskStage:
         # most ONE primary agent per phase in Pass 1.  If both code-reviewer and
         # auditor are on the roster they need SEPARATE review-type phase slots —
         # one takes "Review" and the other takes "Audit".
-        if (reviewer_present or auditor_present) and draft.classified_phases is not None:
-            new_phases = list(draft.classified_phases)
+        #
+        # ``draft.classified_phases is None`` does NOT mean "no correction
+        # needed" — it means DecompositionStage._build_phases will fall
+        # through to ``default_phases(inferred_type, ...)``, whose template
+        # (rules/phase_templates.PHASE_NAMES) may still lack the second
+        # review-type slot an injected auditor needs (e.g. "new-feature" ->
+        # Design/Implement/Test/Review has Review but no Audit, so a
+        # code-reviewer *and* auditor both routed there collide in Pass 1
+        # and the loser is force-landed on Implement -> agent_phase_mismatch
+        # hard-blocks the plan). Materialize that same default template here
+        # so the correction below has a concrete base to extend, but only
+        # when DecompositionStage will actually consult
+        # ``draft.classified_phases`` for this draft (i.e. it won't take the
+        # explicit-phases/subtask-compound/non-phased-archetype branches,
+        # which read ``draft.phases`` / ``draft.subtask_data`` /
+        # ``draft.planning_archetype`` directly and never look at
+        # classified_phases at all).
+        base_phases = draft.classified_phases
+        if (
+            base_phases is None
+            and draft.phases is None
+            and draft.subtask_data is None
+            and getattr(draft, "planning_archetype", "phased") == "phased"
+        ):
+            base_phases = PHASE_NAMES.get(draft.inferred_type, DEFAULT_PHASE_NAMES)
+
+        if (reviewer_present or auditor_present) and base_phases is not None:
+            new_phases = list(base_phases)
             added: list[str] = []
 
             if reviewer_present and "Review" not in new_phases:
