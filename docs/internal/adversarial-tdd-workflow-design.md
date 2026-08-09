@@ -57,7 +57,7 @@ mechanism so more named workflows can be added later.
 | 4 | `test_verification` | Test Verification | `test-adequacy-reviewer` | `opus` | reviewing | Differently scoped: reads **spec + tests only** — verifies tests pin the intended behaviors; flags missing/vacuous/tautological tests. `context_files` carries only the spec path; the briefing instructs locating the tests from the test-authoring step's commit/deliverables. |
 | 5 | `implementation` | Implementation | *base plan's harvested implement steps* | `sonnet` | (preserved) | The steps the pipeline planned, flattened into one phase in original order (agents, descriptions, deps re-keyed, all other fields preserved), re-tiered to sonnet. Gate: test gate (green). |
 | 6 | `implementation_verification` | Implementation Verification | `code-reviewer` | `opus` | reviewing | Verifies implementation against spec beyond tests-pass. Optional extra automation step running `external_command`. |
-| 7 | `final_review` | Final Review | `code-reviewer` | `fable` | reviewing | Whole-slice review with fan-out (§5.8). The plan's **last workflow phase must be named "…Review"** (recorded invariant — keeps `validate_assembled_plan` semantics happy if ever re-run). |
+| 7 | `final_review` | Final Review | `code-reviewer` | `fable` | reviewing | Whole-slice review with fan-out (§5.8). The plan's **last non-carryover phase must be named "…Review"** (recorded invariant; audit-carryover phases may follow it). |
 
 Notes:
 
@@ -144,7 +144,8 @@ def load_workflow_settings(project_root: Path | None = None) -> WorkflowSettings
 @dataclass
 class WorkflowDecisions:
     workflow: str
-    stages: list[dict[str, Any]]   # {stage_id, phase_name, agents, model, steps}
+    stages: list[dict[str, Any]]   # ⊇ {stage_id, phase_name, agents, model, steps};
+                                   # "model" is the EFFECTIVE tier (after overrides)
     implementation_units: int
     final_review_reviewers: int
     external_verifier: bool
@@ -202,7 +203,10 @@ class WorkflowApplier:
    including `TeamMember.model` recursively through `sub_team` — **except**
    steps with `step_type` in {"automation", "task"}, whose model is unused
    and left untouched). `step_type` is stamped only on applier-created
-   steps, never on harvested ones.
+   steps, never on harvested ones. `TeamMember.member_id` values are
+   preserved verbatim (NOT re-keyed to the renumbered step id — member
+   `depends_on` references member ids, so re-keying is not free; v1 keeps
+   them stable).
 6. **Gates**: the Implementation phase gets the first test/build gate found
    on any base phase, else `fallback_gate` (may be None). Final Review
    `approval_required` = OR of all base phases' `approval_required`.
@@ -237,6 +241,7 @@ class WorkflowApplier:
 | Combination | Behavior |
 |---|---|
 | `--workflow` + `--manager-mode` | exit 2, typed error (decision #7) |
+| `--workflow` + config `manager_mode.enabled_by_default: true` | manager mode is **suppressed with a printed warning** for this plan (only the explicit flag combination is an error) — otherwise the config default would run `PhasePolicyApplier` over the reshaped plan, the exact failure decision #7 prevents |
 | `--workflow` + `--import` | exit 2, typed error |
 | `--workflow` + `--dry-run` | applier runs first; forecast reflects reshaped plan & fable pricing |
 | `--workflow` + `--agents` | forced agents survive only in harvested implementation steps; stages 1–4/6–7 use preset/override agents |
@@ -299,7 +304,30 @@ class WorkflowApplier:
 - `tests/models/` — round-trip + absent-when-empty for the two new fields.
 - `tests/cli/test_plan_workflow_flag.py` — `--workflow adversarial-tdd
   --json` end-to-end shape; unknown workflow exit 2 listing presets;
-  `--manager-mode`/`--import` mutual exclusion; `baton goal` passthrough.
+  `--manager-mode`/`--import` mutual exclusion; `baton goal` passthrough;
+  **baton.yaml wiring e2e** (stage model override + external_command reach
+  the plan via `load_workflow_settings` — acceptance #4); **fallback-gate
+  wiring** (gateless base plan → Implementation phase carries a
+  stack-derived gate); `--dry-run` reflects the reshaped plan;
+  `--explain` renders the `WorkflowDecisions` section; config-default
+  manager mode suppressed with a warning under `--workflow`.
+
+Adversarial-verification addenda (must be pinned):
+
+- Harvest normalization: phases named `"Implement: API Layer"` and
+  `"Backend Implementation"` ARE harvested (last-word/colon-strip keying);
+  `Prepare`/`Remediate` phases (PREPARATION/REMEDIATION archetypes) ARE
+  harvested; a `planning` step inside an implement-like phase is excluded.
+- Idempotency guard differentiator: second `apply()` with *different*
+  settings (e.g. external_command now set) leaves the plan unchanged —
+  separates the §5.1 guard from an accidental fixed-point re-apply.
+- Stage-1/stage-4 scoping: spec step's briefing/deliverables name
+  `.claude/team-context/executions/<task_id>/spec.md`; test-verification
+  step's `context_files` == [spec path] and its briefing references the
+  test-authoring deliverables.
+- A `build`-type gate is also accepted by the §5.6 "first test/build gate"
+  rule; auditor step inside a HARVESTED phase does not trigger carryover;
+  cross-base-phase deps between two harvested steps are re-keyed.
 
 ## 9. Acceptance criteria
 
