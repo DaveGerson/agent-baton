@@ -176,8 +176,9 @@ class WorkflowApplier:
 
 1. **No-op guard**: if `plan.workflow == preset.name` and any step has a
    non-empty `workflow_stage`, recompute and return `WorkflowDecisions` from
-   the already-shaped plan without mutating it (decisions are not persisted
-   separately; `plan_diagnostics["workflow"]` holds the last-applied record).
+   the already-shaped plan with **zero writes** — including
+   `plan_diagnostics` (decisions are not persisted separately;
+   `plan_diagnostics["workflow"]` holds the last-applied record).
 2. **Harvest implementation steps.** A base phase is *implementation-like*
    iff its name, normalized by last-word keying (cf.
    `ValidationStage._phase_key`), maps **explicitly** to
@@ -186,7 +187,8 @@ class WorkflowApplier:
    fallback to IMPLEMENTATION must NOT be used (compound names like
    "Security Review" would otherwise be harvested). From those phases,
    harvest steps with `step_type not in {"reviewing", "planning"}`.
-   Fallbacks, in order: (a) if no phase qualifies, harvest all steps with
+   Fallbacks, in order: (a) if no phase qualifies **or the qualifying
+   phases yield no harvested steps**, harvest all steps with
    `step_type == "developing"` anywhere in the plan; (b) if still empty,
    synthesize one implementation step from the implement-phase fallback
    agent (`backend-engineer`), briefed from the task summary.
@@ -215,9 +217,13 @@ class WorkflowApplier:
    renumbered, steps stamped `workflow_stage="carryover"`.
 8. **Final-review fan-out**: implementation units =
    Σ over harvested steps of `max(1, len(step.team))`. Reviewer count =
-   `min(final_review_max_reviewers, max(1, ceil(units / final_review_fanout_divisor)))`.
-   The harvested steps are partitioned contiguously into that many groups;
-   each reviewer's briefing embeds its group's step descriptions and
+   `min(final_review_max_reviewers, max(1, ceil(units / final_review_fanout_divisor)))`
+   — the formula is exact; it is NEVER clamped by the harvested *step*
+   count. Partitioning is by **dispatch unit** (a team step contributes
+   one unit per member, carrying the member's task description and the
+   step's `allowed_paths`; a plain step is one unit): units are
+   partitioned contiguously into reviewer-count groups, and each
+   reviewer's briefing embeds exactly its group's descriptions and
    `allowed_paths`.
 9. **External verifier**: if `settings.external_command` is non-empty,
    append to the Implementation Verification phase a
