@@ -124,6 +124,11 @@ class ReportingConfig(_Section):
 
 _KNOWN_SECTIONS = {"version", "manager_mode", "team", "scoping", "context", "knowledge_packs", "policies", "gates", "reporting"}
 _PROJECT_CONFIG_KEYS = {"default_agents", "default_gates", "default_risk_level", "auto_route_rules", "excluded_paths", "default_isolation"}
+# Owned by other loaders reading the same baton.yaml file. "workflow" is
+# core/config/workflow.py's WorkflowSettings section (see
+# docs/internal/adversarial-tdd-workflow-design.md §4) -- silently ignored
+# here, same as the ProjectConfig-owned keys above.
+_SIBLING_OWNED_KEYS = _PROJECT_CONFIG_KEYS | {"workflow"}
 
 
 class ManagerConfig(_Section):
@@ -163,8 +168,8 @@ class ManagerConfig(_Section):
         for key, value in raw.items():
             if key in _KNOWN_SECTIONS:
                 known[key] = value
-            elif key in _PROJECT_CONFIG_KEYS:
-                continue  # owned by ProjectConfig; silently ignored here
+            elif key in _SIBLING_OWNED_KEYS:
+                continue  # owned by a sibling loader (ProjectConfig / WorkflowSettings); silently ignored here
             else:
                 where = f" ({source})" if source else ""
                 message = f"Unknown top-level key {key!r} in manager config{where}; ignoring."

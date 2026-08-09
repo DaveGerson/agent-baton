@@ -119,6 +119,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "'next: baton execute start' guidance."
         ),
     )
+    p.add_argument(
+        "--workflow",
+        dest="workflow",
+        default=None,
+        metavar="NAME",
+        help="Reshape the plan into a named workflow preset (passed through to `baton plan`).",
+    )
     return p
 
 
@@ -159,6 +166,7 @@ def handler(args: argparse.Namespace) -> None:
         gate_scope=args.gate_scope,
         goal=args.condition,
         max_amend_cycles=args.max_amend_cycles,
+        workflow=args.workflow,
     )
 
     plan_cmd.handler(plan_args)

@@ -374,6 +374,11 @@ class PlanStep(PlanModel):
     timeout_seconds: int = 0
     parallel_safe: bool = False
     max_estimated_minutes: int = 0
+    # Adversarial-TDD workflow (see docs/internal/adversarial-tdd-workflow-design.md
+    # decision #5). Stamped by WorkflowApplier.apply() with the preset stage_id
+    # that produced/harvested this step (e.g. "spec", "implementation",
+    # "carryover"). Empty for plans that never went through a workflow preset.
+    workflow_stage: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
@@ -428,6 +433,8 @@ class PlanStep(PlanModel):
             d["parallel_safe"] = self.parallel_safe
         if self.max_estimated_minutes:
             d["max_estimated_minutes"] = self.max_estimated_minutes
+        if self.workflow_stage:
+            d["workflow_stage"] = self.workflow_stage
         return d
 
 
@@ -632,6 +639,12 @@ class MachinePlan(PlanModel):
     # artifacts (charter, scope map, team blueprint, ...) are sidecar files
     # under executions/<task_id>/, not fields on this model.
     manager_mode: bool = False
+    # Adversarial-TDD workflow (see docs/internal/adversarial-tdd-workflow-design.md
+    # decision #5). Set to the preset name (e.g. "adversarial-tdd") by
+    # WorkflowApplier.apply() when the plan was created via
+    # `baton plan --workflow NAME`. Empty for plans that never went through
+    # a workflow preset.
+    workflow: str = ""
 
     @model_validator(mode="after")
     def _validate_plan_graph_integrity(self) -> Self:
@@ -760,6 +773,8 @@ class MachinePlan(PlanModel):
             "max_amend_cycles": self.max_amend_cycles,
             "manager_mode": self.manager_mode,
         }
+        if self.workflow:
+            d["workflow"] = self.workflow
         if self.plan_diagnostics:
             d["plan_diagnostics"] = dict(self.plan_diagnostics)
         if self.resource_limits is not None:
@@ -803,6 +818,8 @@ class MachinePlan(PlanModel):
             lines.append(f"**Max Amend Cycles**: {self.max_amend_cycles}")
         if self.manager_mode:
             lines.append("**Manager mode:** yes")
+        if self.workflow:
+            lines.append(f"**Workflow**: {self.workflow}")
         lines.append("")
 
         for phase in self.phases:
