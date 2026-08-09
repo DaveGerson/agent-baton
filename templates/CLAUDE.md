@@ -33,6 +33,11 @@ execution engine:
    - `--complexity light|medium|heavy` — override automatic complexity classification
    - `--task-type TYPE` — override auto-detected type (`new-feature`, `bug-fix`, `refactor`, etc.)
    - `--agents "agent1,agent2"` — override agent auto-selection
+   - `--workflow NAME` — reshape the plan into a named delivery-workflow
+     preset (built-in: `adversarial-tdd` — fable spec/architecture, opus
+     TDD authoring + adversarial test verification, sonnet implementation,
+     opus verification, fable final review). Mutually exclusive with
+     `--manager-mode` and `--import`.
 
 2. **Review the plan** — read `.claude/team-context/plan.md` and present
    a brief summary to the user: phases, agents, and step descriptions.

@@ -21,7 +21,12 @@ agent_baton/       Python package (the orchestration engine)
                      role cards, knowledge plan, scope contracts, context
                      bundles). Config: core/config/manager.py. Models:
                      models/manager.py. See docs/internal/manager-mode-pmo-design.md.
-agents/            Distributable agent definitions (30 .md)
+  core/workflow/    Named delivery-workflow presets (baton plan --workflow):
+                     presets.py (registry, built-in adversarial-tdd),
+                     applier.py (pure/idempotent plan reshaper stamping
+                     per-stage model tiers). Config: core/config/workflow.py.
+                     See docs/internal/adversarial-tdd-workflow-design.md.
+agents/            Distributable agent definitions (31 .md)
 references/        Distributable reference procedures (20 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
 scripts/           install.sh, install.ps1, record_spec_audit_beads.py

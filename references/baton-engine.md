@@ -45,6 +45,7 @@ baton plan "description" --save --explain \
 | `--knowledge-pack NAME` | No | Attach a knowledge pack globally to all steps (repeatable) |
 | `--intervention LEVEL` | No | Escalation threshold: `low` (default), `medium`, `high` |
 | `--complexity LEVEL` | No | Override task complexity: `light`, `medium`, `heavy`. Skips automatic classification when provided. |
+| `--workflow NAME` | No | Reshape the plan into a named delivery-workflow preset after planning (built-in: `adversarial-tdd` — spec/architecture at fable tier, TDD test authoring + adversarial test verification at opus, implementation at sonnet, opus verification, fable final review; base Audit phases carried over). Steps carry `workflow_stage`; the plan root carries `workflow`. Mutually exclusive with `--manager-mode` and `--import`. Per-stage overrides + external verifier command come from the `workflow:` section of `baton.yaml`. |
 
 **Typical usage:**
 

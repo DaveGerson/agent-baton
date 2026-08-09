@@ -34,8 +34,9 @@ Apply these to every change before declaring it done:
 | `agent_baton/core/` | Engine internals: state machine, planner, dispatcher, governance, storage | [agent_baton/core/CLAUDE.md](agent_baton/core/CLAUDE.md) (deeper: [engine](agent_baton/core/engine/CLAUDE.md), [orchestration](agent_baton/core/orchestration/CLAUDE.md), [govern](agent_baton/core/govern/CLAUDE.md), [storage](agent_baton/core/storage/CLAUDE.md)) |
 | `agent_baton/core/federate/` | Spec Federation subsystem: `SpecDraftStore` (SQLite), `enrich.py` (DataClassifier + cost forecast), `importers.py` (GitHub/ADO importers) | — |
 | `agent_baton/core/manager/` | Manager-mode PMO layer: post-processor around `create_plan()` producing project charter, scope map, team blueprint, role cards, knowledge plan, scope contracts, and context bundles. Config: `agent_baton/core/config/manager.py`. Models: `agent_baton/models/manager.py`. See `docs/internal/manager-mode-pmo-design.md`. | — |
+| `agent_baton/core/workflow/` | Named delivery-workflow presets (`baton plan --workflow`): `presets.py` (registry, built-in `adversarial-tdd`), `applier.py` (pure/idempotent plan reshaper stamping per-stage model tiers). Config: `agent_baton/core/config/workflow.py`. See `docs/internal/adversarial-tdd-workflow-design.md`. | — |
 | `agent_baton/models/` | Pydantic data models — execution, beads, plans, decisions | [agent_baton/models/CLAUDE.md](agent_baton/models/CLAUDE.md) |
-| `agents/` | 30 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
+| `agents/` | 31 distributable agent definitions (Markdown with frontmatter) | [agents/CLAUDE.md](agents/CLAUDE.md) |
 | `references/` | 20 distributable reference procedures | [references/CLAUDE.md](references/CLAUDE.md) |
 | `templates/` | `CLAUDE.md` + `settings.json` + skills installed to user projects | (do not modify `templates/CLAUDE.md` — it's a distributable artifact) |
 | `pmo-ui/` | React/Vite frontend served at `/pmo/` | [pmo-ui/CLAUDE.md](pmo-ui/CLAUDE.md) |

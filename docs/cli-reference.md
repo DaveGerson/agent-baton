@@ -82,6 +82,26 @@ baton plan SUMMARY [options]
 | `--intervention LEVEL` | No | `low` | Escalation threshold for knowledge gaps: `low`, `medium`, `high` |
 | `--goal CONDITION` | No | -- | Completion condition (G1). The engine evaluates the goal after each gate passes and uses `amend_plan` to round out gaps until met, exhausted, or the token ceiling is hit. |
 | `--max-amend-cycles N` | No | `3` | Goal round-out budget (meaningful only with `--goal`). |
+| `--workflow NAME` | No | -- | Reshape the plan into a named delivery-workflow preset after planning. Built-in: `adversarial-tdd`. Mutually exclusive with `--manager-mode` and `--import`. See [Workflow presets](#workflow-presets) below. |
+
+**Workflow presets:**
+
+`--workflow adversarial-tdd` reshapes the assembled plan into a staged, model-tiered, adversarially verified TDD pipeline: Brainstorm & Spec (`architect`, fable) → Architecture (`architect`, fable) → Test Authoring (`test-engineer`, opus) → Test Verification (`test-adequacy-reviewer`, opus; scoped to spec + tests only) → Implementation (the base plan's implement steps, re-tiered to sonnet, gated on the stack test command) → Implementation Verification (`code-reviewer`, opus; optional external-vendor automation step) → Final Review (`code-reviewer`, fable; fans out to up to 3 reviewers for large slices). Base Audit phases containing `auditor` steps are carried over after Final Review, so regulated-domain coverage survives the reshape.
+
+Per-stage agents/models, the final-review fan-out, and an external verifier command (e.g. a gemini or codex CLI invocation, run as an engine automation step) are configurable in `baton.yaml`:
+
+```yaml
+workflow:
+  stages:
+    final_review: {model: opus}        # retarget a stage tier
+    implementation_verification: {agent: security-reviewer}
+  external_command: "codex exec 'review the diff against spec.md'"
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3
+```
+
+Notes: `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
 
 **Manager mode:**
 

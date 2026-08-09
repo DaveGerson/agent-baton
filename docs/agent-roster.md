@@ -62,6 +62,7 @@ generated-agent contract in [`references/agent-authoring.md`](../references/agen
 | `security-reviewer` | opus | Auth flows, input validation, secrets management, OWASP top 10, dependency vulns. |
 | `auditor` | opus | Independent safety/compliance/governance review. Has veto authority. Required for MEDIUM+ risk plans. |
 | `test-engineer` | sonnet | Unit, integration, and E2E tests. Test infrastructure. |
+| `test-adequacy-reviewer` | opus | Adversarial review of tests against a spec: coverage gaps, vacuous/tautological/over-mocked tests. Scoped to spec + tests only — never reads implementation. Stage 4 of the `adversarial-tdd` workflow. |
 
 ## Data & analysis
 

@@ -24,6 +24,8 @@ answers a single "how do I X?" question. Commands link to
 | 11 | [Run the loop manually vs from Claude Code](#11-manual-vs-claude-code) |
 | 12 | [Drive a multi-execution session safely](#12-multi-execution) |
 | 13 | [Cancel or fail a stuck execution](#13-cancel-or-fail) |
+| 14 | [Teams of specialists](#14-teams-of-specialists) |
+| 15 | [Run the adversarial-TDD delivery workflow](#15-adversarial-tdd-workflow) |
 
 The CLI emits one of six `ACTION:` lines per iteration: `DISPATCH`,
 `GATE`, `APPROVAL`, `FEEDBACK`, `INTERACT`, `COMPLETE`, or `FAILED`
@@ -462,6 +464,54 @@ review fan-out — it owns its own Audit phase.
 Full comparison: [`engine-and-runtime.md`](engine-and-runtime.md) §18.
 
 **See also**: [Recipe 4](#4-cross-domain-refactors), [Recipe 3](#3-run-a-high-risk-task-with-auditor-gates), [`baton-engine.md`](../references/baton-engine.md).
+
+---
+
+## 15. Adversarial-TDD workflow
+
+**Goal**: Build a new capability through the staged, model-tiered,
+adversarially verified TDD pipeline — spec and architecture at the top
+tier, tests written and independently verified before any implementation,
+implementation at an economical tier, then double verification and a
+top-tier final review.
+
+```bash
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+baton execute start
+```
+
+The reshaped plan has seven phases (plus any carried-over Audit phases):
+
+1. **Brainstorm & Spec** — `architect` (fable) writes
+   `executions/<task_id>/spec.md`: behaviors, non-goals, acceptance criteria.
+2. **Architecture** — `architect` (fable) produces design notes + file
+   boundaries.
+3. **Test Authoring** — `test-engineer` (opus) writes failing tests. No
+   implementation code.
+4. **Test Verification** — `test-adequacy-reviewer` (opus), scoped to spec
+   + tests only, verifies the tests pin the spec'd behaviors.
+5. **Implementation** — the base plan's implement steps (your routed
+   specialists), re-tiered to sonnet, gated on the stack test command.
+6. **Implementation Verification** — `code-reviewer` (opus), plus an
+   optional external-vendor automation step (`workflow.external_command`
+   in `baton.yaml` — e.g. a gemini or codex CLI invocation).
+7. **Final Review** — `code-reviewer` (fable); fans out to up to 3
+   reviewers on large slices.
+
+Drive the loop exactly as in [Recipe 1](#1-plan-and-execute-a-simple-task)
+— each DISPATCH action carries the stage's pinned model tier in its
+`Model:` line. Sonnet research agents may be dispatched at any stage for
+support; the stage briefings say so.
+
+Overrides live in `baton.yaml` (see
+[`cli-reference.md`](cli-reference.md#baton-plan) for the full
+`workflow:` section): per-stage `{agent, model}`, fan-out knobs, external
+verifier command. `--workflow` composes with `--goal`; it is mutually
+exclusive with `--manager-mode` and `--import`.
+
+**See also**: [Recipe 3](#3-run-a-high-risk-task-with-auditor-gates) (audit
+phases from regulated-domain plans are carried over automatically),
+[`templates/playbooks/adversarial-tdd.md`](../templates/playbooks/adversarial-tdd.md).
 
 ---
 
