@@ -259,6 +259,15 @@ class WorkflowApplier:
         *,
         fallback_gate: PlanGate | None = None,
     ) -> WorkflowDecisions:
+        # §5.1 no-op guard keys on `plan.workflow == preset.name` (plus at
+        # least one stamped `workflow_stage`) -- it does NOT check that
+        # *this* `preset` object is the one that produced the current
+        # shape, only that its NAME matches. Applying a DIFFERENT preset
+        # (by name) to a plan already shaped by a first preset is out of
+        # contract for v1 -- there is only one registered preset, so this
+        # can't happen today, but it will need a real "re-shape under a new
+        # preset" path (not this guard) once a second preset ships. No
+        # behavior change; documenting the boundary.
         if plan.workflow == preset.name and any(
             step.workflow_stage for step in plan.all_steps
         ):
@@ -339,7 +348,19 @@ class WorkflowApplier:
     ) -> WorkflowDecisions:
         base_phases = list(plan.phases)
 
-        harvesting_stage = next(s for s in preset.stages if s.harvests_implementation)
+        harvesting_stage = next(
+            (s for s in preset.stages if s.harvests_implementation), None
+        )
+        if harvesting_stage is None:
+            # Defense in depth: `get_workflow_preset()` only ever returns
+            # registered presets, which `validate_preset()`
+            # (core/workflow/presets.py) already guarantees have exactly
+            # one harvesting stage at registration time -- this should be
+            # unreachable for any preset that went through registration.
+            raise ValueError(
+                f"WorkflowPreset {preset.name!r} has no harvesting stage; "
+                "this should have been caught at preset registration."
+            )
         _, harvest_model = _effective_agent_model(harvesting_stage, settings)
 
         harvested = _harvest_steps(base_phases)
@@ -348,10 +369,21 @@ class WorkflowApplier:
 
         harvested_ids = {step.step_id for step in harvested}
         carryover = _carryover_phases(base_phases, harvested_ids)
+        # §5.6 (amended): the gate/approval scan must skip carryover-eligible
+        # phases -- otherwise the same PlanGate object could land on both
+        # the Implementation phase and the preserved carryover phase
+        # (aliased, would run twice), and a carryover phase's own approval
+        # would double as Final Review sign-off. Identity comparison (not
+        # `==`) since PlanPhase equality is field-based and a distinct
+        # phase could coincidentally compare equal.
+        carryover_object_ids = {id(p) for p in carryover}
+        non_carryover_phases = [
+            p for p in base_phases if id(p) not in carryover_object_ids
+        ]
 
-        base_gate = _first_moveable_gate(base_phases)
+        base_gate = _first_moveable_gate(non_carryover_phases)
         gate = base_gate if base_gate is not None else fallback_gate
-        approval_required = _any_approval_required(base_phases)
+        approval_required = _any_approval_required(non_carryover_phases)
 
         impl_phase_id = list(preset.stages).index(harvesting_stage) + 1
         old_ids = [step.step_id for step in harvested]
@@ -467,9 +499,25 @@ class WorkflowApplier:
         carryover_result: list[PlanPhase] = []
         next_phase_id = len(preset.stages) + 1
         for phase in carryover:
-            for i, step in enumerate(phase.steps, start=1):
-                step.step_id = f"{next_phase_id}.{i}"
+            # §5.7 (amended): re-key intra-phase depends_on, drop the rest
+            # -- mirrors the harvested-step remap above. A verbatim old id
+            # would otherwise silently point at a reshaped stage phase (a
+            # mis-edge) or fail MachinePlan.from_dict's forward-ref check
+            # at execute-start time. Build the old->new map BEFORE mutating
+            # any step_id (same ordering hazard as the harvested remap).
+            carryover_old_ids = [step.step_id for step in phase.steps]
+            carryover_new_ids = [
+                f"{next_phase_id}.{i}" for i in range(1, len(phase.steps) + 1)
+            ]
+            carryover_old_to_new = dict(zip(carryover_old_ids, carryover_new_ids))
+            for step, new_id in zip(phase.steps, carryover_new_ids):
+                step.depends_on = [
+                    carryover_old_to_new[d]
+                    for d in step.depends_on
+                    if d in carryover_old_to_new
+                ]
                 step.workflow_stage = _CARRYOVER_STAGE_ID
+                step.step_id = new_id
             carryover_result.append(
                 PlanPhase(
                     phase_id=next_phase_id,

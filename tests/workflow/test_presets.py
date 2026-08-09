@@ -16,11 +16,13 @@ import pytest
 
 from agent_baton.core.workflow.presets import (
     ADVERSARIAL_TDD,
+    InvalidWorkflowPresetError,
     UnknownWorkflowError,
     WorkflowPreset,
     WorkflowStage,
     get_workflow_preset,
     list_workflow_presets,
+    validate_preset,
 )
 
 # (stage_id, phase_name, agent_name, model, step_type) — spec §3, in order.
@@ -231,3 +233,89 @@ class TestPresetsAreImmutable:
 
     def test_stages_is_a_tuple(self) -> None:
         assert isinstance(ADVERSARIAL_TDD.stages, tuple)
+
+
+# ---------------------------------------------------------------------------
+# Structural invariants at registration time (§4 note)
+# ---------------------------------------------------------------------------
+
+def _make_stage(stage_id: str, *, harvests: bool = False, phase_name: str = "X") -> WorkflowStage:
+    return WorkflowStage(
+        stage_id=stage_id,
+        phase_name=phase_name,
+        agent_name="architect",
+        model="sonnet",
+        step_type="developing",
+        briefing_template="Do the thing for: {task_summary}.",
+        harvests_implementation=harvests,
+    )
+
+
+class TestPresetStructuralInvariants:
+    def test_shipped_preset_is_already_valid(self) -> None:
+        # validate_preset() must be a no-op (return the same object) for
+        # the preset this module actually registers.
+        assert validate_preset(ADVERSARIAL_TDD) is ADVERSARIAL_TDD
+
+    def test_empty_stages_is_rejected(self) -> None:
+        preset = WorkflowPreset(name="broken", description="", stages=())
+        with pytest.raises(InvalidWorkflowPresetError) as exc_info:
+            validate_preset(preset)
+        assert "broken" in str(exc_info.value)
+
+    def test_zero_harvesting_stages_is_rejected(self) -> None:
+        preset = WorkflowPreset(
+            name="broken",
+            description="",
+            stages=(
+                _make_stage("a"),
+                _make_stage("b", phase_name="Review"),
+            ),
+        )
+        with pytest.raises(InvalidWorkflowPresetError) as exc_info:
+            validate_preset(preset)
+        assert "exactly one harvesting stage" in str(exc_info.value)
+
+    def test_two_harvesting_stages_is_rejected(self) -> None:
+        preset = WorkflowPreset(
+            name="broken",
+            description="",
+            stages=(
+                _make_stage("a", harvests=True),
+                _make_stage("b", harvests=True, phase_name="Review"),
+            ),
+        )
+        with pytest.raises(InvalidWorkflowPresetError) as exc_info:
+            validate_preset(preset)
+        assert "exactly one harvesting stage" in str(exc_info.value)
+
+    def test_harvesting_stage_last_is_rejected(self) -> None:
+        preset = WorkflowPreset(
+            name="broken",
+            description="",
+            stages=(
+                _make_stage("a", phase_name="Review"),
+                _make_stage("b", harvests=True),
+            ),
+        )
+        with pytest.raises(InvalidWorkflowPresetError) as exc_info:
+            validate_preset(preset)
+        assert "fan-out final-review stage" in str(exc_info.value)
+
+    def test_last_stage_not_named_review_is_rejected(self) -> None:
+        preset = WorkflowPreset(
+            name="broken",
+            description="",
+            stages=(
+                _make_stage("a", harvests=True),
+                _make_stage("b", phase_name="Wrap-up"),
+            ),
+        )
+        with pytest.raises(InvalidWorkflowPresetError) as exc_info:
+            validate_preset(preset)
+        message = str(exc_info.value)
+        assert "Wrap-up" in message
+        assert "Review" in message
+
+    def test_error_is_a_runtime_error(self) -> None:
+        assert issubclass(InvalidWorkflowPresetError, RuntimeError)

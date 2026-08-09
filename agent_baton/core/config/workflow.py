@@ -33,7 +33,8 @@ ModelTier = Literal["haiku", "sonnet", "opus", "fable"]
 
 
 class _Section(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # unknown nested KEYS ignored; invalid VALUES fail via Literal
+    # unknown nested KEYS ignored; invalid VALUES fail via Literal
+    model_config = ConfigDict(extra="ignore")
 
 
 class StageOverride(_Section):

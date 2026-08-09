@@ -527,6 +527,9 @@ class ValidationStage:
         return str(getattr(draft, "risk_level", "") or "").upper()
 
     def _phase_key(self, name: str) -> str:
+        # Mirrored (not imported) in core/workflow/applier.py's
+        # `_harvest_phase_key` for the §5.2 harvest predicate -- keep both
+        # in sync if this normalization changes.
         raw = (name or "").lower().split(":")[0].strip()
         key = raw.split()[-1] if raw else ""
         if key == "implementation":

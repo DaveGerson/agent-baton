@@ -23,6 +23,8 @@ from agent_baton.core.workflow.presets import ADVERSARIAL_TDD
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
 
 from tests.workflow._plans import (
+    build_audit_carryover_only_gate_plan,
+    build_audit_carryover_with_dependencies_plan,
     build_large_team_plan,
     build_qualifying_phase_without_harvestable_steps_plan,
     build_units_plan,
@@ -810,6 +812,42 @@ class TestGatesAndApprovals:
                 continue
             assert phase.approval_required is False, phase.name
 
+    def test_gate_scan_skips_carryover_eligible_phases(self) -> None:
+        # §5.6 (amended): the ONLY test/build gate in the base plan sits on
+        # the Audit carryover phase -- it must not be picked up as the
+        # Implementation phase's gate (which would alias the same PlanGate
+        # object onto two phases, running it twice).
+        plan = build_audit_carryover_only_gate_plan()
+        fallback = PlanGate(
+            gate_type="test", command="pytest -q", description="Fallback."
+        )
+        apply_workflow(plan, fallback_gate=fallback)
+
+        impl_gate = phase_by_name(plan, "Implementation").gate
+        assert impl_gate is not None
+        assert impl_gate.command == "pytest -q"
+
+        audit_gate = phase_by_name(plan, "Audit").gate
+        assert audit_gate is not None
+        assert audit_gate.command == "baton evidence verify"
+        # Must not be the same aliased PlanGate instance.
+        assert impl_gate is not audit_gate
+
+    def test_final_review_approval_or_excludes_carryover_phases(
+        self, audit_carryover_plan: MachinePlan
+    ) -> None:
+        # §5.6 (amended): carryover phases are excluded from the Final
+        # Review approval OR-rule -- they keep their own sign-off; a plan
+        # whose only approval source is the Audit phase must not also
+        # require Final Review sign-off (no double approval from a single
+        # source).
+        apply_workflow(audit_carryover_plan)
+        final = phase_by_name(audit_carryover_plan, "Final Review")
+        assert final.approval_required is False
+
+        audit = phase_by_name(audit_carryover_plan, "Audit")
+        assert audit.approval_required is True
+
 
 # ---------------------------------------------------------------------------
 # Final-review fan-out (§5.8)
@@ -1050,6 +1088,34 @@ class TestAuditCarryover:
     ) -> None:
         apply_workflow(audit_carryover_plan)
         assert_graph_invariants(audit_carryover_plan)
+
+    def test_carryover_depends_on_are_rekeyed_intra_phase_and_dropped_cross_phase(
+        self,
+    ) -> None:
+        # §5.7 (amended) BUG regression: a verbatim carryover depends_on
+        # would either silently mis-point at a reshaped stage phase (the
+        # cross-phase case) or fail MachinePlan's forward-ref validator at
+        # execute-start time (the intra-phase case, since renumbering moves
+        # the id it referenced).
+        plan = build_audit_carryover_with_dependencies_plan()
+        apply_workflow(plan)
+
+        audit = phase_by_name(plan, "Audit")
+        gather, confirm = audit.steps
+        assert gather.agent_name == "compliance-analyst"
+        assert confirm.agent_name == "auditor"
+
+        # Cross-phase dependency on the harvested (now-discarded-id) step
+        # must be dropped rather than left dangling.
+        assert gather.depends_on == []
+        # Intra-phase dependency must be re-keyed to the renumbered id.
+        assert confirm.depends_on == [gather.step_id]
+
+        # The whole point: this must actually validate/round-trip, not just
+        # avoid a stale string match.
+        reloaded = MachinePlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+        assert reloaded.workflow == "adversarial-tdd"
+        assert_graph_invariants(plan)
 
 
 # ---------------------------------------------------------------------------

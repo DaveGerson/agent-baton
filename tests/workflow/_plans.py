@@ -557,6 +557,61 @@ def build_audit_carryover_plan() -> MachinePlan:
     )
 
 
+def build_audit_carryover_with_dependencies_plan() -> MachinePlan:
+    """Audit carryover phase whose steps carry BOTH a cross-phase dependency
+    on a harvested step (must be DROPPED) and an intra-phase dependency
+    (must be RE-KEYED) -- pins the amended §5.7 depends_on rule.
+
+    ``2.1`` (``compliance-analyst``, not itself an auditor) depends on the
+    harvested ``Implement`` step -- that edge must be dropped, not left
+    pointing at the discarded original id. ``2.2`` (``auditor`` -- the step
+    that actually qualifies the phase for carryover) depends on ``2.1`` --
+    an intra-phase edge that must survive, re-keyed to the renumbered id.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the retention-window enforcement",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Audit",
+                approval_required=True,
+                approval_description="Compliance officer sign-off required.",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="compliance-analyst",
+                        task_description="Gather the retention evidence",
+                        step_type="task",
+                        model="opus",
+                        depends_on=["1.1"],
+                    ),
+                    PlanStep(
+                        step_id="2.2",
+                        agent_name="auditor",
+                        task_description="Confirm the retention controls are auditable",
+                        step_type="reviewing",
+                        model="opus",
+                        depends_on=["2.1"],
+                        deliverables=["audit memo"],
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
 def build_auditor_in_implement_phase_plan() -> MachinePlan:
     """An ``auditor`` step living inside a phase that IS harvested.
 
@@ -798,6 +853,53 @@ def build_qualifying_phase_without_harvestable_steps_plan() -> MachinePlan:
                         step_id="2.1",
                         agent_name="code-reviewer",
                         task_description="Review the limiter approach",
+                        step_type="reviewing",
+                        model="opus",
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+def build_audit_carryover_only_gate_plan() -> MachinePlan:
+    """The ONLY test/build-type gate in the base plan sits on the Audit
+    carryover phase -- §5.6 (amended): the gate scan must skip
+    carryover-eligible phases, so Implementation must fall through to
+    ``fallback_gate`` rather than aliasing the Audit phase's own gate
+    object (which would then run twice -- once per phase, both pointing at
+    the same ``PlanGate`` instance).
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the retention-window enforcement",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Audit",
+                approval_required=True,
+                approval_description="Compliance officer sign-off required.",
+                gate=PlanGate(
+                    gate_type="test",
+                    command="baton evidence verify",
+                    description="Verify the evidence bundle.",
+                ),
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="auditor",
+                        task_description="Confirm the retention controls are auditable",
                         step_type="reviewing",
                         model="opus",
                     )

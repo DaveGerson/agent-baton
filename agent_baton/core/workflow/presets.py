@@ -72,7 +72,70 @@ class UnknownWorkflowError(RuntimeError):
         )
 
 
-ADVERSARIAL_TDD = WorkflowPreset(
+class InvalidWorkflowPresetError(RuntimeError):
+    """Raised by :func:`validate_preset` when a preset violates a
+    structural invariant (§4 note). Same engine-errors style as
+    :class:`UnknownWorkflowError` -- ``core/`` cannot import
+    ``cli/errors.BatonError``.
+    """
+
+
+def validate_preset(preset: WorkflowPreset) -> WorkflowPreset:
+    """Assert *preset*'s structural invariants (§4 note); returns it unchanged.
+
+    Invariants:
+
+    1. Non-empty ``stages``.
+    2. Exactly one stage has ``harvests_implementation=True``.
+    3. The LAST stage is not the harvesting stage, and its ``phase_name``
+       ends with ``"Review"`` -- it is the fan-out final-review stage (§3:
+       "the plan's last non-carryover phase must be named '…Review'").
+
+    Called at registration time for every preset this module builds, so a
+    malformed preset fails loudly at import time with a clear message,
+    rather than surfacing as a confusing bare ``StopIteration`` deep inside
+    the applier or CLI wiring (both of which look up the harvesting stage
+    via ``next(...)`` and trust this invariant rather than re-deriving it).
+
+    Raises:
+        InvalidWorkflowPresetError: *preset* violates an invariant.
+    """
+    if not preset.stages:
+        raise InvalidWorkflowPresetError(
+            f"WorkflowPreset {preset.name!r} must declare at least one stage."
+        )
+
+    harvesting = [s for s in preset.stages if s.harvests_implementation]
+    if len(harvesting) != 1:
+        raise InvalidWorkflowPresetError(
+            f"WorkflowPreset {preset.name!r} must have exactly one "
+            "harvesting stage (harvests_implementation=True); found "
+            f"{len(harvesting)} ({[s.stage_id for s in harvesting]!r})."
+        )
+
+    last = preset.stages[-1]
+    if last.harvests_implementation:
+        raise InvalidWorkflowPresetError(
+            f"WorkflowPreset {preset.name!r}: the last stage "
+            f"({last.stage_id!r}) is the harvesting stage; it must instead "
+            "be the fan-out final-review stage."
+        )
+    if not last.phase_name.endswith("Review"):
+        raise InvalidWorkflowPresetError(
+            f"WorkflowPreset {preset.name!r}: the last stage's phase_name "
+            f"({last.phase_name!r}) must end with 'Review' -- it is the "
+            "fan-out final-review stage (§3: the plan's last non-carryover "
+            "phase must be named '…Review')."
+        )
+    return preset
+
+
+def _register(preset: WorkflowPreset) -> WorkflowPreset:
+    """Validate *preset* then return it, for assignment at module scope."""
+    return validate_preset(preset)
+
+
+ADVERSARIAL_TDD = _register(WorkflowPreset(
     name="adversarial-tdd",
     description=(
         "Staged, model-tiered, adversarially verified TDD pipeline: "
@@ -155,7 +218,7 @@ ADVERSARIAL_TDD = WorkflowPreset(
             briefing_template="Review the whole slice for: {task_summary}.",
         ),
     ),
-)
+))
 
 _REGISTRY: dict[str, WorkflowPreset] = {ADVERSARIAL_TDD.name: ADVERSARIAL_TDD}
 

@@ -783,21 +783,32 @@ def handler(args: argparse.Namespace) -> None:
     # must fail before any planning work runs, not after.
     workflow_decisions = None
     if workflow_name:
-        from types import SimpleNamespace
-
         from agent_baton.core.config.workflow import load_workflow_settings
         from agent_baton.core.engine.planning.utils.gates import default_gate
+        from agent_baton.core.orchestration.router import StackProfile
         from agent_baton.core.workflow.applier import WorkflowApplier
 
         workflow_settings = load_workflow_settings(project_root)
         harvesting_stage = next(
-            s for s in workflow_preset.stages if s.harvests_implementation
+            (s for s in workflow_preset.stages if s.harvests_implementation), None
         )
+        if harvesting_stage is None:
+            # Defense in depth: get_workflow_preset() only ever returns
+            # registered presets, which validate_preset() (core/workflow/
+            # presets.py) already guarantees have exactly one harvesting
+            # stage at registration time -- this should be unreachable.
+            raise ValueError(
+                f"WorkflowPreset {workflow_preset.name!r} has no harvesting "
+                "stage; this should have been caught at preset registration."
+            )
         # This is the only filesystem-touching input the applier needs
         # (stack-detected gate command) -- computed here, not inside the
-        # (pure) applier, per decision #4.
+        # (pure) applier, per decision #4. default_gate() only reads
+        # `stack.language` -- StackProfile is a plain, cheaply-constructed
+        # dataclass (all other fields default), so there is no reason to
+        # duck-type it with a SimpleNamespace.
         stack = (
-            SimpleNamespace(language=plan.detected_stack.split("/", 1)[0])
+            StackProfile(language=plan.detected_stack.split("/", 1)[0])
             if plan.detected_stack
             else None
         )
