@@ -205,6 +205,111 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
+# MINOR-2: numeric bounds (Field(ge=1))
+# ---------------------------------------------------------------------------
+
+class TestNumericBounds:
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "external_timeout_seconds",
+            "final_review_fanout_divisor",
+            "final_review_max_reviewers",
+        ],
+    )
+    def test_non_positive_value_raises_on_direct_construction(
+        self, field_name: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            WorkflowSettings(**{field_name: 0})
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "external_timeout_seconds",
+            "final_review_fanout_divisor",
+            "final_review_max_reviewers",
+        ],
+    )
+    def test_negative_value_raises_on_direct_construction(
+        self, field_name: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            WorkflowSettings(**{field_name: -1})
+
+    def test_positive_value_is_accepted(self) -> None:
+        settings = WorkflowSettings(external_timeout_seconds=1)
+        assert settings.external_timeout_seconds == 1
+
+    def test_baton_yaml_with_non_positive_numeric_raises_actionable_error(
+        self, tmp_path: Path
+    ) -> None:
+        _write(
+            tmp_path / ".claude" / "baton.yaml",
+            "workflow:\n  external_timeout_seconds: 0\n",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            load_workflow_settings(tmp_path)
+        assert "external_timeout_seconds" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# MINOR-2: unknown stage ids in `workflow.stages` are rejected
+# ---------------------------------------------------------------------------
+
+class TestUnknownStageId:
+    def test_unknown_stage_id_on_direct_construction_raises(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            WorkflowSettings(stages={"bogus": StageOverride()})
+        message = str(exc_info.value)
+        assert "bogus" in message
+        assert "spec" in message
+        assert "implementation" in message
+
+    def test_unknown_stage_id_in_baton_yaml_raises_actionable_error(
+        self, tmp_path: Path
+    ) -> None:
+        _write(
+            tmp_path / ".claude" / "baton.yaml",
+            "workflow:\n  stages:\n    bogus:\n      model: opus\n",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            load_workflow_settings(tmp_path)
+
+        message = str(exc_info.value)
+        assert "bogus" in message
+        for stage_id in (
+            "spec",
+            "architecture",
+            "test_authoring",
+            "test_verification",
+            "implementation",
+            "implementation_verification",
+            "final_review",
+        ):
+            assert stage_id in message
+
+    def test_known_stage_ids_are_unaffected(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / ".claude" / "baton.yaml",
+            "workflow:\n  stages:\n    spec:\n      model: opus\n"
+            "    implementation:\n      model: haiku\n",
+        )
+        settings = load_workflow_settings(tmp_path)
+        assert settings.stages["spec"].model == "opus"
+        assert settings.stages["implementation"].model == "haiku"
+
+    def test_unknown_nested_key_inside_a_stage_override_still_ignored(self) -> None:
+        # Regression guard: MINOR-2 only rejects unknown KEYS of the
+        # `stages` dict (stage ids) -- unknown nested keys INSIDE a
+        # StageOverride stay extra="ignore" (forward-compat).
+        settings = WorkflowSettings(
+            stages={"spec": {"model": "opus", "frobnicate": True}}
+        )
+        assert settings.stages["spec"].model == "opus"
+
+
+# ---------------------------------------------------------------------------
 # ManagerConfig coexistence (decision #7 / §4)
 # ---------------------------------------------------------------------------
 

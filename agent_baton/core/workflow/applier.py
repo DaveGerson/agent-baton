@@ -39,6 +39,16 @@ _GATE_TYPES_THAT_MOVE = {"test", "build"}
 _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"
 _CARRYOVER_STAGE_ID = "carryover"
 
+# §3 Notes ("Research support"): every applier-created stage briefing states
+# that the orchestrator may dispatch sonnet general-purpose/domain agents for
+# research at any stage -- briefing guidance only, never an extra planned
+# step. Appended verbatim to every created (non-automation) step's briefing
+# so the sentence is byte-identical across stages.
+_RESEARCH_SUPPORT_NOTE = (
+    " The orchestrator may dispatch sonnet general-purpose/domain agents "
+    "for research support at any stage."
+)
+
 
 @dataclass
 class WorkflowDecisions:
@@ -91,15 +101,21 @@ def _phase_qualifies_for_harvest(phase: PlanPhase) -> bool:
 
 
 def _harvest_steps(phases: list[PlanPhase]) -> list[PlanStep]:
-    """§5.2: harvest implementation-like steps, with fallbacks (a)/(b)."""
+    """§5.2: harvest implementation-like steps, with fallbacks (a)/(b).
+
+    Fallback (a) (amended) fires whenever the primary predicate yields no
+    harvested steps at all -- either because no phase qualifies, OR because
+    every qualifying phase's steps are all excluded step types (e.g. a
+    qualifying "Implementation" phase containing only a reviewing step).
+    Gated on ``not harvested``, not on ``not qualifying``.
+    """
     qualifying = [p for p in phases if _phase_qualifies_for_harvest(p)]
     harvested: list[PlanStep] = []
-    if qualifying:
-        for phase in qualifying:
-            for step in phase.steps:
-                if step.step_type not in _EXCLUDED_HARVEST_STEP_TYPES:
-                    harvested.append(step)
-    else:
+    for phase in qualifying:
+        for step in phase.steps:
+            if step.step_type not in _EXCLUDED_HARVEST_STEP_TYPES:
+                harvested.append(step)
+    if not harvested:
         # Fallback (a): harvest every "developing" step anywhere in the plan.
         for phase in phases:
             for step in phase.steps:
@@ -162,6 +178,22 @@ def _implementation_units(steps: list[PlanStep]) -> int:
     return sum(_step_units(s) for s in steps)
 
 
+def _dispatch_units(steps: list[PlanStep]) -> list[tuple[str, list[str]]]:
+    """§5.8 (amended): one fan-out unit per step, or one per team member for
+    a team step -- each unit carries a task description and the *step's*
+    ``allowed_paths`` (``TeamMember`` has no ``allowed_paths`` of its own).
+    ``len(_dispatch_units(steps)) == _implementation_units(steps)`` always.
+    """
+    units: list[tuple[str, list[str]]] = []
+    for step in steps:
+        if step.team:
+            for member in step.team:
+                units.append((member.task_description, list(step.allowed_paths)))
+        else:
+            units.append((step.task_description, list(step.allowed_paths)))
+    return units
+
+
 # ---------------------------------------------------------------------------
 # Overrides (§5.11)
 # ---------------------------------------------------------------------------
@@ -184,13 +216,17 @@ def _effective_agent_model(
 # Final-review fan-out (§5.8)
 # ---------------------------------------------------------------------------
 
-def _reviewer_count(units: int, n_items: int, settings: WorkflowSettings) -> int:
+def _reviewer_count(units: int, settings: WorkflowSettings) -> int:
+    """§5.8 (amended): the formula is exact -- NEVER clamped by the
+    harvested *step* count (a single step with an 8-member team must still
+    yield ``ceil(8/divisor)`` reviewers, capped only by
+    ``final_review_max_reviewers``). Mathematically, ``ceil(units/divisor)``
+    for ``divisor >= 1`` never exceeds ``units``, so the resulting count is
+    always safe to feed into ``_contiguous_partition(units, count)``.
+    """
     divisor = max(1, settings.final_review_fanout_divisor)
     cap = max(1, settings.final_review_max_reviewers)
-    count = min(cap, max(1, math.ceil(units / divisor)))
-    if n_items:
-        count = min(count, n_items)
-    return max(1, count)
+    return min(cap, max(1, math.ceil(units / divisor)))
 
 
 def _contiguous_partition(n_items: int, n_groups: int) -> list[tuple[int, int]]:
@@ -279,7 +315,11 @@ class WorkflowApplier:
                     step.step_type == "automation" for step in phase.steps
                 )
 
-        decisions = WorkflowDecisions(
+        # §5.1 (amended): the no-op guard performs ZERO writes -- including
+        # plan_diagnostics. Only the RETURNED WorkflowDecisions reflects the
+        # recompute; the persisted plan_diagnostics["workflow"] record stays
+        # exactly what the last real reshape wrote.
+        return WorkflowDecisions(
             workflow=plan.workflow,
             stages=stage_entries,
             implementation_units=implementation_units,
@@ -287,8 +327,6 @@ class WorkflowApplier:
             external_verifier=external_verifier,
             carried_over_phases=[phase.name for phase in carryover_phases],
         )
-        plan.plan_diagnostics["workflow"] = decisions.to_dict()
-        return decisions
 
     # -- full reshape -----------------------------------------------------
 
@@ -381,7 +419,7 @@ class WorkflowApplier:
                 phase_gate = None
                 phase_approval = False
                 phase_approval_desc = ""
-            else:  # final_review — the preset's last stage
+            elif stage.stage_id == "final_review":
                 steps = self._build_final_review_steps(
                     plan, stage, agent, model, harvested, settings
                 )
@@ -389,6 +427,15 @@ class WorkflowApplier:
                 phase_approval = approval_required
                 phase_approval_desc = (
                     "Sign off on the reviewed slice." if approval_required else ""
+                )
+            else:
+                # Unreachable for the shipped adversarial-tdd preset -- guards
+                # future non-harvesting presets against a silently-wrong
+                # final-review-shaped briefing for a stage_id no builder
+                # exists for.
+                raise ValueError(
+                    f"WorkflowApplier: no created-step builder registered for "
+                    f"non-harvesting stage_id {stage.stage_id!r}."
                 )
 
             for i, step in enumerate(steps, start=1):
@@ -463,6 +510,7 @@ class WorkflowApplier:
     ) -> PlanStep:
         text = stage.briefing_template.format(task_summary=plan.task_summary)
         text += f" Write the spec to {spec_path}."
+        text += _RESEARCH_SUPPORT_NOTE
         return PlanStep(
             step_id="_",
             agent_name=agent,
@@ -483,6 +531,7 @@ class WorkflowApplier:
     ) -> PlanStep:
         text = stage.briefing_template.format(task_summary=plan.task_summary)
         text += f" Read the spec at {spec_path} before designing."
+        text += _RESEARCH_SUPPORT_NOTE
         return PlanStep(
             step_id="_",
             agent_name=agent,
@@ -503,6 +552,7 @@ class WorkflowApplier:
         deliverable: str,
     ) -> PlanStep:
         text = stage.briefing_template.format(task_summary=plan.task_summary)
+        text += _RESEARCH_SUPPORT_NOTE
         return PlanStep(
             step_id="_",
             agent_name=agent,
@@ -528,6 +578,7 @@ class WorkflowApplier:
             " Locate the tests described in the test-authoring step's "
             f"deliverables: {authoring_deliverable}."
         )
+        text += _RESEARCH_SUPPORT_NOTE
         return PlanStep(
             step_id="_",
             agent_name=agent,
@@ -548,6 +599,7 @@ class WorkflowApplier:
         settings: WorkflowSettings,
     ) -> list[PlanStep]:
         text = stage.briefing_template.format(task_summary=plan.task_summary)
+        text += _RESEARCH_SUPPORT_NOTE
         steps = [
             PlanStep(
                 step_id="_",
@@ -584,19 +636,24 @@ class WorkflowApplier:
         harvested: list[PlanStep],
         settings: WorkflowSettings,
     ) -> list[PlanStep]:
-        units = _implementation_units(harvested)
-        n_items = len(harvested)
-        reviewers = _reviewer_count(units, n_items, settings)
-        ranges = _contiguous_partition(n_items, reviewers)
+        # §5.8 (amended): partition by DISPATCH UNIT, not by harvested step
+        # count -- a single team step contributes one unit per member. The
+        # reviewer-count formula is exact and is never clamped by
+        # ``len(harvested)``; see `_reviewer_count`'s docstring for why the
+        # resulting count always fits `_contiguous_partition`.
+        units = _dispatch_units(harvested)
+        n_units = len(units)
+        reviewers = _reviewer_count(n_units, settings)
+        ranges = _contiguous_partition(n_units, reviewers)
         base_text = stage.briefing_template.format(task_summary=plan.task_summary)
+        base_text += _RESEARCH_SUPPORT_NOTE
 
         steps: list[PlanStep] = []
         for start, end in ranges:
-            group = harvested[start:end]
+            group = units[start:end]
             lines = [
-                f"- {step.task_description} (writes: "
-                f"{', '.join(step.allowed_paths) if step.allowed_paths else 'n/a'})"
-                for step in group
+                f"- {description} (writes: {', '.join(paths) if paths else 'n/a'})"
+                for description, paths in group
             ]
             text = (
                 base_text

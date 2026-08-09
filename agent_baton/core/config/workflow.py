@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agent_baton.core.config.manager import ManagerConfig
 
@@ -41,12 +41,52 @@ class StageOverride(_Section):
     model: ModelTier | None = None
 
 
+def _known_stage_ids() -> list[str]:
+    """Every ``stage_id`` across every registered workflow preset.
+
+    Imported lazily (function-local, not module-top) to avoid a load-time
+    cycle risk with ``core/workflow/presets.py`` -- there is none today, but
+    ``core/config`` is a lower layer than ``core/workflow`` by convention and
+    should not assume it stays that way.
+    """
+    from agent_baton.core.workflow.presets import list_workflow_presets
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for preset in list_workflow_presets():
+        for stage in preset.stages:
+            if stage.stage_id not in seen:
+                seen.add(stage.stage_id)
+                ids.append(stage.stage_id)
+    return ids
+
+
 class WorkflowSettings(_Section):
     stages: dict[str, StageOverride] = Field(default_factory=dict)
     external_command: str = ""
-    external_timeout_seconds: int = 1800
-    final_review_fanout_divisor: int = 4
-    final_review_max_reviewers: int = 3
+    external_timeout_seconds: int = Field(default=1800, ge=1)
+    final_review_fanout_divisor: int = Field(default=4, ge=1)
+    final_review_max_reviewers: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_stage_ids(self) -> "WorkflowSettings":
+        """Reject unknown ``workflow.stages`` KEYS (stage ids), not unknown
+        nested keys inside a :class:`StageOverride` -- those stay
+        ``extra="ignore"`` (forward-compat for a future ``StageOverride``
+        field). A typo'd stage id (e.g. ``spce``) would otherwise silently
+        no-op forever, since the applier only ever looks up known ids.
+        """
+        if not self.stages:
+            return self
+        valid_ids = _known_stage_ids()
+        unknown = sorted(set(self.stages) - set(valid_ids))
+        if unknown:
+            raise ValueError(
+                f"Unknown workflow stage id(s) {unknown!r} in "
+                "`workflow.stages`; valid stage ids: "
+                f"{', '.join(valid_ids)}."
+            )
+        return self
 
 
 def _read_yaml_mapping(path: Path) -> dict[str, Any]:

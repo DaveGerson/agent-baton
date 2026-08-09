@@ -844,6 +844,8 @@ class MachinePlan(PlanModel):
                     lines.append(f"### Step {step.step_id}: {step.agent_name}{_parallel_tag}")
                     lines.append(f"- **Model**: {step.model}")
                     lines.append(f"- **Task**: {step.task_description}")
+                if step.workflow_stage:
+                    lines.append(f"- **Workflow stage**: {step.workflow_stage}")
                 if step.expected_outcome:
                     lines.append(f"- **Expected outcome**: {step.expected_outcome}")
                 if step.depends_on:

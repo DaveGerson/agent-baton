@@ -721,3 +721,87 @@ def build_gateless_plan() -> MachinePlan:
             )
         ]
     )
+
+
+def build_large_team_plan() -> MachinePlan:
+    """A single harvested step whose team has 8 members and no plain steps.
+
+    Pins the amended §5.8: fan-out is by DISPATCH UNIT, never clamped by the
+    harvested *step* count — one step with 8 team members must still yield
+    ``ceil(8 / final_review_fanout_divisor)`` reviewers, not 1 (the step
+    count). Member descriptions are unique/non-substring so partition
+    assertions can attribute a reviewer briefing to exactly its member
+    subset.
+    """
+    members = [
+        TeamMember(
+            member_id=f"1.1.{chr(ord('a') + i)}",
+            agent_name="backend-engineer",
+            role="implementer",
+            task_description=f"own team-unit-{i + 1:02d} of the rate limiter",
+            model="opus",
+        )
+        for i in range(8)
+    ]
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Coordinate the limiter build-out",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/api/limiter.py"],
+                        synthesis=SynthesisSpec(strategy="concatenate"),
+                        team=members,
+                    )
+                ],
+            )
+        ]
+    )
+
+
+def build_qualifying_phase_without_harvestable_steps_plan() -> MachinePlan:
+    """§5.2(a) amended: a qualifying phase ("Implementation") whose only step
+    is a reviewing step (so nothing is harvested from it), plus a
+    non-qualifying "Design" phase carrying a developing step.
+
+    Fallback (a) must fire because harvesting the qualifying phase(s) alone
+    yielded *zero* steps — not because no phase qualified — and it must
+    harvest the "Design" phase's developing step rather than synthesizing a
+    fallback step.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Design",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Prototype the limiter approach",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Implementation",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="code-reviewer",
+                        task_description="Review the limiter approach",
+                        step_type="reviewing",
+                        model="opus",
+                    )
+                ],
+            ),
+        ]
+    )

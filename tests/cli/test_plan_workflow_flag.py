@@ -175,6 +175,31 @@ class TestUnknownWorkflow:
         assert "adversarial-tdd" in stderr
         assert "Traceback (most recent call last)" not in stderr
 
+    def test_unknown_workflow_is_rejected_before_any_planning_runs(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # MINOR-1: get_workflow_preset() is resolved in the top-of-handler
+        # guard block, before create_plan() is ever invoked -- an unknown
+        # preset name must not waste a planning run (stack detection, risk
+        # classification, knowledge scanning).
+        monkeypatch.chdir(tmp_path)
+        captured: dict[str, Any] = {}
+        _install_stub_planner(monkeypatch, captured)
+
+        with pytest.raises(SystemExit) as exc_info:
+            plan_cmd.handler(
+                _build_parser().parse_args(
+                    ["plan", "do the thing", "--workflow", "no-such-workflow", "--json"]
+                )
+            )
+
+        assert exc_info.value.code == 2
+        assert "plan" not in captured, "create_plan() must not have run"
+
+        stderr = capsys.readouterr().err
+        assert "Planning..." not in stderr
+        assert "Analyzing patterns" not in stderr
+
 
 # ---------------------------------------------------------------------------
 # Mutual exclusion (decision #7)

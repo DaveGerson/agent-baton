@@ -23,6 +23,8 @@ from agent_baton.core.workflow.presets import ADVERSARIAL_TDD
 from agent_baton.models.execution import MachinePlan, PlanGate, PlanPhase, PlanStep
 
 from tests.workflow._plans import (
+    build_large_team_plan,
+    build_qualifying_phase_without_harvestable_steps_plan,
     build_units_plan,
     dispatch_units,
     phase_by_name,
@@ -244,6 +246,49 @@ class TestStageScoping:
         assert authoring.deliverables, "test-authoring step must declare deliverables"
         for deliverable in authoring.deliverables:
             assert deliverable in verification.task_description
+
+
+# ---------------------------------------------------------------------------
+# Research-support briefing guidance (§3 Notes)
+# ---------------------------------------------------------------------------
+
+class TestResearchSupportGuidance:
+    def test_every_created_steps_briefing_mentions_research_support(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §3 Notes: "stage briefings state that the orchestrator may
+        # dispatch sonnet general-purpose/domain agents for research at
+        # any stage" -- briefing guidance, not extra planned steps. Every
+        # applier-created (non-harvested) step must carry it; the
+        # automation external-verifier step (a scripted command, not an
+        # agent briefing) is excluded below.
+        apply_workflow(base_plan)
+        for phase in workflow_phases(base_plan):
+            if phase.name == "Implementation":
+                continue  # harvested steps are pre-existing work, not created
+            for step in phase.steps:
+                if step.step_type == "automation":
+                    continue
+                assert "research support" in step.task_description.lower(), (
+                    phase.name,
+                    step.task_description,
+                )
+
+    def test_final_review_reviewer_briefings_mention_research_support(self) -> None:
+        plan = build_units_plan(8)
+        apply_workflow(plan)
+        final = phase_by_name(plan, "Final Review")
+        for step in final.steps:
+            assert "research support" in step.task_description.lower()
+
+    def test_automation_step_does_not_carry_research_support_guidance(
+        self, base_plan: MachinePlan
+    ) -> None:
+        settings = WorkflowSettings(external_command="codex verify")
+        apply_workflow(base_plan, settings=settings)
+        phase = phase_by_name(base_plan, "Implementation Verification")
+        automation = next(s for s in phase.steps if s.step_type == "automation")
+        assert "research support" not in automation.task_description.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +559,26 @@ class TestHarvestPredicate:
         remaining = descriptions(developing_fallback_plan)
         assert "Chart the current throttling behaviour" not in remaining
         assert "Check the rollout runbook" not in remaining
+
+    def test_fallback_fires_when_qualifying_phase_yields_no_harvested_steps(
+        self,
+    ) -> None:
+        # §5.2(a) amended: fallback (a) gates on "no harvested steps", not
+        # "no qualifying phase" -- an "Implementation" phase that qualifies
+        # but contains only a reviewing step must still trigger fallback
+        # (a), harvesting the "Design" phase's developing step, rather than
+        # synthesizing (fallback (b)) or harvesting nothing.
+        plan = build_qualifying_phase_without_harvestable_steps_plan()
+        decisions = apply_workflow(plan)
+
+        harvested = implementation_steps(plan)
+        assert [s.task_description for s in harvested] == [
+            "Prototype the limiter approach"
+        ]
+        assert decisions.implementation_units == 1
+        # The qualifying phase's reviewing step must still be discarded.
+        assert "Review the limiter approach" not in descriptions(plan)
+        assert_graph_invariants(plan)
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +895,66 @@ class TestFinalReviewFanOut:
         )
         decisions = apply_workflow(plan, settings=settings)
         assert decisions.final_review_reviewers == 2
+
+
+# ---------------------------------------------------------------------------
+# Final-review fan-out by dispatch unit, not harvested step count (§5.8
+# amended) -- a single team step must never be clamped to 1 reviewer.
+# ---------------------------------------------------------------------------
+
+class TestFinalReviewFanOutByDispatchUnit:
+    def test_single_team_step_with_eight_members_yields_two_reviewers(self) -> None:
+        plan = build_large_team_plan()
+        decisions = apply_workflow(plan)
+
+        assert decisions.implementation_units == 8
+        assert decisions.final_review_reviewers == 2
+        # Exactly one harvested STEP -- the formula must not clamp to 1
+        # reviewer just because there is only one step to harvest from.
+        assert len(implementation_steps(plan)) == 1
+
+        final = phase_by_name(plan, "Final Review")
+        assert sum(len(dispatch_units(s)) for s in final.steps) == 2
+
+    def test_member_dispatch_units_partition_contiguously_and_disjointly(
+        self,
+    ) -> None:
+        plan = build_large_team_plan()
+        apply_workflow(plan)
+
+        impl_step = implementation_steps(plan)[0]
+        member_descriptions = [m.task_description for m in impl_step.team]
+        assert len(member_descriptions) == 8
+
+        final = phase_by_name(plan, "Final Review")
+        briefings = [b for step in final.steps for _a, _m, b in dispatch_units(step)]
+        assert len(briefings) == 2
+
+        groups = [
+            {i for i, desc in enumerate(member_descriptions) if desc in briefing}
+            for briefing in briefings
+        ]
+        # Every team member is reviewed by exactly one reviewer.
+        assert set().union(*groups) == set(range(8))
+        assert groups[0].isdisjoint(groups[1])
+        # Contiguous partition.
+        for group in groups:
+            ordered = sorted(group)
+            assert ordered == list(range(ordered[0], ordered[-1] + 1))
+
+    def test_reviewer_count_scales_with_configured_divisor(self) -> None:
+        plan = build_large_team_plan()
+        settings = WorkflowSettings(
+            final_review_fanout_divisor=2, final_review_max_reviewers=5
+        )
+        decisions = apply_workflow(plan, settings=settings)
+        # ceil(8 / 2) = 4 reviewers from a SINGLE harvested step.
+        assert decisions.final_review_reviewers == 4
+
+    def test_graph_invariants_hold_with_large_team_fanout(self) -> None:
+        plan = build_large_team_plan()
+        apply_workflow(plan)
+        assert_graph_invariants(plan)
 
 
 # ---------------------------------------------------------------------------

@@ -527,14 +527,35 @@ def _print_manager_mode_artifacts(ctx_dir: Path, plan: MachinePlan, manager_arti
 
 
 def handler(args: argparse.Namespace) -> None:
+    # --workflow is resolved (and its mutual-exclusion guards checked)
+    # before any planning work runs -- an unknown preset name, or an
+    # invalid flag combination, must fail fast without wasting a
+    # create_plan() call (design decision #7 for the mutual exclusions;
+    # MINOR-1 fast-fail for the preset lookup itself).
+    #
     # --workflow is mutually exclusive with --manager-mode and --import
     # (design decision #7): PhasePolicyApplier keys idempotency solely on
     # the "review-" step-id prefix and would inject adversarial-review
     # steps into all 7 workflow phases -- including the three that already
     # ARE reviews. --import bypasses create_plan(); reshaping imported
-    # plans is untested territory. Checked before any planning work runs.
+    # plans is untested territory.
     workflow_name = getattr(args, "workflow", None)
+    workflow_preset = None
     if workflow_name:
+        from agent_baton.core.workflow.presets import (
+            UnknownWorkflowError,
+            get_workflow_preset,
+        )
+
+        try:
+            workflow_preset = get_workflow_preset(workflow_name)
+        except UnknownWorkflowError as exc:
+            validation_error(
+                str(exc),
+                hint="Pass one of the preset names listed above to --workflow.",
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
+
         if getattr(args, "manager_mode", False):
             validation_error(
                 "--workflow is mutually exclusive with --manager-mode.",
@@ -757,6 +778,9 @@ def handler(args: argparse.Namespace) -> None:
     # (--dry-run, --save, print) -- so every downstream consumer sees the
     # reshaped, re-tiered plan. See
     # docs/internal/adversarial-tdd-workflow-design.md §4/§5.
+    # `workflow_preset` was already resolved (and validated) in the
+    # top-of-handler guard block above -- MINOR-1: an unknown preset name
+    # must fail before any planning work runs, not after.
     workflow_decisions = None
     if workflow_name:
         from types import SimpleNamespace
@@ -764,19 +788,6 @@ def handler(args: argparse.Namespace) -> None:
         from agent_baton.core.config.workflow import load_workflow_settings
         from agent_baton.core.engine.planning.utils.gates import default_gate
         from agent_baton.core.workflow.applier import WorkflowApplier
-        from agent_baton.core.workflow.presets import (
-            UnknownWorkflowError,
-            get_workflow_preset,
-        )
-
-        try:
-            workflow_preset = get_workflow_preset(workflow_name)
-        except UnknownWorkflowError as exc:
-            validation_error(
-                str(exc),
-                hint="Pass one of the preset names listed above to --workflow.",
-                docs="docs/internal/adversarial-tdd-workflow-design.md",
-            )
 
         workflow_settings = load_workflow_settings(project_root)
         harvesting_stage = next(

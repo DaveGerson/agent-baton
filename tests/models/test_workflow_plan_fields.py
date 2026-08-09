@@ -143,6 +143,31 @@ class TestPlanStepWorkflowStageField:
         assert PlanStep.from_dict(step.to_dict()).workflow_stage == "carryover"
 
 
+class TestPlanStepWorkflowStageMarkdown:
+    """§4: PlanStep.workflow_stage 'shown in to_markdown() when set'."""
+
+    def _plan_with_step(self, **step_overrides: Any) -> MachinePlan:
+        fields: dict[str, Any] = {
+            "step_id": "1.1",
+            "agent_name": "architect",
+            "task_description": "Write the spec",
+        }
+        fields.update(step_overrides)
+        return MachinePlan(
+            task_id="task-workflow-markdown",
+            task_summary="add rate limiting",
+            phases=[PlanPhase(phase_id=1, name="Brainstorm & Spec", steps=[PlanStep(**fields)])],
+        )
+
+    def test_markdown_shows_the_stage_when_set(self) -> None:
+        plan = self._plan_with_step(workflow_stage="spec")
+        assert "**Workflow stage**: spec" in plan.to_markdown()
+
+    def test_markdown_omits_the_stage_when_unset(self) -> None:
+        plan = self._plan_with_step()
+        assert "**Workflow stage**" not in plan.to_markdown()
+
+
 # ---------------------------------------------------------------------------
 # Nested round-trip through a whole plan
 # ---------------------------------------------------------------------------
