@@ -12,8 +12,10 @@ from agent_baton.models.execution import MachinePlan
 
 from tests.workflow._plans import (
     build_audit_carryover_plan,
+    build_auditor_in_implement_phase_plan,
     build_automation_step_plan,
     build_base_plan,
+    build_build_gate_plan,
     build_developing_fallback_plan,
     build_gateless_plan,
     build_harvest_predicate_plan,
@@ -60,3 +62,13 @@ def automation_step_plan() -> MachinePlan:
 @pytest.fixture
 def gateless_plan() -> MachinePlan:
     return build_gateless_plan()
+
+
+@pytest.fixture
+def auditor_in_implement_phase_plan() -> MachinePlan:
+    return build_auditor_in_implement_phase_plan()
+
+
+@pytest.fixture
+def build_gate_plan() -> MachinePlan:
+    return build_build_gate_plan()

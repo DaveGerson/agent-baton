@@ -199,6 +199,54 @@ class TestStageReshape:
 
 
 # ---------------------------------------------------------------------------
+# Stage scoping (§3 stages 1 and 4)
+# ---------------------------------------------------------------------------
+
+def spec_path(plan: MachinePlan) -> str:
+    """The artifact stage 1 writes and stage 4 reads."""
+    return f".claude/team-context/executions/{plan.task_id}/spec.md"
+
+
+class TestStageScoping:
+    def test_spec_step_declares_the_spec_file_as_a_deliverable(
+        self, base_plan: MachinePlan
+    ) -> None:
+        apply_workflow(base_plan)
+        step = phase_by_name(base_plan, "Brainstorm & Spec").steps[0]
+        assert any(spec_path(base_plan) in d for d in step.deliverables)
+
+    def test_spec_step_briefing_names_the_spec_file(
+        self, base_plan: MachinePlan
+    ) -> None:
+        apply_workflow(base_plan)
+        step = phase_by_name(base_plan, "Brainstorm & Spec").steps[0]
+        assert spec_path(base_plan) in step.task_description
+
+    def test_test_verification_context_is_only_the_spec(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §3 stage 4: "context_files carries only the spec path" — the
+        # reviewer must not be handed the implementation plan.
+        apply_workflow(base_plan)
+        step = phase_by_name(base_plan, "Test Verification").steps[0]
+        assert step.context_files == [spec_path(base_plan)]
+
+    def test_test_verification_briefing_points_at_the_authored_tests(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §3 stage 4: the briefing instructs locating the tests from the
+        # test-authoring step's deliverables, so those deliverables must
+        # exist and be named in the reviewer's briefing.
+        apply_workflow(base_plan)
+        authoring = phase_by_name(base_plan, "Test Authoring").steps[0]
+        verification = phase_by_name(base_plan, "Test Verification").steps[0]
+
+        assert authoring.deliverables, "test-authoring step must declare deliverables"
+        for deliverable in authoring.deliverables:
+            assert deliverable in verification.task_description
+
+
+# ---------------------------------------------------------------------------
 # Model tiers + stamping (§3, §5.5, §5.10)
 # ---------------------------------------------------------------------------
 
@@ -296,6 +344,24 @@ class TestHarvesting:
         assert step.max_estimated_minutes == 30
         assert step.mcp_servers == ["postgres"]
 
+    def test_harvested_step_knowledge_is_preserved(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §5.5 is an *inverted* rule: everything survives except the four
+        # named exceptions, so planner-resolved knowledge must come through.
+        apply_workflow(base_plan)
+        step = implementation_steps(base_plan)[0]
+        assert [k.document_name for k in step.knowledge] == ["api-conventions"]
+        assert step.knowledge[0].pack_name == "coding-conventions"
+
+    def test_harvested_step_interactivity_is_preserved(
+        self, base_plan: MachinePlan
+    ) -> None:
+        apply_workflow(base_plan)
+        step = implementation_steps(base_plan)[0]
+        assert step.interactive is True
+        assert step.max_turns == 4
+
     def test_harvested_step_type_is_not_restamped(self, base_plan: MachinePlan) -> None:
         # §5.5: step_type is stamped only on applier-created steps.
         apply_workflow(base_plan)
@@ -351,16 +417,63 @@ class TestHarvesting:
 # ---------------------------------------------------------------------------
 
 class TestHarvestPredicate:
-    def test_fix_and_build_phases_are_harvested(
+    def test_all_implement_like_phases_are_harvested_in_order(
         self, harvest_predicate_plan: MachinePlan
     ) -> None:
         apply_workflow(harvest_predicate_plan)
         assert [
             s.task_description for s in implementation_steps(harvest_predicate_plan)
         ] == [
-            "Repair the quota reset arithmetic",
-            "Compile the release artifact",
+            "Repair the quota reset arithmetic",          # Fix
+            "Compile the release artifact",               # Build
+            "Add the throttle middleware to the API layer",  # Implement: API Layer
+            "Wire the quota store into the backend",      # Backend Implementation
+            "Provision the redis quota cache",            # Prepare
+            "Roll back the broken quota migration",       # Remediate
         ]
+
+    @pytest.mark.parametrize(
+        ("phase_name", "description"),
+        [
+            ("Fix", "Repair the quota reset arithmetic"),
+            ("Build", "Compile the release artifact"),
+            ("Implement: API Layer", "Add the throttle middleware to the API layer"),
+            ("Backend Implementation", "Wire the quota store into the backend"),
+            ("Prepare", "Provision the redis quota cache"),
+            ("Remediate", "Roll back the broken quota migration"),
+        ],
+    )
+    def test_phase_name_is_harvested(
+        self, harvest_predicate_plan: MachinePlan, phase_name: str, description: str
+    ) -> None:
+        # "Implement: API Layer" (colon strip) and "Backend Implementation"
+        # (last-word key + the implementation->implement alias) are the two
+        # rows an explicit full-name table lookup would miss; "Prepare" and
+        # "Remediate" pin the PREPARATION / REMEDIATION archetypes.
+        apply_workflow(harvest_predicate_plan)
+        harvested = [
+            s.task_description for s in implementation_steps(harvest_predicate_plan)
+        ]
+        assert description in harvested, f"{phase_name} must be harvested"
+
+    def test_planning_step_inside_an_implement_like_phase_is_excluded(
+        self, harvest_predicate_plan: MachinePlan
+    ) -> None:
+        # The step-type exclusion applies within a qualifying phase too.
+        apply_workflow(harvest_predicate_plan)
+        assert (
+            "Draft the middleware interface"
+            not in descriptions(harvest_predicate_plan)
+        )
+
+    def test_cross_phase_dependency_between_harvested_steps_is_rekeyed(
+        self, harvest_predicate_plan: MachinePlan
+    ) -> None:
+        # Build's step depended on Fix's step; both are harvested, so the
+        # edge must survive re-keyed rather than being dropped.
+        apply_workflow(harvest_predicate_plan)
+        fix_step, build_step = implementation_steps(harvest_predicate_plan)[:2]
+        assert build_step.depends_on == [fix_step.step_id]
 
     def test_security_review_phase_is_not_harvested(
         self, harvest_predicate_plan: MachinePlan
@@ -453,7 +566,19 @@ class TestTeamSteps:
         apply_workflow(team_step_plan)
         team_steps = [s for s in implementation_steps(team_step_plan) if s.team]
         assert len(team_steps) == 1
+        # §5.5 ruling: member_id values are preserved VERBATIM — they are not
+        # re-keyed to the renumbered step id, because member `depends_on`
+        # references member ids and re-keying is not free. So these still read
+        # "1.1.a"/"1.1.b" even though the step itself is renumbered.
         assert [m.member_id for m in team_steps[0].team] == ["1.1.a", "1.1.b"]
+
+    def test_nested_member_ids_are_also_preserved(
+        self, team_step_plan: MachinePlan
+    ) -> None:
+        apply_workflow(team_step_plan)
+        step = next(s for s in implementation_steps(team_step_plan) if s.team)
+        lead = next(m for m in step.team if m.role == "lead")
+        assert [m.member_id for m in lead.sub_team] == ["1.1.a.i"]
 
     def test_team_member_models_are_retiered(self, team_step_plan: MachinePlan) -> None:
         apply_workflow(team_step_plan)
@@ -559,6 +684,20 @@ class TestGatesAndApprovals:
                 continue
             assert phase.gate is None, phase.name
 
+    def test_build_gate_also_satisfies_the_first_gate_rule(
+        self, build_gate_plan: MachinePlan
+    ) -> None:
+        # §5.6 says "test/build" — a plan whose only qualifying gate is a
+        # build gate must not fall through to fallback_gate.
+        apply_workflow(
+            build_gate_plan,
+            fallback_gate=PlanGate(gate_type="test", command="SHOULD-NOT-BE-USED"),
+        )
+        gate = phase_by_name(build_gate_plan, "Implementation").gate
+        assert gate is not None
+        assert gate.gate_type == "build"
+        assert gate.command == "python -m build"
+
     def test_fallback_gate_used_when_base_plan_has_none(
         self, gateless_plan: MachinePlan
     ) -> None:
@@ -658,15 +797,23 @@ class TestFinalReviewFanOut:
             ordered = sorted(group)
             assert ordered == list(range(ordered[0], ordered[-1] + 1))
 
-    def test_reviewer_briefings_embed_allowed_paths(self) -> None:
+    def test_each_briefing_embeds_exactly_its_own_groups_allowed_paths(self) -> None:
+        # Per-reviewer, not plan-wide: a reviewer that embedded *every*
+        # step's paths would defeat the point of partitioning the slice.
         plan = build_units_plan(8)
         apply_workflow(plan)
 
+        impl = implementation_steps(plan)
+        all_paths = {p for s in impl for p in s.allowed_paths}
         final = phase_by_name(plan, "Final Review")
-        blob = " ".join(b for step in final.steps for _a, _m, b in dispatch_units(step))
-        for step in implementation_steps(plan):
-            for path in step.allowed_paths:
-                assert path in blob
+        briefings = [b for step in final.steps for _a, _m, b in dispatch_units(step)]
+
+        for briefing in briefings:
+            group = [s for s in impl if s.task_description in briefing]
+            assert group, "each reviewer must own at least one step"
+            expected = {p for s in group for p in s.allowed_paths}
+            embedded = {p for p in all_paths if p in briefing}
+            assert embedded == expected
 
     def test_fanout_divisor_and_cap_are_configurable(self) -> None:
         plan = build_units_plan(8)
@@ -758,6 +905,20 @@ class TestAuditCarryover:
         decisions = apply_workflow(base_plan)
         assert decisions.carried_over_phases == []
         assert len(base_plan.phases) == len(STAGE_PHASE_NAMES)
+
+    def test_auditor_inside_a_harvested_phase_does_not_trigger_carryover(
+        self, auditor_in_implement_phase_plan: MachinePlan
+    ) -> None:
+        # §5.7 scopes carryover to NON-harvested phases. The "Implement"
+        # phase here is harvested, so its auditor step is discarded like any
+        # other reviewing step rather than resurrecting the whole phase.
+        decisions = apply_workflow(auditor_in_implement_phase_plan)
+
+        assert decisions.carried_over_phases == []
+        assert [p.name for p in auditor_in_implement_phase_plan.phases] == (
+            STAGE_PHASE_NAMES
+        )
+        assert "auditor" not in auditor_in_implement_phase_plan.all_agents
 
     def test_graph_invariants_hold_with_carryover(
         self, audit_carryover_plan: MachinePlan
@@ -865,6 +1026,28 @@ class TestStageOverrides:
             "frontend-engineer",
         ]
 
+    def test_decisions_record_the_effective_tier(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §4: the stage entry's "model" is the EFFECTIVE tier, i.e. after
+        # overrides — not the preset default.
+        settings = WorkflowSettings(
+            stages={"test_authoring": StageOverride(model="sonnet")}
+        )
+        decisions = apply_workflow(base_plan, settings=settings)
+        entry = next(e for e in decisions.stages if e["stage_id"] == "test_authoring")
+        assert entry["model"] == "sonnet"
+
+    def test_decisions_record_the_effective_agent(
+        self, base_plan: MachinePlan
+    ) -> None:
+        settings = WorkflowSettings(
+            stages={"spec": StageOverride(agent="subject-matter-expert")}
+        )
+        decisions = apply_workflow(base_plan, settings=settings)
+        entry = next(e for e in decisions.stages if e["stage_id"] == "spec")
+        assert set(entry["agents"]) == {"subject-matter-expert"}
+
     def test_unrelated_stages_keep_their_preset_defaults(
         self, base_plan: MachinePlan
     ) -> None:
@@ -901,13 +1084,14 @@ class TestDecisionsRecord:
     def test_stage_entry_shape(self, base_plan: MachinePlan) -> None:
         decisions = apply_workflow(base_plan)
         for entry, phase in zip(decisions.stages, workflow_phases(base_plan)):
-            assert set(entry) == {
+            # §4: the entry is a superset — extra diagnostic keys are allowed.
+            assert {
                 "stage_id",
                 "phase_name",
                 "agents",
                 "model",
                 "steps",
-            }
+            } <= set(entry)
             assert entry["phase_name"] == phase.name
             assert entry["model"] == STAGE_TIERS[phase.name]
             assert entry_count(entry["steps"]) == len(phase.steps)
@@ -991,6 +1175,55 @@ class TestIdempotency:
         apply_workflow(audit_carryover_plan)
         assert json.loads(json.dumps(audit_carryover_plan.to_dict())) == first
 
+    def test_guard_ignores_different_settings_on_the_second_apply(
+        self, base_plan: MachinePlan
+    ) -> None:
+        """The differentiator between a real §5.1 no-op guard and an
+        accidental fixed point.
+
+        Re-applying with the *same* inputs can pass by coincidence: a
+        stateless applier that re-derives everything from the already-shaped
+        plan may land on the same output. Re-applying with settings that
+        *would* change the output (external_command now set) can only leave
+        the plan untouched if the guard actually short-circuits.
+        """
+        apply_workflow(base_plan)
+        first = json.loads(json.dumps(base_plan.to_dict()))
+
+        apply_workflow(
+            base_plan, settings=WorkflowSettings(external_command="codex verify")
+        )
+        second = json.loads(json.dumps(base_plan.to_dict()))
+
+        assert second == first
+        assert (
+            second["plan_diagnostics"]["workflow"]
+            == first["plan_diagnostics"]["workflow"]
+        )
+
+    def test_guard_does_not_append_a_late_external_verifier(
+        self, base_plan: MachinePlan
+    ) -> None:
+        apply_workflow(base_plan)
+        apply_workflow(
+            base_plan, settings=WorkflowSettings(external_command="codex verify")
+        )
+
+        phase = phase_by_name(base_plan, "Implementation Verification")
+        assert [s.step_type for s in phase.steps] == ["reviewing"]
+        assert all(s.command == "" for s in phase.steps)
+
+    def test_guard_recomputes_decisions_from_the_shaped_plan(
+        self, base_plan: MachinePlan
+    ) -> None:
+        # §5.1: decisions are recomputed from the already-shaped plan, so they
+        # must describe the plan as it IS, not the settings just passed in.
+        apply_workflow(base_plan)
+        decisions = apply_workflow(
+            base_plan, settings=WorkflowSettings(external_command="codex verify")
+        )
+        assert decisions.external_verifier is False
+
     def test_idempotent_with_external_verifier(self, base_plan: MachinePlan) -> None:
         settings = WorkflowSettings(external_command="codex verify")
         apply_workflow(base_plan, settings=settings)
@@ -1039,6 +1272,8 @@ class TestGraphInvariants:
             "audit_carryover_plan",
             "automation_step_plan",
             "gateless_plan",
+            "auditor_in_implement_phase_plan",
+            "build_gate_plan",
         ],
     )
     def test_output_satisfies_plan_graph_invariants(

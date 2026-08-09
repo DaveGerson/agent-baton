@@ -29,6 +29,7 @@ from agent_baton.models.execution import (
     SynthesisSpec,
     TeamMember,
 )
+from agent_baton.models.knowledge import KnowledgeAttachment
 
 TASK_SUMMARY = "add rate limiting to the public API"
 
@@ -141,6 +142,17 @@ def build_base_plan() -> MachinePlan:
                         parallel_safe=True,
                         max_estimated_minutes=30,
                         mcp_servers=["postgres"],
+                        interactive=True,
+                        max_turns=4,
+                        knowledge=[
+                            KnowledgeAttachment(
+                                source="planner-matched:tag",
+                                pack_name="coding-conventions",
+                                document_name="api-conventions",
+                                path="docs/api-conventions.md",
+                                delivery="reference",
+                            )
+                        ],
                     ),
                     PlanStep(
                         step_id="2.2",
@@ -262,13 +274,33 @@ def build_team_step_plan() -> MachinePlan:
 
 
 def build_harvest_predicate_plan() -> MachinePlan:
-    """Pins the explicit-only harvest predicate (§5.2).
+    """Pins the harvest predicate and its *name normalization* (§5.2).
 
-    - ``Security Review`` → last-word key ``review`` → REVIEW → **not**
-      harvested, even though it contains a ``developing`` step.
-    - ``Fix`` and ``Build`` → IMPLEMENTATION → harvested.
-    - ``Widget Frobnication`` → unrecognized → **not** harvested (the
+    Positives — every one of these must be harvested:
+
+    - ``Fix`` / ``Build`` → IMPLEMENTATION.
+    - ``Prepare`` → PREPARATION, ``Remediate`` → REMEDIATION (the other two
+      archetypes the predicate accepts).
+    - ``Implement: API Layer`` → colon-stripped to ``implement``.
+    - ``Backend Implementation`` → last-word keyed to ``implementation``,
+      which ``ValidationStage._phase_key`` aliases to ``implement``.
+
+    The last two are the reason the predicate must *normalize* rather than do
+    an explicit full-name lookup against ``_PHASE_NAME_TO_ARCHETYPE`` — a
+    naive ``table.get(phase.name.lower())`` misses both.
+
+    Negatives:
+
+    - ``Security Review`` → last-word key ``review`` → REVIEW, even though it
+      contains a ``developing`` step.
+    - ``Widget Frobnication`` → unrecognized → not harvested (the
       ``phase_archetype`` fallback to IMPLEMENTATION must not be used).
+    - The ``planning`` step inside ``Implement: API Layer`` (step-type
+      exclusion applies *within* an implement-like phase).
+
+    ``Build``'s step also depends on ``Fix``'s step — a cross-base-phase
+    dependency between two *harvested* steps, which must be re-keyed (not
+    dropped) once both land in the flattened Implementation phase.
     """
     return make_plan(
         [
@@ -315,6 +347,7 @@ def build_harvest_predicate_plan() -> MachinePlan:
                         task_description="Compile the release artifact",
                         step_type="developing",
                         model="haiku",
+                        depends_on=["2.1"],
                     )
                 ],
             ),
@@ -326,6 +359,65 @@ def build_harvest_predicate_plan() -> MachinePlan:
                         step_id="4.1",
                         agent_name="backend-engineer",
                         task_description="Frobnicate the widget registry",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=5,
+                name="Implement: API Layer",
+                steps=[
+                    PlanStep(
+                        step_id="5.1",
+                        agent_name="architect",
+                        task_description="Draft the middleware interface",
+                        step_type="planning",
+                        model="opus",
+                    ),
+                    PlanStep(
+                        step_id="5.2",
+                        agent_name="backend-engineer",
+                        task_description="Add the throttle middleware to the API layer",
+                        step_type="developing",
+                        model="opus",
+                    ),
+                ],
+            ),
+            PlanPhase(
+                phase_id=6,
+                name="Backend Implementation",
+                steps=[
+                    PlanStep(
+                        step_id="6.1",
+                        agent_name="backend-engineer",
+                        task_description="Wire the quota store into the backend",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=7,
+                name="Prepare",
+                steps=[
+                    PlanStep(
+                        step_id="7.1",
+                        agent_name="devops-engineer",
+                        task_description="Provision the redis quota cache",
+                        step_type="developing",
+                        model="haiku",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=8,
+                name="Remediate",
+                steps=[
+                    PlanStep(
+                        step_id="8.1",
+                        agent_name="backend-engineer",
+                        task_description="Roll back the broken quota migration",
                         step_type="developing",
                         model="opus",
                     )
@@ -462,6 +554,89 @@ def build_audit_carryover_plan() -> MachinePlan:
             ),
         ],
         risk_level="CRITICAL",
+    )
+
+
+def build_auditor_in_implement_phase_plan() -> MachinePlan:
+    """An ``auditor`` step living inside a phase that IS harvested.
+
+    §5.7 scopes carryover to *non-harvested* base phases, so this plan must
+    produce no carryover at all — the auditor step is a ``reviewing`` step and
+    is simply discarded with the rest of the phase's non-harvestable work.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the retention-window enforcement",
+                        step_type="developing",
+                        model="opus",
+                    ),
+                    PlanStep(
+                        step_id="1.2",
+                        agent_name="auditor",
+                        task_description="Spot-check the retention controls inline",
+                        step_type="reviewing",
+                        model="opus",
+                    ),
+                ],
+            )
+        ]
+    )
+
+
+def build_build_gate_plan() -> MachinePlan:
+    """The only test/build gate in the plan is a ``build`` gate (§5.6).
+
+    The earlier phase carries a ``lint`` gate, so an implementation that
+    looked for ``gate_type == "test"`` alone would wrongly pick nothing (and
+    fall through to ``fallback_gate``).
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                gate=PlanGate(
+                    gate_type="lint",
+                    command="ruff check .",
+                    description="Lint the changed files.",
+                ),
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the limiter middleware",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Package",
+                gate=PlanGate(
+                    gate_type="build",
+                    command="python -m build",
+                    description="Build the wheel.",
+                    fail_on=["build failure"],
+                ),
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="devops-engineer",
+                        task_description="Cut the release wheel",
+                        step_type="task",
+                        model="haiku",
+                    )
+                ],
+            ),
+        ]
     )
 
 

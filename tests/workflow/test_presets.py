@@ -177,8 +177,9 @@ class TestAdversarialTddStageTable:
                 assert stage.harvests_implementation is False
 
     def test_last_stage_is_a_review_phase(self) -> None:
-        # §3 stage 7: "The plan's last workflow phase must be named '…Review'"
-        # — keeps validate_assembled_plan semantics happy if ever re-run.
+        # §3 stage 7 (amended): "the plan's last NON-CARRYOVER phase must be
+        # named '…Review'" — audit-carryover phases may follow it, so this
+        # invariant lives on the preset, not on the applied plan.
         assert ADVERSARIAL_TDD.stages[-1].phase_name.endswith("Review")
 
     def test_tiers_are_known_model_families(self) -> None:

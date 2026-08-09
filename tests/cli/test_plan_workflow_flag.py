@@ -19,7 +19,7 @@ from agent_baton.cli.commands import goal_cmd
 from agent_baton.cli.commands.execution import plan_cmd
 from agent_baton.models.execution import MachinePlan
 
-from tests.workflow._plans import build_base_plan
+from tests.workflow._plans import build_base_plan, build_gateless_plan
 
 STAGE_PHASE_NAMES = [
     "Brainstorm & Spec",
@@ -60,12 +60,17 @@ def _goal_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _install_stub_planner(monkeypatch: Any, captured: dict[str, Any]) -> None:
+def _install_stub_planner(
+    monkeypatch: Any,
+    captured: dict[str, Any],
+    plan_factory: Any = build_base_plan,
+) -> None:
     """Replace ``IntelligentPlanner`` with a stub returning a real base plan.
 
-    The plan is the shared Design/Implement/Test/Review fixture from
+    The default plan is the shared Design/Implement/Test/Review fixture from
     ``tests/workflow/_plans.py``, so the reshaped output exercised here is the
-    same shape the applier unit tests pin.
+    same shape the applier unit tests pin. *plan_factory* lets a test swap in
+    a different base shape (e.g. a gateless plan for the fallback-gate test).
     """
 
     class _StubPlanner:
@@ -73,7 +78,7 @@ def _install_stub_planner(monkeypatch: Any, captured: dict[str, Any]) -> None:
             pass
 
         def create_plan(self, summary: str, **kwargs: Any) -> MachinePlan:
-            plan = build_base_plan()
+            plan = plan_factory()
             plan.task_id = "task-workflow-cli"
             plan.task_summary = summary
             captured["plan"] = plan
@@ -85,12 +90,28 @@ def _install_stub_planner(monkeypatch: Any, captured: dict[str, Any]) -> None:
     monkeypatch.setattr(plan_cmd, "IntelligentPlanner", _StubPlanner)
 
 
-def _run_plan(monkeypatch: Any, tmp_path: Path, argv: list[str]) -> dict[str, Any]:
+def _run_plan(
+    monkeypatch: Any,
+    tmp_path: Path,
+    argv: list[str],
+    *,
+    plan_factory: Any = build_base_plan,
+) -> dict[str, Any]:
     monkeypatch.chdir(tmp_path)
     captured: dict[str, Any] = {}
-    _install_stub_planner(monkeypatch, captured)
+    _install_stub_planner(monkeypatch, captured, plan_factory)
     plan_cmd.handler(_build_parser().parse_args(argv))
     return captured
+
+
+def _write_baton_yaml(tmp_path: Path, text: str) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "baton.yaml").write_text(text, encoding="utf-8")
+
+
+def _phase(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(p for p in payload["phases"] if p["name"] == name)
 
 
 def _step_models(payload: dict[str, Any], phase_name: str) -> set[str]:
@@ -109,9 +130,13 @@ def _step_models(payload: dict[str, Any], phase_name: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 class TestWorkflowFlagParsing:
-    def test_default_is_unset(self) -> None:
+    def test_flag_exists_and_defaults_to_none(self) -> None:
+        # `vars()`, not getattr-with-default: the attribute must actually be
+        # declared by register(), which getattr(..., None) cannot distinguish
+        # from the flag not existing at all.
         args = _build_parser().parse_args(["plan", "do the thing"])
-        assert getattr(args, "workflow", None) is None
+        assert "workflow" in vars(args)
+        assert args.workflow is None
 
     def test_accepts_a_preset_name(self) -> None:
         args = _build_parser().parse_args(
@@ -125,29 +150,27 @@ class TestWorkflowFlagParsing:
 # ---------------------------------------------------------------------------
 
 class TestUnknownWorkflow:
-    def test_exits_with_validation_code(
+    def test_handled_error_exits_2_and_lists_available_presets(
         self, monkeypatch: Any, tmp_path: Path, capsys: Any
     ) -> None:
+        """A *handled* ``UnknownWorkflowError``, not an argparse rejection.
+
+        Exit code 2 alone proves nothing here: before ``--workflow`` exists,
+        argparse itself exits 2 with "unrecognized arguments". The message
+        assertions below are what distinguish the two — argparse never names
+        the available presets.
+        """
         with pytest.raises(SystemExit) as exc_info:
             _run_plan(
                 monkeypatch,
                 tmp_path,
                 ["plan", "do the thing", "--workflow", "no-such-workflow", "--json"],
             )
-        assert exc_info.value.code == 2
-        capsys.readouterr()
 
-    def test_error_lists_available_presets(
-        self, monkeypatch: Any, tmp_path: Path, capsys: Any
-    ) -> None:
-        with pytest.raises(SystemExit):
-            _run_plan(
-                monkeypatch,
-                tmp_path,
-                ["plan", "do the thing", "--workflow", "no-such-workflow", "--json"],
-            )
+        assert exc_info.value.code == 2
 
         stderr = capsys.readouterr().err
+        assert "unrecognized arguments" not in stderr
         assert "no-such-workflow" in stderr
         assert "adversarial-tdd" in stderr
         assert "Traceback (most recent call last)" not in stderr
@@ -302,6 +325,246 @@ class TestStagedPlanOutput:
         )
         assert saved["workflow"] == "adversarial-tdd"
         assert [p["name"] for p in saved["phases"]] == STAGE_PHASE_NAMES
+
+
+# ---------------------------------------------------------------------------
+# baton.yaml wiring (acceptance criterion #4)
+# ---------------------------------------------------------------------------
+
+class TestBatonYamlWiring:
+    """Proves ``plan_cmd`` actually calls ``load_workflow_settings``.
+
+    Every other CLI assertion here passes with hardcoded preset defaults;
+    these two only pass if project config reaches the applier.
+    """
+
+    _CONFIG = (
+        "workflow:\n"
+        "  stages:\n"
+        "    spec:\n"
+        "      model: haiku\n"
+        '  external_command: "codex verify"\n'
+    )
+
+    def _payload(self, monkeypatch: Any, tmp_path: Path, capsys: Any) -> dict[str, Any]:
+        _write_baton_yaml(tmp_path, self._CONFIG)
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            ["plan", "add rate limiting", "--workflow", "adversarial-tdd", "--json"],
+        )
+        return json.loads(capsys.readouterr().out)
+
+    def test_stage_model_override_reaches_the_plan(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        payload = self._payload(monkeypatch, tmp_path, capsys)
+        # Preset default for this stage is fable; only config can make it haiku.
+        assert _step_models(payload, "Brainstorm & Spec") == {"haiku"}
+
+    def test_external_command_reaches_the_plan(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        payload = self._payload(monkeypatch, tmp_path, capsys)
+        steps = _phase(payload, "Implementation Verification")["steps"]
+        automation = [s for s in steps if s.get("step_type") == "automation"]
+        assert len(automation) == 1
+        assert automation[0]["command"] == "codex verify"
+        assert automation[0]["agent_name"] == "task-runner"
+
+    def test_absent_config_leaves_preset_defaults(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            ["plan", "add rate limiting", "--workflow", "adversarial-tdd", "--json"],
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert _step_models(payload, "Brainstorm & Spec") == {"fable"}
+        steps = _phase(payload, "Implementation Verification")["steps"]
+        assert all(s.get("step_type") != "automation" for s in steps)
+
+
+# ---------------------------------------------------------------------------
+# fallback-gate wiring (decision #4: IO happens in the CLI, not the applier)
+# ---------------------------------------------------------------------------
+
+class TestFallbackGateWiring:
+    def test_gateless_base_plan_gets_a_gate_on_implementation(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # The applier cannot call default_gate (it does filesystem IO), so a
+        # gateless base plan only ends up gated if plan_cmd computed
+        # fallback_gate itself and passed it in.
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            ["plan", "add rate limiting", "--workflow", "adversarial-tdd", "--json"],
+            plan_factory=build_gateless_plan,
+        )
+        payload = json.loads(capsys.readouterr().out)
+
+        gate = _phase(payload, "Implementation").get("gate")
+        assert gate is not None, "plan_cmd must pass fallback_gate=default_gate(...)"
+        assert gate.get("command")
+
+
+# ---------------------------------------------------------------------------
+# --dry-run (interaction matrix: applier runs before the forecast)
+# ---------------------------------------------------------------------------
+
+class TestDryRun:
+    def test_forecast_reflects_the_reshaped_plan(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            [
+                "plan",
+                "add rate limiting",
+                "--workflow",
+                "adversarial-tdd",
+                "--dry-run",
+            ],
+        )
+        out = capsys.readouterr().out
+
+        # 7 stage phases, not the base plan's 4.
+        assert "Phases: 7" in out
+        assert "Brainstorm & Spec" in out
+        # fable-tier steps must be priced, i.e. the forecast saw the re-tiered
+        # plan rather than the pre-reshape draft.
+        assert "fable" in out
+
+    def test_dry_run_writes_nothing(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            [
+                "plan",
+                "add rate limiting",
+                "--workflow",
+                "adversarial-tdd",
+                "--dry-run",
+            ],
+        )
+        capsys.readouterr()
+        assert not (tmp_path / ".claude" / "team-context" / "plan.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# --explain renders WorkflowDecisions
+# ---------------------------------------------------------------------------
+
+class TestExplain:
+    def _explanation(self, monkeypatch: Any, tmp_path: Path, capsys: Any) -> str:
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            [
+                "plan",
+                "add rate limiting",
+                "--workflow",
+                "adversarial-tdd",
+                "--save",
+                "--explain",
+            ],
+        )
+        capsys.readouterr()
+        return (tmp_path / ".claude" / "team-context" / "explanation.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_explanation_names_the_workflow(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        assert "adversarial-tdd" in self._explanation(monkeypatch, tmp_path, capsys)
+
+    def test_explanation_renders_the_stage_table(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        explanation = self._explanation(monkeypatch, tmp_path, capsys)
+        for phase_name in STAGE_PHASE_NAMES:
+            assert phase_name in explanation, phase_name
+        for tier in ("fable", "opus", "sonnet"):
+            assert tier in explanation, tier
+
+    def test_planner_explanation_is_still_included(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        assert "stub explanation" in self._explanation(monkeypatch, tmp_path, capsys)
+
+
+# ---------------------------------------------------------------------------
+# Config-default manager mode is suppressed, not an error (interaction matrix)
+# ---------------------------------------------------------------------------
+
+class TestConfigDefaultManagerModeSuppressed:
+    _CONFIG = "manager_mode:\n  enabled_by_default: true\n"
+
+    def _run(self, monkeypatch: Any, tmp_path: Path) -> None:
+        _write_baton_yaml(tmp_path, self._CONFIG)
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            ["plan", "add rate limiting", "--workflow", "adversarial-tdd", "--save"],
+        )
+
+    def _saved(self, tmp_path: Path) -> dict[str, Any]:
+        return json.loads(
+            (tmp_path / ".claude" / "team-context" / "plan.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_does_not_error(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # Only the explicit --manager-mode + --workflow combination is fatal.
+        self._run(monkeypatch, tmp_path)
+        capsys.readouterr()
+        assert self._saved(tmp_path)["workflow"] == "adversarial-tdd"
+
+    def test_warns_that_manager_mode_was_suppressed(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        self._run(monkeypatch, tmp_path)
+        stderr = capsys.readouterr().err.lower()
+        assert "manager mode" in stderr or "manager_mode" in stderr
+        assert "workflow" in stderr
+
+    def test_plan_is_not_flagged_manager_mode(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        self._run(monkeypatch, tmp_path)
+        capsys.readouterr()
+        assert self._saved(tmp_path)["manager_mode"] is False
+
+    def test_no_adversarial_review_steps_are_injected(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # PhasePolicyApplier stamps injected reviews with a "review-" step-id
+        # prefix; decision #7 exists precisely to keep them out of the seven
+        # workflow phases (three of which already ARE reviews).
+        self._run(monkeypatch, tmp_path)
+        capsys.readouterr()
+        saved = self._saved(tmp_path)
+
+        step_ids = [s["step_id"] for p in saved["phases"] for s in p["steps"]]
+        assert not [sid for sid in step_ids if sid.startswith("review-")]
+        assert [p["name"] for p in saved["phases"]] == STAGE_PHASE_NAMES
+
+    def test_no_manager_artifacts_are_written(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        self._run(monkeypatch, tmp_path)
+        capsys.readouterr()
+        executions = tmp_path / ".claude" / "team-context" / "executions"
+        assert not list(executions.glob("*/project-charter.md"))
 
 
 # ---------------------------------------------------------------------------
