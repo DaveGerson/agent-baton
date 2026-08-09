@@ -1,6 +1,6 @@
 # agents/ — distributable agent definitions
 
-30 agent definitions installed into user projects under `.claude/agents/`. Cross-cutting rules: [../CLAUDE.md](../CLAUDE.md).
+31 agent definitions installed into user projects under `.claude/agents/`. Cross-cutting rules: [../CLAUDE.md](../CLAUDE.md).
 
 ## File format
 

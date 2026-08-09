@@ -579,3 +579,20 @@ and `agent_baton/cli/commands/diagnostics_cmd.py` +
 `agent_baton/cli/commands/knowledge/doctor_cmd.py`. Tests live in
 `tests/test_api_pmo.py`, `tests/cli/test_doctor.py`, and
 `tests/knowledge/test_knowledge_doctor.py`.
+
+## 2026-08-09 — Adversarial-TDD workflow presets (ADR-26)
+
+New `--workflow` CLI surface + `core/workflow/` package documented across
+the matrix: `docs/cli-reference.md` (flag row + Workflow presets section,
+`baton goal` passthrough row), `docs/agent-roster.md`
+(`test-adequacy-reviewer`, count 30→31), `docs/orchestrator-usage.md`
+(recipe 15), `docs/architecture/package-layout.md` (`core/workflow/`,
+`core/config/workflow.py`), `references/baton-engine.md` (plan flag
+table), `templates/baton.yaml.example` (`workflow:` section),
+`templates/playbooks/adversarial-tdd.md` (PMO gallery), root
+`CLAUDE.md`/`GEMINI.md` layout rows, `docs/design-decisions.md` ADR-26.
+Deliberately NOT modified: `templates/CLAUDE.md` (distributable artifact —
+an earlier edit was reverted). Known deferrals recorded in the design
+doc's §7 non-goals (no DB columns, no PMO-UI surface, no
+`baton workflows` command). Design doc:
+`docs/internal/adversarial-tdd-workflow-design.md` (Accepted, v2.3).

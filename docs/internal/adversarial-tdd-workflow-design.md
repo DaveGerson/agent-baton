@@ -1,6 +1,8 @@
 # Adversarial-TDD Workflow — design spec
 
-Status: v2 (amended after two independent fable-tier architecture reviews) → implementing
+Status: Accepted (v2.3 — amended through architecture review, adversarial
+test verification, independent implementation verification, and final
+review). Implemented 2026-08-09; ADR-26 in `docs/design-decisions.md`.
 Owner: maintainers
 Date: 2026-08-09
 
@@ -128,6 +130,13 @@ class StageOverride(_Section):
     agent: str | None = None
     model: Literal["haiku", "sonnet", "opus", "fable"] | None = None
 
+# Numeric settings validate ge=1. Unknown stage-id KEYS of `stages` are
+# rejected with an actionable error naming the bad key and the valid stage
+# ids (a typo like `speec:` must not silently no-op); unknown keys INSIDE a
+# StageOverride stay extra="ignore" for forward compatibility. Preset
+# registration asserts structural invariants (non-empty stages, exactly one
+# harvesting stage, last stage is the fan-out review stage).
+
 class WorkflowSettings(_Section):
     stages: dict[str, StageOverride] = {}
     external_command: str = ""
@@ -210,11 +219,21 @@ class WorkflowApplier:
    `depends_on` references member ids, so re-keying is not free; v1 keeps
    them stable).
 6. **Gates**: the Implementation phase gets the first test/build gate found
-   on any base phase, else `fallback_gate` (may be None). Final Review
-   `approval_required` = OR of all base phases' `approval_required`.
+   on any **non-carryover** base phase, else `fallback_gate` (may be None) —
+   carryover phases keep their own gates and must not be aliased/double-run.
+   Final Review `approval_required` = OR of all **non-carryover** base
+   phases' `approval_required` (carryover phases keep their own approvals;
+   no double sign-off from a single source).
 7. **Audit carryover**: per §3 — non-harvested base phases containing an
    `auditor` step are appended after Final Review, fully preserved,
-   renumbered, steps stamped `workflow_stage="carryover"`.
+   renumbered, steps stamped `workflow_stage="carryover"`. Carryover steps'
+   `depends_on` are re-keyed intra-phase and dropped otherwise, exactly as
+   for harvested steps (a verbatim old id would silently point at a
+   reshaped stage phase, or fail plan-load validation). Ruling: an
+   `auditor` step *inside* a harvested implementation-like phase is
+   excluded by the §5.2 step filter and is NOT carried over — dedicated
+   Audit phases are the carryover unit; inline audit work is re-covered by
+   the verification and final-review stages.
 8. **Final-review fan-out**: implementation units =
    Σ over harvested steps of `max(1, len(step.team))`. Reviewer count =
    `min(final_review_max_reviewers, max(1, ceil(units / final_review_fanout_divisor)))`

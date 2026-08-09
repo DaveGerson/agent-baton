@@ -22,9 +22,9 @@ excluded_paths:
 # command runs as an engine automation step in Implementation
 # Verification (plug in any CLI: gemini, codex, a script).
 workflow:
-  stages:
-    final_review: {model: opus}
-    implementation_verification: {agent: security-reviewer}
+  # stages:
+  #   final_review: {model: opus}
+  #   implementation_verification: {agent: security-reviewer}
   external_command: ""
   external_timeout_seconds: 1800
   final_review_fanout_divisor: 4

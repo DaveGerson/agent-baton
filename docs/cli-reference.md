@@ -84,7 +84,7 @@ baton plan SUMMARY [options]
 | `--max-amend-cycles N` | No | `3` | Goal round-out budget (meaningful only with `--goal`). |
 | `--workflow NAME` | No | -- | Reshape the plan into a named delivery-workflow preset after planning. Built-in: `adversarial-tdd`. Mutually exclusive with `--manager-mode` and `--import`. See [Workflow presets](#workflow-presets) below. |
 
-**Workflow presets:**
+#### Workflow presets
 
 `--workflow adversarial-tdd` reshapes the assembled plan into a staged, model-tiered, adversarially verified TDD pipeline: Brainstorm & Spec (`architect`, fable) → Architecture (`architect`, fable) → Test Authoring (`test-engineer`, opus) → Test Verification (`test-adequacy-reviewer`, opus; scoped to spec + tests only) → Implementation (the base plan's implement steps, re-tiered to sonnet, gated on the stack test command) → Implementation Verification (`code-reviewer`, opus; optional external-vendor automation step) → Final Review (`code-reviewer`, fable; fans out to up to 3 reviewers for large slices). Base Audit phases containing `auditor` steps are carried over after Final Review, so regulated-domain coverage survives the reshape.
 
@@ -101,7 +101,7 @@ workflow:
   final_review_max_reviewers: 3
 ```
 
-Notes: `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
+Notes: `external_timeout_seconds` is stamped onto the automation step for forward-compatibility, but the v1 automation runner in `baton execute run` caps commands at 300s — budget external verifiers accordingly. `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
 
 **Manager mode:**
 
@@ -155,6 +155,7 @@ baton goal CONDITION [options]
 |----------|----------|---------|-------------|
 | `CONDITION` | Yes | -- | A single quoted sentence describing what "done" means |
 | `--max-amend-cycles N` | No | `3` | Maximum goal-driven round-out cycles |
+| `--workflow NAME` | No | -- | Passed through to `baton plan` — reshape the goal plan into a named workflow preset (see [Workflow presets](#workflow-presets)). |
 | `--task-type TYPE` | No | auto | Passed through to `baton plan` |
 | `--complexity LEVEL` | No | auto | `light` / `medium` / `heavy` |
 | `--project PATH` | No | cwd | Project root |

@@ -1349,3 +1349,49 @@ work, in the same file the registry actually reads.
 
 **Status**: Implemented (2026-07-02). Design doc:
 `docs/internal/manager-mode-pmo-design.md`.
+
+## ADR-26: Workflow Presets — Named Delivery Workflows as a Plan Post-Processor
+
+**Decision**: Ship named delivery-workflow presets
+(`agent_baton/core/workflow/`) as a **post-processor** over the assembled
+`MachinePlan`, selected via `baton plan --workflow NAME` — following
+ADR-25's post-processor pattern rather than adding pipeline stages or a
+fourth planning archetype. A preset (`WorkflowPreset` in `presets.py`) is
+pure data: an ordered tuple of stages, each carrying a phase name, default
+agent, model tier, step type, and briefing template. `WorkflowApplier`
+(`applier.py`) reshapes the planned phases into the preset's stage
+sequence: it harvests the base plan's implementation-like steps (explicit
+phase-name→archetype keying only — IMPLEMENTATION/PREPARATION/REMEDIATION,
+never the unrecognized-name fallback), preserves their fields while
+re-tiering `step.model` (and team members, recursively), moves the first
+test/build gate onto the Implementation phase, ORs approvals onto the
+final review, carries over non-harvested Audit phases verbatim, fans the
+final review out by dispatch units, and appends an optional
+external-vendor automation step (`workflow.external_command` in
+`baton.yaml` — how gemini/codex CLI verifiers plug in without a vendor
+abstraction).
+
+**Model tiers ride the existing seam**: `PlanStep.model` already flows
+verbatim into DISPATCH's `agent_model` and the `Model:` protocol line, so
+per-stage tiers (including `fable`, which agent frontmatter validation
+does not yet accept) require zero protocol or engine changes. Stamping
+happens post-pipeline, which wins over the enrichment stage's
+frontmatter-model overwrite without touching planner precedence.
+
+**Two declared plan fields, lossy DB**: `MachinePlan.workflow` and
+`PlanStep.workflow_stage` are declared model fields with conditional
+`to_dict()` emission (absent when empty — golden fixtures unchanged).
+The column-mapped SQLite copy does not persist them in v1; `plan.json`
+is canonical.
+
+**Built-in preset**: `adversarial-tdd` — Brainstorm & Spec (architect,
+fable) → Architecture (architect, fable) → Test Authoring (test-engineer,
+opus) → Test Verification (test-adequacy-reviewer, opus; spec+tests-only
+scope) → Implementation (harvested steps, sonnet) → Implementation
+Verification (code-reviewer, opus) → Final Review (code-reviewer, fable,
+fan-out). v1 constraints: mutually exclusive with `--manager-mode` and
+`--import`; config-default manager mode is suppressed with a warning;
+composes with `--goal`.
+
+**Status**: Implemented (2026-08-09). Design doc:
+`docs/internal/adversarial-tdd-workflow-design.md`.

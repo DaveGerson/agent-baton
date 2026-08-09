@@ -60,7 +60,7 @@ When the `orchestrator` agent is invoked:
 
 ## Agent roster
 
-See [docs/agent-roster.md](docs/agent-roster.md) (30 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
+See [docs/agent-roster.md](docs/agent-roster.md) (31 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
 
 ## Code navigation
 

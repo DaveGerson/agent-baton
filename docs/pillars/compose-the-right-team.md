@@ -50,7 +50,7 @@ already equipped.
 
 ### The 30 shipping agents
 
-`scripts/install.sh` installs **30 agent definitions** from `agents/` into
+`scripts/install.sh` installs **31 agent definitions** from `agents/` into
 `.claude/agents/` (project scope) or `~/.claude/agents/` (user scope). The
 `agents/CLAUDE.md` confirms the count; `baton agents` shows them at runtime,
 grouped by category.
