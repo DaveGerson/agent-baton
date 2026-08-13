@@ -633,19 +633,24 @@ class TestTeamSteps:
         apply_workflow(team_step_plan)
         team_steps = [s for s in implementation_steps(team_step_plan) if s.team]
         assert len(team_steps) == 1
-        # §5.5 ruling: member_id values are preserved VERBATIM — they are not
-        # re-keyed to the renumbered step id, because member `depends_on`
-        # references member ids and re-keying is not free. So these still read
-        # "1.1.a"/"1.1.b" even though the step itself is renumbered.
-        assert [m.member_id for m in team_steps[0].team] == ["1.1.a", "1.1.b"]
+        # §5.5 (amended): member ids FOLLOW the renumbered step id. The engine
+        # derives a member's parent step from the id prefix
+        # (`_validators.parent_step_id`), so stale member ids would make
+        # DISPATCH print the wrong `Parent-Step:` / `Record-With:` lines. See
+        # TestTeamMemberRekeying in test_applier_defects.py.
+        step = team_steps[0]
+        assert [m.member_id for m in step.team] == [
+            f"{step.step_id}.a",
+            f"{step.step_id}.b",
+        ]
 
-    def test_nested_member_ids_are_also_preserved(
+    def test_nested_member_ids_are_also_rekeyed(
         self, team_step_plan: MachinePlan
     ) -> None:
         apply_workflow(team_step_plan)
         step = next(s for s in implementation_steps(team_step_plan) if s.team)
         lead = next(m for m in step.team if m.role == "lead")
-        assert [m.member_id for m in lead.sub_team] == ["1.1.a.i"]
+        assert [m.member_id for m in lead.sub_team] == [f"{step.step_id}.a.i"]
 
     def test_team_member_models_are_retiered(self, team_step_plan: MachinePlan) -> None:
         apply_workflow(team_step_plan)

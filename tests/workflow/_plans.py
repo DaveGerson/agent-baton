@@ -907,3 +907,507 @@ def build_audit_carryover_only_gate_plan() -> MachinePlan:
             ),
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression fixtures (see test_applier_defects.py)
+# ---------------------------------------------------------------------------
+
+def build_renumbered_team_step_plan() -> MachinePlan:
+    """A team step that the reshape *renumbers* -- base ``3.1`` becomes ``5.2``.
+
+    The engine derives a team member's parent step from the member-id prefix
+    (``execute.py`` / ``_validators.parent_step_id``), so a member left at
+    ``3.1.a`` after its step moved to ``5.2`` makes DISPATCH advertise
+    ``Parent-Step: 3.1`` -- an id that in this very plan belongs to a
+    *different* base phase's step. Two harvestable phases guarantee the team
+    step does not land back on its original number.
+
+    Members also carry an intra-team ``depends_on`` (``3.1.b`` -> ``3.1.a``)
+    that must be remapped through the same old->new member map.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Design",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="architect",
+                        task_description="Sketch the limiter design",
+                        step_type="planning",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Prepare",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="devops-engineer",
+                        task_description="Provision the redis quota cache",
+                        step_type="developing",
+                        model="haiku",
+                        allowed_paths=["deploy/redis.yaml"],
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=3,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="3.1",
+                        agent_name="team",
+                        task_description="Team implementation: limiter core; client wiring",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/api/"],
+                        synthesis=SynthesisSpec(strategy="concatenate"),
+                        team=[
+                            TeamMember(
+                                member_id="3.1.a",
+                                agent_name="backend-engineer",
+                                role="lead",
+                                task_description="Own the limiter core",
+                                model="opus",
+                                sub_team=[
+                                    TeamMember(
+                                        member_id="3.1.a.i",
+                                        agent_name="data-engineer",
+                                        role="implementer",
+                                        task_description="Model the quota store",
+                                        model="haiku",
+                                    )
+                                ],
+                            ),
+                            TeamMember(
+                                member_id="3.1.b",
+                                agent_name="frontend-engineer",
+                                role="implementer",
+                                task_description="Wire the quota banner",
+                                model="haiku",
+                                depends_on=["3.1.a"],
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+def build_team_consolidated_audit_plan() -> MachinePlan:
+    """An Audit phase after ``ValidationStage._consolidate_team`` ran.
+
+    ``consolidate_team_step()`` folds the phase's steps into ONE step with
+    ``agent_name="team"``; the ``auditor`` survives only as a
+    :class:`TeamMember`. A carryover test that looks at ``step.agent_name``
+    alone sees no auditor and silently drops the phase -- the regulated-domain
+    hard gate's mandated audit work vanishes with no warning.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Implement the ledger export module",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/ledger/export.py"],
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Audit",
+                approval_required=True,
+                approval_description="Compliance officer sign-off required.",
+                gate=PlanGate(
+                    gate_type="review",
+                    command="baton evidence verify",
+                    description="Verify the evidence bundle.",
+                ),
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="team",
+                        task_description=(
+                            "Team implementation: Audit the SOX compliance "
+                            "controls; Gather the retention evidence"
+                        ),
+                        step_type="developing",
+                        model="opus",
+                        team=[
+                            TeamMember(
+                                member_id="2.1.a",
+                                agent_name="auditor",
+                                role="lead",
+                                task_description="Audit the SOX compliance controls",
+                                model="opus",
+                            ),
+                            TeamMember(
+                                member_id="2.1.b",
+                                agent_name="compliance-analyst",
+                                role="implementer",
+                                task_description="Gather the retention evidence",
+                                model="opus",
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        ],
+        risk_level="CRITICAL",
+    )
+
+
+def build_nested_team_consolidated_audit_plan() -> MachinePlan:
+    """Same as :func:`build_team_consolidated_audit_plan`, but the ``auditor``
+    sits in a lead's ``sub_team`` -- detection must recurse."""
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Implement the ledger export module",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Compliance Sweep",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="team",
+                        task_description="Team review of the SOX controls",
+                        step_type="reviewing",
+                        model="opus",
+                        team=[
+                            TeamMember(
+                                member_id="2.1.a",
+                                agent_name="subject-matter-expert",
+                                role="lead",
+                                task_description="Frame the SOX control set",
+                                model="opus",
+                                sub_team=[
+                                    TeamMember(
+                                        member_id="2.1.a.i",
+                                        agent_name="auditor",
+                                        role="implementer",
+                                        task_description=(
+                                            "Audit the SOX compliance controls"
+                                        ),
+                                        model="opus",
+                                    )
+                                ],
+                            )
+                        ],
+                    )
+                ],
+            ),
+        ],
+        risk_level="CRITICAL",
+    )
+
+
+def build_mixed_audit_phase_plan() -> MachinePlan:
+    """Compound-task shape: NO phase name maps to a harvest archetype, and the
+    concern-expanded ``Audit`` phase holds an ``auditor`` step *next to* a
+    ``developing`` step.
+
+    Fallback (a) used to harvest that ``developing`` step, which then made the
+    Audit phase "partly harvested" and therefore ineligible for carryover --
+    the ``auditor`` disappeared with no warning and ``carried_over_phases``
+    came back empty.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Refactor",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Extract the ledger export helpers",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/ledger/helpers.py"],
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Audit",
+                approval_required=True,
+                approval_description="Compliance officer sign-off required.",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="auditor",
+                        task_description="Audit the SOX compliance controls",
+                        step_type="reviewing",
+                        model="opus",
+                        deliverables=["audit memo"],
+                    ),
+                    PlanStep(
+                        step_id="2.2",
+                        agent_name="backend-engineer",
+                        task_description="Wire the SOX control instrumentation",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/ledger/controls.py"],
+                    ),
+                ],
+            ),
+            PlanPhase(
+                phase_id=3,
+                name="Review",
+                steps=[
+                    PlanStep(
+                        step_id="3.1",
+                        agent_name="code-reviewer",
+                        task_description="Review the ledger slice",
+                        step_type="reviewing",
+                        model="opus",
+                    )
+                ],
+            ),
+        ],
+        risk_level="CRITICAL",
+    )
+
+
+def build_audit_only_qualifying_phase_plan() -> MachinePlan:
+    """An implementation-named phase whose ONLY step is an ``auditor`` step.
+
+    The phase qualifies for harvest by name but contributes nothing, so it
+    must still be carried over (never silently discarded) -- carryover keys on
+    "did this phase actually contribute a harvested step", not on the name.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Implement the ledger export module",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Compliance Implementation",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="auditor",
+                        task_description="Audit the SOX compliance controls",
+                        step_type="reviewing",
+                        model="opus",
+                    )
+                ],
+            ),
+        ],
+        risk_level="CRITICAL",
+    )
+
+
+def build_multi_base_phase_ordering_plan() -> MachinePlan:
+    """PREPARATION + IMPLEMENTATION + REMEDIATION phases, each harvestable.
+
+    Flattened into one Implementation phase they became a single
+    dependency-free wave: the "Prepare: Migration Safety" step was
+    dispatchable concurrently with the implement steps it must precede
+    (``baton execute next --all`` fires them together). The two Implement
+    steps have disjoint ``allowed_paths`` and identical (empty) deps, so
+    intra-phase parallelism must survive the fix.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Prepare: Migration Safety",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="devops-engineer",
+                        task_description="Snapshot the quota tables before migrating",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["ops/snapshots.py"],
+                        parallel_safe=True,
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the token-bucket limiter",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["app/api/limiter.py"],
+                        parallel_safe=True,
+                    ),
+                    PlanStep(
+                        step_id="2.2",
+                        agent_name="frontend-engineer",
+                        task_description="Surface quota headers in the client",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["web/src/limits.ts"],
+                        parallel_safe=True,
+                    ),
+                ],
+            ),
+            PlanPhase(
+                phase_id=3,
+                name="Remediate",
+                steps=[
+                    PlanStep(
+                        step_id="3.1",
+                        agent_name="backend-engineer",
+                        task_description="Roll back the broken quota migration",
+                        step_type="developing",
+                        model="opus",
+                        allowed_paths=["migrations/rollback.py"],
+                        parallel_safe=True,
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+def build_dropped_developing_step_plan() -> MachinePlan:
+    """A ``developing`` step inside a non-harvestable "Synthesize" phase, next
+    to a real Implement phase.
+
+    The primary harvest succeeds (so fallback (a) never runs), which means the
+    Synthesize phase's ``developing`` step is silently discarded. §5.3 allows
+    the discard -- it must not be *invisible*.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Add the token-bucket limiter",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Synthesize",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="data-engineer",
+                        task_description="Merge the quota telemetry streams",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+        ]
+    )
+
+
+def build_carryover_team_step_plan() -> MachinePlan:
+    """A carryover-eligible Audit phase whose step is a team step.
+
+    Carryover steps are renumbered exactly like harvested ones (base ``2.1``
+    -> ``8.1`` after the seven preset stages), so their member ids carry the
+    same stale-prefix hazard. Real ``baton plan`` repro: the compound
+    "(1) Implement ... (2) Audit ..., working together as a pair" task, whose
+    Audit phase is team-consolidated by ``ValidationStage._consolidate_team``.
+    """
+    return make_plan(
+        [
+            PlanPhase(
+                phase_id=1,
+                name="Implement",
+                steps=[
+                    PlanStep(
+                        step_id="1.1",
+                        agent_name="backend-engineer",
+                        task_description="Implement the ledger export module",
+                        step_type="developing",
+                        model="opus",
+                    )
+                ],
+            ),
+            PlanPhase(
+                phase_id=2,
+                name="Audit",
+                approval_required=True,
+                approval_description="Compliance officer sign-off required.",
+                steps=[
+                    PlanStep(
+                        step_id="2.1",
+                        agent_name="team",
+                        task_description="Team audit of the SOX controls",
+                        step_type="developing",
+                        model="opus",
+                        team=[
+                            TeamMember(
+                                member_id="2.1.a",
+                                agent_name="auditor",
+                                role="lead",
+                                task_description="Audit the SOX compliance controls",
+                                model="opus",
+                                sub_team=[
+                                    TeamMember(
+                                        member_id="2.1.a.i",
+                                        agent_name="compliance-analyst",
+                                        role="implementer",
+                                        task_description="Gather the retention evidence",
+                                        model="opus",
+                                    )
+                                ],
+                            ),
+                            TeamMember(
+                                member_id="2.1.b",
+                                agent_name="code-reviewer",
+                                role="implementer",
+                                task_description="Read the control implementation",
+                                model="opus",
+                                depends_on=["2.1.a"],
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        ],
+        risk_level="CRITICAL",
+    )

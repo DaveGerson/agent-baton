@@ -38,6 +38,7 @@ _UNRETIERED_STEP_TYPES = {"automation", "task"}
 _GATE_TYPES_THAT_MOVE = {"test", "build"}
 _IMPLEMENT_FALLBACK_AGENT = "backend-engineer"
 _CARRYOVER_STAGE_ID = "carryover"
+_AUDITOR_AGENT = "auditor"
 
 # §3 Notes ("Research support"): every applier-created stage briefing states
 # that the orchestrator may dispatch sonnet general-purpose/domain agents for
@@ -50,6 +51,18 @@ _RESEARCH_SUPPORT_NOTE = (
 )
 
 
+class WorkflowReshapeError(RuntimeError):
+    """The reshaped plan violates :class:`MachinePlan`'s own invariants.
+
+    Raised by :meth:`WorkflowApplier.apply` (§5.12) instead of letting a
+    structurally invalid ``plan.json`` reach disk and die much later at
+    ``baton execute start``. Engine-errors style, local to this module for
+    the same reason ``UnknownWorkflowError`` lives in
+    ``core/workflow/presets.py`` (design decision #11: ``core/`` cannot
+    import ``cli/errors.BatonError``).
+    """
+
+
 @dataclass
 class WorkflowDecisions:
     """Pure summary of one :meth:`WorkflowApplier.apply` call.
@@ -58,6 +71,12 @@ class WorkflowDecisions:
     model, steps}`` — ``model`` is the EFFECTIVE tier (after
     :class:`WorkflowSettings` overrides), ``agents`` is the list of distinct
     agent names dispatched in that phase, and ``steps`` is the step count.
+
+    ``dropped_steps`` records every base step the reshape discarded (§5.3) —
+    neither harvested nor carried over — so the drop is visible in
+    ``--explain`` and in ``plan_diagnostics["workflow"]`` instead of being
+    silent. ``warnings`` carries human-readable notes about drops that
+    deserve attention (today: dropped ``auditor`` work).
     """
 
     workflow: str
@@ -66,6 +85,8 @@ class WorkflowDecisions:
     final_review_reviewers: int = 0
     external_verifier: bool = False
     carried_over_phases: list[str] = field(default_factory=list)
+    dropped_steps: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +96,8 @@ class WorkflowDecisions:
             "final_review_reviewers": self.final_review_reviewers,
             "external_verifier": self.external_verifier,
             "carried_over_phases": list(self.carried_over_phases),
+            "dropped_steps": [dict(entry) for entry in self.dropped_steps],
+            "warnings": list(self.warnings),
         }
 
 
@@ -100,27 +123,45 @@ def _phase_qualifies_for_harvest(phase: PlanPhase) -> bool:
     return archetype in _HARVEST_ARCHETYPES
 
 
-def _harvest_steps(phases: list[PlanPhase]) -> list[PlanStep]:
-    """§5.2: harvest implementation-like steps, with fallbacks (a)/(b).
+def _primary_harvest(phases: list[PlanPhase]) -> tuple[list[PlanStep], set[int]]:
+    """§5.2 primary predicate: harvest from implementation-like phases.
 
-    Fallback (a) (amended) fires whenever the primary predicate yields no
-    harvested steps at all -- either because no phase qualifies, OR because
-    every qualifying phase's steps are all excluded step types (e.g. a
-    qualifying "Implementation" phase containing only a reviewing step).
-    Gated on ``not harvested``, not on ``not qualifying``.
+    Returns ``(steps, contributing_phase_object_ids)``. The second element
+    is what separates "this phase is a harvest source" from "this phase
+    merely *looks* implementation-like but gave us nothing" — carryover
+    eligibility keys on it (see :func:`_carryover_candidates`).
     """
-    qualifying = [p for p in phases if _phase_qualifies_for_harvest(p)]
     harvested: list[PlanStep] = []
-    for phase in qualifying:
+    contributed: set[int] = set()
+    for phase in phases:
+        if not _phase_qualifies_for_harvest(phase):
+            continue
         for step in phase.steps:
             if step.step_type not in _EXCLUDED_HARVEST_STEP_TYPES:
                 harvested.append(step)
-    if not harvested:
-        # Fallback (a): harvest every "developing" step anywhere in the plan.
-        for phase in phases:
-            for step in phase.steps:
-                if step.step_type == "developing":
-                    harvested.append(step)
+                contributed.add(id(phase))
+    return harvested, contributed
+
+
+def _fallback_developing_harvest(
+    phases: list[PlanPhase], protected_phase_ids: set[int]
+) -> list[PlanStep]:
+    """§5.2 fallback (a): harvest every ``developing`` step anywhere — except
+    inside a carryover-eligible (auditor-bearing) phase.
+
+    The exclusion is the fix for the "mixed phase loses its auditor" defect:
+    fallback (a) used to strip the ``developing`` step out of an Audit phase,
+    which then made the whole phase ineligible for carryover, silently
+    dropping the ``auditor`` step the regulated-domain gate mandated.
+    Carryover preserves such a phase *whole*, developing step included.
+    """
+    harvested: list[PlanStep] = []
+    for phase in phases:
+        if id(phase) in protected_phase_ids:
+            continue
+        for step in phase.steps:
+            if step.step_type == "developing":
+                harvested.append(step)
     return harvested
 
 
@@ -136,15 +177,51 @@ def _synthesize_fallback_step(plan: MachinePlan, model: str) -> PlanStep:
     )
 
 
-def _carryover_phases(phases: list[PlanPhase], harvested_ids: set[str]) -> list[PlanPhase]:
-    """§5.7: non-harvested base phases containing at least one auditor step."""
-    result: list[PlanPhase] = []
-    for phase in phases:
-        if any(step.step_id in harvested_ids for step in phase.steps):
-            continue
-        if any(step.agent_name.split("--")[0] == "auditor" for step in phase.steps):
-            result.append(phase)
-    return result
+def _is_auditor_agent(agent_name: str) -> bool:
+    return (agent_name or "").split("--")[0] == _AUDITOR_AGENT
+
+
+def _team_has_auditor(members: list[TeamMember]) -> bool:
+    return any(
+        _is_auditor_agent(member.agent_name) or _team_has_auditor(member.sub_team)
+        for member in members
+    )
+
+
+def _step_has_auditor(step: PlanStep) -> bool:
+    """True when *step* dispatches an ``auditor`` — directly OR as a member of
+    its team (recursively through ``sub_team``).
+
+    ``ValidationStage._consolidate_team`` folds a multi-step phase into a
+    single ``agent_name="team"`` step whose members carry the real agent
+    names, so an Audit phase that went through consolidation has NO step-level
+    ``auditor`` at all. Testing ``step.agent_name`` alone silently dropped
+    those phases from carryover.
+    """
+    return _is_auditor_agent(step.agent_name) or _team_has_auditor(step.team)
+
+
+def _phase_has_auditor(phase: PlanPhase) -> bool:
+    return any(_step_has_auditor(step) for step in phase.steps)
+
+
+def _carryover_candidates(
+    phases: list[PlanPhase], contributing_phase_ids: set[int]
+) -> list[PlanPhase]:
+    """§5.7: auditor-bearing base phases that are not a harvest *source*.
+
+    Computed BEFORE fallback harvesting so an auditor-bearing phase can be
+    protected from it (§5.2 fallback (a)). Keying on "did this phase actually
+    contribute a harvested step" (rather than "does its name look
+    implementation-like") keeps the §5.7 ruling intact — an ``auditor`` step
+    inside a harvested implementation-like phase is not carried over — while
+    still preserving an implementation-named phase that yielded nothing.
+    """
+    return [
+        phase
+        for phase in phases
+        if id(phase) not in contributing_phase_ids and _phase_has_auditor(phase)
+    ]
 
 
 def _first_moveable_gate(phases: list[PlanPhase]) -> PlanGate | None:
@@ -168,6 +245,157 @@ def _retier_team(members: list[TeamMember], model: str) -> None:
         member.model = model
         if member.sub_team:
             _retier_team(member.sub_team, model)
+
+
+def _member_suffix(index: int) -> str:
+    """Positional member suffix, mirroring the engine's own renumbering
+    (``ExecutionEngine._renumber_phases``: ``chr(97 + i)``). Falls back to a
+    numeric suffix past 26 members so ids stay unique and printable."""
+    return chr(97 + index) if index < 26 else f"m{index + 1}"
+
+
+def _rekey_team_member_ids(
+    members: list[TeamMember],
+    old_prefix: str,
+    new_prefix: str,
+    mapping: dict[str, str],
+) -> None:
+    """Re-key ``member_id`` values under *new_prefix*, recording old→new in
+    *mapping* (recursing into ``sub_team``).
+
+    Member ids are NOT decoration: ``execute.py`` derives a team member's
+    parent step from the id prefix (``".".join(step_id.split(".")[:2])``, cf.
+    ``_validators.parent_step_id``), so a harvested step renumbered ``3.1``
+    → ``5.2`` whose members still read ``3.1.a`` makes DISPATCH print
+    ``Parent-Step: 3.1`` — which either hard-errors ("not a team step") or
+    attaches the result to whatever unrelated step now owns ``3.1``, leaving
+    the real phase to re-dispatch forever. This mirrors the engine's own
+    ``_renumber_phases``, which re-keys member ids for exactly this reason.
+
+    The original suffix is preserved when the member id is prefixed by the
+    step's old id (the planner's convention, including nested forms like
+    ``3.1.a.i``); otherwise a positional suffix is assigned.
+    """
+    for index, member in enumerate(members):
+        old_id = member.member_id
+        if old_prefix and old_id.startswith(f"{old_prefix}."):
+            new_id = f"{new_prefix}{old_id[len(old_prefix):]}"
+        else:
+            new_id = f"{new_prefix}.{_member_suffix(index)}"
+        mapping[old_id] = new_id
+        member.member_id = new_id
+        if member.sub_team:
+            _rekey_team_member_ids(member.sub_team, old_id, new_id, mapping)
+
+
+def _remap_team_dependencies(
+    members: list[TeamMember], mapping: dict[str, str]
+) -> None:
+    """Re-key intra-team ``depends_on`` through *mapping*, dropping references
+    that do not resolve (same rule the step-level remap uses)."""
+    for member in members:
+        member.depends_on = [
+            mapping[dep] for dep in member.depends_on if dep in mapping
+        ]
+        if member.sub_team:
+            _remap_team_dependencies(member.sub_team, mapping)
+
+
+def _rekey_team(step: PlanStep, old_step_id: str, new_step_id: str) -> None:
+    """Re-key *step*'s whole team tree onto *new_step_id* and remap member
+    ``depends_on`` through the same old→new map."""
+    mapping: dict[str, str] = {}
+    _rekey_team_member_ids(step.team, old_step_id, new_step_id, mapping)
+    _remap_team_dependencies(step.team, mapping)
+
+
+# ---------------------------------------------------------------------------
+# Base-phase ordering preservation (flatten sequencing)
+# ---------------------------------------------------------------------------
+
+def _origin_index(phases: list[PlanPhase]) -> dict[int, int]:
+    """``id(step) -> index of the base phase that contained it``."""
+    index: dict[int, int] = {}
+    for position, phase in enumerate(phases):
+        for step in phase.steps:
+            index[id(step)] = position
+    return index
+
+
+def _origin_groups(
+    harvested: list[PlanStep], origin: dict[int, int]
+) -> list[list[int]]:
+    """Group harvested-step positions by their originating base phase,
+    preserving harvest order (which is base-phase order)."""
+    groups: list[list[int]] = []
+    previous: object = object()
+    for position, step in enumerate(harvested):
+        key: object = origin.get(id(step), -1)
+        if not groups or key != previous:
+            groups.append([])
+            previous = key
+        groups[-1].append(position)
+    return groups
+
+
+def _apply_phase_ordering(
+    harvested: list[PlanStep], new_ids: list[str], origin: dict[int, int]
+) -> set[str]:
+    """Preserve base-phase ordering across the flatten (§5.4).
+
+    Merging PREPARATION + IMPLEMENTATION + REMEDIATION phases into ONE
+    Implementation phase turns previously phase-ordered steps into a single
+    dependency-free wave — a "Prepare: Migration Safety" step becomes
+    concurrently dispatchable with the implement steps it was meant to
+    precede. Each later origin-phase group therefore gains a ``depends_on``
+    edge onto the previous group's steps; intra-group parallelism is
+    untouched, and edges already present are not duplicated.
+
+    Returns the new step ids that received an edge.
+    """
+    groups = _origin_groups(harvested, origin)
+    touched: set[str] = set()
+    for group_position in range(1, len(groups)):
+        prior_ids = [new_ids[i] for i in groups[group_position - 1]]
+        for i in groups[group_position]:
+            step = harvested[i]
+            added = [dep for dep in prior_ids if dep not in step.depends_on]
+            if added:
+                step.depends_on = list(step.depends_on) + added
+                touched.add(new_ids[i])
+    return touched
+
+
+def _demote_stale_parallel_safe(
+    harvested: list[PlanStep], new_ids: list[str], touched: set[str]
+) -> None:
+    """Clear ``parallel_safe`` on steps whose ordering we just constrained and
+    which no longer satisfy the planner's own predicate
+    (``strategies.annotate_parallel_safe``): a same-``depends_on`` sibling
+    with a non-empty, disjoint ``allowed_paths`` set.
+
+    Only ever demotes — a step the planner refused to call parallel-safe is
+    never promoted here. Keeps ``plan.md``'s "(parallel)" rendering truthful
+    for steps that are now sequenced behind an earlier base phase.
+    """
+    dep_sets = [frozenset(step.depends_on) for step in harvested]
+    for position, step in enumerate(harvested):
+        if new_ids[position] not in touched or not step.parallel_safe:
+            continue
+        siblings = [
+            other
+            for other_position, other in enumerate(harvested)
+            if other_position != position
+            and dep_sets[other_position] == dep_sets[position]
+        ]
+        my_paths = set(step.allowed_paths)
+        if (
+            not my_paths
+            or not siblings
+            or any(not other.allowed_paths for other in siblings)
+            or not all(my_paths.isdisjoint(other.allowed_paths) for other in siblings)
+        ):
+            step.parallel_safe = False
 
 
 def _step_units(step: PlanStep) -> int:
@@ -240,6 +468,36 @@ def _contiguous_partition(n_items: int, n_groups: int) -> list[tuple[int, int]]:
         ranges.append((start, end))
         start = end
     return ranges
+
+
+# ---------------------------------------------------------------------------
+# Output validation (§5.12)
+# ---------------------------------------------------------------------------
+
+def _validate_reshaped_plan(plan: MachinePlan, preset: WorkflowPreset) -> None:
+    """Re-run :class:`MachinePlan`'s validators over the reshaped *plan*.
+
+    ``MachinePlan`` sets ``validate_assignment=False`` (dataclass mutation
+    semantics), so reshaping in place never re-triggers the plan-graph
+    validator. A round-trip through ``from_dict(to_dict())`` is the cheapest
+    honest re-check: it re-runs uniqueness, non-empty-``agent_name`` and
+    forward-reference invariants over exactly the structure that will be
+    written to ``plan.json``.
+
+    Raises :class:`WorkflowReshapeError` — a violation here is an applier or
+    config bug, never a plan-content problem the user can fix in the task
+    description.
+    """
+    try:
+        MachinePlan.from_dict(plan.to_dict())
+    except Exception as exc:  # pydantic ValidationError / ValueError
+        raise WorkflowReshapeError(
+            f"WorkflowApplier produced an invalid plan for preset "
+            f"{preset.name!r}: {exc}. This is an applier or workflow-config "
+            "bug -- check `workflow.stages.<stage_id>.agent` overrides in "
+            "baton.yaml (an empty agent name cannot be dispatched) and the "
+            "preset's stage table."
+        ) from exc
 
 
 class WorkflowApplier:
@@ -324,6 +582,20 @@ class WorkflowApplier:
                     step.step_type == "automation" for step in phase.steps
                 )
 
+        # Discarded base steps cannot be re-derived from the shaped plan --
+        # they are gone. They ARE part of the shaped plan's own record, so
+        # read them back from plan_diagnostics (a read, not a write: the §5.1
+        # zero-write contract is intact) rather than reporting an empty list
+        # that would contradict the first apply's decisions.
+        record = plan.plan_diagnostics.get("workflow")
+        record = record if isinstance(record, dict) else {}
+        dropped_steps = [
+            dict(entry)
+            for entry in record.get("dropped_steps", [])
+            if isinstance(entry, dict)
+        ]
+        warnings = [str(entry) for entry in record.get("warnings", [])]
+
         # §5.1 (amended): the no-op guard performs ZERO writes -- including
         # plan_diagnostics. Only the RETURNED WorkflowDecisions reflects the
         # recompute; the persisted plan_diagnostics["workflow"] record stays
@@ -335,6 +607,8 @@ class WorkflowApplier:
             final_review_reviewers=final_review_reviewers,
             external_verifier=external_verifier,
             carried_over_phases=[phase.name for phase in carryover_phases],
+            dropped_steps=dropped_steps,
+            warnings=warnings,
         )
 
     # -- full reshape -----------------------------------------------------
@@ -363,12 +637,59 @@ class WorkflowApplier:
             )
         _, harvest_model = _effective_agent_model(harvesting_stage, settings)
 
-        harvested = _harvest_steps(base_phases)
+        # §5.2/§5.7 ordering: carryover eligibility is computed BEFORE the
+        # fallback harvest, so an auditor-bearing phase can be protected from
+        # it. Otherwise fallback (a) grabs the phase's `developing` step, the
+        # phase is then treated as "partly harvested", and its `auditor` step
+        # disappears with no trace.
+        harvested, contributing = _primary_harvest(base_phases)
+        carryover = _carryover_candidates(base_phases, contributing)
+        if not harvested:
+            harvested = _fallback_developing_harvest(
+                base_phases, {id(phase) for phase in carryover}
+            )
         if not harvested:
             harvested = [_synthesize_fallback_step(plan, harvest_model)]
 
-        harvested_ids = {step.step_id for step in harvested}
-        carryover = _carryover_phases(base_phases, harvested_ids)
+        harvested_object_ids = {id(step) for step in harvested}
+        # Defensive: a candidate whose every step was harvested has nothing
+        # left to carry over. Unreachable today (candidates are excluded from
+        # both harvest paths) but keeps the two sets disjoint by construction.
+        carryover = [
+            phase
+            for phase in carryover
+            if phase.steps
+            and not all(id(step) in harvested_object_ids for step in phase.steps)
+        ]
+        carryover_phase_ids = {id(phase) for phase in carryover}
+
+        # §5.3: everything neither harvested nor carried over is discarded.
+        # Record it (and warn about dropped auditor work) so the discard is
+        # visible in `--explain` / plan_diagnostics instead of silent.
+        dropped_steps: list[dict[str, Any]] = []
+        drop_warnings: list[str] = []
+        for phase in base_phases:
+            if id(phase) in carryover_phase_ids:
+                continue
+            for step in phase.steps:
+                if id(step) in harvested_object_ids:
+                    continue
+                dropped_steps.append(
+                    {
+                        "step_id": step.step_id,
+                        "agent_name": step.agent_name,
+                        "phase_name": phase.name,
+                        "step_type": step.step_type,
+                        "task_description": step.task_description,
+                    }
+                )
+                if _step_has_auditor(step):
+                    drop_warnings.append(
+                        f"auditor work in base phase {phase.name!r} "
+                        f"(step {step.step_id}) was dropped by the "
+                        f"{preset.name!r} reshape: it was neither harvested "
+                        "nor carried over."
+                    )
         # §5.6 (amended): the gate/approval scan must skip carryover-eligible
         # phases -- otherwise the same PlanGate object could land on both
         # the Implementation phase and the preserved carryover phase
@@ -389,14 +710,26 @@ class WorkflowApplier:
         old_ids = [step.step_id for step in harvested]
         new_ids = [f"{impl_phase_id}.{i}" for i in range(1, len(harvested) + 1)]
         old_to_new = dict(zip(old_ids, new_ids))
+        origin = _origin_index(base_phases)
 
-        for step in harvested:
+        for step, new_step_id in zip(harvested, new_ids):
+            old_step_id = step.step_id
             step.depends_on = [old_to_new[d] for d in step.depends_on if d in old_to_new]
             step.workflow_stage = harvesting_stage.stage_id
+            if step.team:
+                # Member ids encode the parent step id the engine dispatches
+                # against -- they follow the renumbered step, not the base
+                # plan's numbering. See `_rekey_team_member_ids`.
+                _rekey_team(step, old_step_id, new_step_id)
             if step.step_type not in _UNRETIERED_STEP_TYPES:
                 step.model = harvest_model
                 if step.team:
                     _retier_team(step.team, harvest_model)
+
+        # Flattening N base phases into one Implementation phase must not
+        # erase the ordering those phases encoded.
+        sequenced = _apply_phase_ordering(harvested, new_ids, origin)
+        _demote_stale_parallel_safe(harvested, new_ids, sequenced)
 
         spec_path = f".claude/team-context/executions/{plan.task_id}/spec.md"
         authoring_deliverable = (
@@ -517,6 +850,13 @@ class WorkflowApplier:
                     if d in carryover_old_to_new
                 ]
                 step.workflow_stage = _CARRYOVER_STAGE_ID
+                if step.team:
+                    # Same hazard as the harvested steps: a carryover step is
+                    # renumbered too, so its member ids must follow or the
+                    # engine derives the wrong parent step from the prefix.
+                    # Real repro: a team-consolidated Audit phase (base step
+                    # 2.1) lands at 8.1 with members still reading 2.1.a.
+                    _rekey_team(step, step.step_id, new_id)
                 step.step_id = new_id
             carryover_result.append(
                 PlanPhase(
@@ -542,8 +882,16 @@ class WorkflowApplier:
             final_review_reviewers=final_review_reviewers,
             external_verifier=bool(settings.external_command),
             carried_over_phases=[phase.name for phase in carryover],
+            dropped_steps=dropped_steps,
+            warnings=drop_warnings,
         )
         plan.plan_diagnostics["workflow"] = decisions.to_dict()
+        # §5.12: the reshaped plan must satisfy MachinePlan's own validators.
+        # Nothing else revalidates it -- `validate_assignment=False` means the
+        # in-place mutations above never re-run the model validator, so an
+        # applier/config bug (e.g. `workflow.stages.spec.agent: ""`) would sail
+        # into plan.json and only surface as a crash at `baton execute start`.
+        _validate_reshaped_plan(plan, preset)
         return decisions
 
     # -- created-step builders (§3) ---------------------------------------
