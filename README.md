@@ -163,7 +163,7 @@ baton execute start          # then drive the action loop
 baton execute run
 ```
 
-`--dry-run` prints the reshaped seven-phase plan, the agent and model tier per
+`--dry-run` prints the reshaped plan, the agent and model tier per
 step, the gate that will block, and a cost forecast — nothing is written.
 `--save --explain` commits `plan.json` + `plan.md` to `.claude/team-context/` and
 appends a `## Workflow` stage table to `explanation.md`. The first dispatch writes
@@ -300,6 +300,79 @@ Team](#pillar-2--compose-the-right-team).
 
 ---
 
+## Delivery workflows
+
+A **workflow preset** is a named reshaping of a finished plan. `baton plan
+--workflow NAME` runs the normal deterministic pipeline first — classification,
+roster, risk, decomposition, foresight, validation — and then rewrites the phase
+list into the preset's stages, keeping your routed implementation steps and
+re-tiering them. One preset ships today: **`adversarial-tdd`**. An unknown name
+exits 2 and lists the presets that do exist.
+
+```bash
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --dry-run
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+baton goal "per-tenant rate limiting is enforced and the integration tests pass" \
+  --workflow adversarial-tdd
+```
+
+| # | Stage | Agent | Model |
+|---|-------|-------|-------|
+| 1 | Brainstorm & Spec | `architect` | `fable` |
+| 2 | Architecture | `architect` | `fable` |
+| 3 | Test Authoring | `test-engineer` | `opus` |
+| 4 | Test Verification | `test-adequacy-reviewer` | `opus` |
+| 5 | Implementation | *your routed implementers* | `sonnet` |
+| 6 | Implementation Verification | `code-reviewer` | `opus` |
+| 7 | Final Review | `code-reviewer` (fanned out) | `fable` |
+
+Stage 1 writes the spec to `.claude/team-context/executions/<task_id>/spec.md`;
+stages 2, 3, 4, and 6 brief their agents against that file. Stage 4 reviews the
+tests against the spec *only* — it never
+sees an implementation, because none exists yet. Stage 5 is your own planned
+implementation steps, flattened into one phase and re-tiered to `sonnet`, gated on
+the first test-or-build gate harvested from the base plan (for Python plans this is
+often a build/import check), falling back to a stack-derived gate when the base
+plan has none. Stage 7 fans out to up to three reviewers based on the number of
+implementation units.
+
+> **Runtime caveat.** The `fable`-tiered stages assume the Claude Code runtime you
+> dispatch through resolves the `fable` model alias. Verify that with a `--dry-run`
+> and one live dispatch before relying on it, or re-tier those stages in
+> `baton.yaml`.
+
+Stages are overridable per project in `baton.yaml` (see
+[`templates/baton.yaml.example`](templates/baton.yaml.example)):
+
+```yaml
+workflow:
+  stages:
+    final_review: {model: opus}
+    implementation_verification: {agent: security-reviewer}
+  external_command: ""            # e.g. a second-opinion CLI, run as an engine automation step
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3
+```
+
+Three caveats worth knowing up front:
+
+- `--workflow` is **mutually exclusive** with `--manager-mode` and `--import`.
+- `external_command` is appended to Implementation Verification as an engine
+  automation step, so any CLI or script can act as an independent verifier — but
+  the v1 automation runner **hard-caps every automation command at 300 seconds**.
+  `external_timeout_seconds` is stamped for forward compatibility only; budget
+  vendor CLIs against the 300s cap.
+- Audit phases from a regulated-domain plan are carried over verbatim *after*
+  Final Review, keeping their own gates and approvals.
+
+Full flag and config reference: [docs/cli-reference.md](docs/cli-reference.md).
+Orchestrator recipe: [docs/orchestrator-usage.md](docs/orchestrator-usage.md).
+Agent-facing playbook:
+[templates/playbooks/adversarial-tdd.md](templates/playbooks/adversarial-tdd.md).
+
+---
+
 ## The Four Pillars
 
 ## Pillar 1 — Plan with Foresight
@@ -352,6 +425,9 @@ baton plan "Add OAuth2 login" --save --explain
 # Override complexity when you know more than the classifier
 baton plan "Rename a constant across 2 files" --complexity light
 
+# Reshape the plan into the staged adversarial-TDD delivery workflow
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+
 # Start execution after saving
 baton execute start
 ```
@@ -364,7 +440,9 @@ signal, not a bill.
 Plans are not frozen: `baton execute amend` adds phases or steps while an
 execution is running, and goal-driven mode (`baton goal "<condition>"`) evaluates
 the condition at phase boundaries and proposes amendments until the goal is met
-or the amend budget is exhausted.
+or the amend budget is exhausted. `--workflow` composes with `baton goal`, so a
+goal-driven run can also be staged into a delivery workflow — see
+[Delivery workflows](#delivery-workflows).
 
 ## Pillar 2 — Compose the Right Team
 
@@ -405,7 +483,7 @@ table finds it automatically.
 | Backend | `backend-engineer`, `--python`, `--node` |
 | Frontend | `frontend-engineer`, `--react`, `--dotnet` |
 | Architecture | `architect` |
-| Quality | `test-engineer`, `code-reviewer`, `security-reviewer` |
+| Quality | `test-engineer`, `test-adequacy-reviewer`, `code-reviewer`, `security-reviewer` |
 | Governance | `auditor` (independent veto power) |
 | Data | `data-engineer`, `data-analyst`, `data-scientist` |
 | Visualization | `visualization-expert` |
@@ -750,15 +828,9 @@ can be added by implementing the `ExternalSourceAdapter` protocol.
 
 ### Experimental (feature-flagged)
 
-These surfaces emit stub warnings to stderr on invocation and are **not
-production-ready**. Do not rely on them.
-
-| Feature | Flag | Status |
-|---------|------|--------|
-| Immune-system daemon | `BATON_IMMUNE_ENABLED=1` | Wave 6.2 Part B stub |
-| Predictive watcher | feature flag in `core/intel/` | Wave 6.2 Part C stub |
-| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; unsafe for external-origin beads |
-| Persistent agent souls | `BATON_SOULS_ENABLED=1` | Cross-project cryptographic agent identities |
+Four surfaces are feature-flagged, emit stub warnings to stderr, and are **not
+production-ready** — see [Experimental Features](#experimental-features) under
+Project Status for the flags and their status.
 
 ---
 
@@ -774,7 +846,8 @@ The `baton` CLI provides 60+ commands organized into groups.
 | `baton plan "<task>"` | Generate a data-driven execution plan |
 | `baton plan --dry-run` | Preview plan + cost/token forecast (±50% range) without saving |
 | `baton plan --from-template NAME` | Instantiate a saved plan template with a new task |
-| `baton goal "<condition>"` | Plan against a completion condition; engine drives amend cycles until met |
+| `baton plan --workflow NAME` | Reshape the plan into a named delivery-workflow preset (built-in: `adversarial-tdd`) |
+| `baton goal "<condition>"` | Plan against a completion condition; engine drives amend cycles until met (accepts `--workflow`, passed through to `baton plan`) |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
@@ -993,16 +1066,30 @@ The variables a user is most likely to set. For the full internal list see
 | `--knowledge PATH` / `--knowledge-pack NAME` | Attach knowledge documents / packs (repeatable) |
 | `--model MODEL` | Default model for dispatched agents (haiku, sonnet, opus) |
 | `--complexity LEVEL` | Override complexity: light, medium, heavy |
+| `--workflow NAME` | Reshape the plan into a named delivery-workflow preset (built-in: `adversarial-tdd`); mutually exclusive with `--manager-mode` and `--import` |
+
+Full flag reference: [docs/cli-reference.md](docs/cli-reference.md).
+
+### Project config (`baton.yaml`)
+
+Per-project defaults — routing rules, default gates, excluded paths, and the
+`workflow:` block that overrides delivery-workflow stage agents/models, the
+external verifier command, and final-review fan-out — live in `baton.yaml`
+(`.claude/baton.yaml` takes precedence over the project root). Start from
+[`templates/baton.yaml.example`](templates/baton.yaml.example); see
+[Delivery workflows](#delivery-workflows) for the `workflow:` keys.
 
 ### Files Installed to Target Projects
 
 | File | Purpose |
 |------|---------|
-| `.claude/agents/*.md` | Agent definitions (30 files) |
-| `.claude/references/*.md` | Reference procedures (19 files) |
-| `.claude/CLAUDE.md` | Project development guide (from template) |
+| `.claude/agents/*.md` | Agent definitions (31 files) |
+| `.claude/references/*.md` | Reference procedures (20 files) |
+| `.claude/skills/` | Reusable skills (`baton-help`, `baton-beads`, `baton-learn`) |
+| `.claude/templates/agents/*.md` | Agent authoring templates (base, flavored, reviewer) |
 | `.claude/settings.json` | Hook configuration (write-protect, policy-check, compliance logging) |
-| `.claude/skills/` | Reusable skills |
+| `.claude/team-context/`, `.claude/knowledge/` | Plan/execution artifacts and knowledge packs |
+| `CLAUDE.md` (project root, or `~/.claude/CLAUDE.md`) | Project development guide, copied from the template only when none exists |
 
 ---
 
@@ -1048,11 +1135,11 @@ Requires Python 3.10+. Runtime dependencies: `pyyaml`, `pydantic`, `cryptography
 
 ## Project Status
 
-Agent Baton is in active development (v0.1.0). The orchestration engine, all 30
-agents, 20 reference procedures, knowledge delivery, bead memory system, PMO
-subsystem with end-to-end plan-to-merge workflow, REST API with webhooks,
-federated sync, event system, learning automation, and the improvement pipeline
-are implemented and tested.
+Agent Baton is in active development (v0.1.0). The orchestration engine, all 31
+agents, 20 reference procedures, the `adversarial-tdd` delivery-workflow preset,
+knowledge delivery, bead memory system, PMO subsystem with end-to-end
+plan-to-merge workflow, REST API with webhooks, federated sync, event system,
+learning automation, and the improvement pipeline are implemented and tested.
 
 - **Python**: 3.10+ (tested on 3.10–3.13)
 - **Runtime dependencies**: pyyaml, pydantic, cryptography
@@ -1079,6 +1166,9 @@ work.
 
 - **Say "use the orchestrator"** explicitly for your first few runs so Claude
   Code routes to the right agent.
+- **Correctness-critical new capability?** Reach for `baton plan --workflow
+  adversarial-tdd` — tests are written and adversarially verified before any
+  implementation runs.
 - **3–5 specialists per task.** More than that and coordination overhead
   outweighs the benefits.
 - **Crash recovery is automatic.** Session dies mid-task? New session +
