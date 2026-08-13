@@ -46,6 +46,39 @@ from agent_baton.models.execution import ActionType
 DEFAULT_AUTOMATION_TIMEOUT_S: int = 300
 
 
+def _declared_timeout_from_plan_file(engine: object, step_id: str) -> int:
+    """Read ``timeout_seconds`` for *step_id* straight from the saved ``plan.json``.
+
+    Rescue path for a known storage gap: the SQLite backend's ``plan_steps``
+    table has no ``timeout_seconds`` column and ``_load_plan_struct()`` does
+    not hydrate the field, so a step's declared budget does **not** survive a
+    state round-trip — every reload reports ``0``.  ``plan.json`` (written by
+    ``baton plan --save``) still carries the planner's value, so we consult it
+    when the loaded state has none.
+
+    Best-effort and non-fatal; returns ``0`` when unavailable.  Note the file
+    holds the *original* plan, so a post-save amendment to a step's timeout is
+    not reflected here — remove this fallback once the field is persisted.
+    """
+    try:
+        import json
+
+        root = getattr(engine, "_root", None)
+        if root is None:
+            return 0
+        plan_file = Path(root) / "plan.json"
+        if not plan_file.is_file():
+            return 0
+        data = json.loads(plan_file.read_text(encoding="utf-8"))
+        for phase in data.get("phases", []) or []:
+            for step in phase.get("steps", []) or []:
+                if step.get("step_id") == step_id:
+                    return int(step.get("timeout_seconds", 0) or 0)
+    except Exception:  # noqa: BLE001 — rescue path is best-effort
+        pass
+    return 0
+
+
 def resolve_automation_timeout(
     engine: object,
     step_id: str,
@@ -60,36 +93,51 @@ def resolve_automation_timeout(
     ``agent_baton/cli/commands/execution/execute.py``) so a plan step's
     ``timeout_seconds`` is honoured identically on either path.
 
-    Resolution delegates to
-    :func:`agent_baton.core.engine._executor_helpers.effective_timeout`
-    (step override → ``BATON_DEFAULT_STEP_TIMEOUT_S`` → unset) and falls back
-    to *default* when that yields ``0`` — automation subprocesses must always
-    carry *some* timeout, otherwise a hung command wedges the run forever.
+    Resolution order:
+
+    1. ``timeout_seconds`` on the loaded plan step (explicit per-step budget,
+       e.g. ``workflow.external_timeout_seconds``).
+    2. The same field read from the saved ``plan.json`` — see
+       :func:`_declared_timeout_from_plan_file` for why that is necessary.
+    3. ``BATON_DEFAULT_STEP_TIMEOUT_S`` via
+       :func:`agent_baton.core.engine._executor_helpers.effective_timeout`.
+    4. *default* — automation subprocesses must always carry *some* timeout,
+       otherwise a hung command wedges the run forever.
 
     Args:
         engine: The execution driver/engine (anything exposing
             ``_load_execution()``).  Lookup failures are non-fatal.
         step_id: The automation step being run.
-        default: Fallback when the step declares no timeout.
+        default: Fallback when nothing declares a timeout.
 
     Returns:
         A positive number of seconds.
     """
+    step = None
     try:
-        from agent_baton.core.engine._executor_helpers import (
-            effective_timeout,
-            find_step,
-        )
+        from agent_baton.core.engine._executor_helpers import find_step
 
         loader = getattr(engine, "_load_execution", None)
         state = loader() if callable(loader) else None
         step = find_step(state, step_id) if state is not None else None
-        if step is not None:
-            resolved = effective_timeout(step)
-            if resolved > 0:
-                return resolved
+        if step is not None and step.timeout_seconds > 0:
+            return step.timeout_seconds
     except Exception:  # noqa: BLE001 — resolution is best-effort by design
-        pass
+        step = None
+
+    declared = _declared_timeout_from_plan_file(engine, step_id)
+    if declared > 0:
+        return declared
+
+    if step is not None:
+        try:
+            from agent_baton.core.engine._executor_helpers import effective_timeout
+
+            env_resolved = effective_timeout(step)
+            if env_resolved > 0:
+                return env_resolved
+        except Exception:  # noqa: BLE001
+            pass
     return default
 
 

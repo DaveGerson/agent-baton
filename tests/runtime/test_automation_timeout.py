@@ -72,6 +72,21 @@ class _ExplodingEngine:
         raise RuntimeError("state unavailable")
 
 
+class _EngineWithPlanFile(_FakeEngine):
+    """Engine whose team-context root holds a saved ``plan.json``."""
+
+    def __init__(self, state: ExecutionState | None, root: Path) -> None:
+        super().__init__(state)
+        self._root = root
+
+
+def _write_plan_file(root: Path, timeout_seconds: int) -> None:
+    import json
+
+    plan = _state(timeout_seconds=timeout_seconds).plan.to_dict()
+    (root / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+
 # ── resolve_automation_timeout ──────────────────────────────────────────────
 
 
@@ -114,6 +129,49 @@ def test_resolution_failure_is_non_fatal() -> None:
 def test_explicit_default_override() -> None:
     engine = _FakeEngine(_state(timeout_seconds=0))
     assert resolve_automation_timeout(engine, "1.1", default=7) == 7
+
+
+# ── plan.json rescue (storage gap) ──────────────────────────────────────────
+
+
+def test_plan_file_rescues_a_dropped_step_timeout(tmp_path: Path) -> None:
+    """The SQLite backend drops ``timeout_seconds`` on every state round-trip.
+
+    ``plan_steps`` has no such column and ``_load_plan_struct()`` does not
+    hydrate the field, so a reloaded step reports 0 and the declared budget
+    (e.g. ``workflow.external_timeout_seconds``) was silently lost.  The
+    saved ``plan.json`` still carries it.
+    """
+    _write_plan_file(tmp_path, timeout_seconds=1800)
+    engine = _EngineWithPlanFile(_state(timeout_seconds=0), tmp_path)
+
+    assert resolve_automation_timeout(engine, "1.1") == 1800
+
+
+def test_loaded_state_wins_over_plan_file(tmp_path: Path) -> None:
+    _write_plan_file(tmp_path, timeout_seconds=1800)
+    engine = _EngineWithPlanFile(_state(timeout_seconds=90), tmp_path)
+
+    assert resolve_automation_timeout(engine, "1.1") == 90
+
+
+def test_plan_file_beats_env_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-step declaration outranks the global env default."""
+    monkeypatch.setenv("BATON_DEFAULT_STEP_TIMEOUT_S", "42")
+    _write_plan_file(tmp_path, timeout_seconds=1800)
+    engine = _EngineWithPlanFile(_state(timeout_seconds=0), tmp_path)
+
+    assert resolve_automation_timeout(engine, "1.1") == 1800
+
+
+def test_missing_or_malformed_plan_file_is_non_fatal(tmp_path: Path) -> None:
+    engine = _EngineWithPlanFile(_state(timeout_seconds=0), tmp_path)
+    assert resolve_automation_timeout(engine, "1.1") == DEFAULT_AUTOMATION_TIMEOUT_S
+
+    (tmp_path / "plan.json").write_text("{not json", encoding="utf-8")
+    assert resolve_automation_timeout(engine, "1.1") == DEFAULT_AUTOMATION_TIMEOUT_S
 
 
 # ── Both runners resolve through the same helper ────────────────────────────
