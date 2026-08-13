@@ -31,6 +31,13 @@ plan, the team, and the guardrails.
   right*, not just whether it lints. Humans are one kind of check; the engine
   enforces the rest through policy gates and an auditable trail.
 
+Baton also ships a batteries-included delivery workflow:
+`baton plan "<task>" --workflow adversarial-tdd` reshapes any plan into a staged,
+model-tiered, adversarially verified TDD pipeline — spec and architecture at the
+top tier, tests written and independently verified *before* implementation, then
+double verification and a top-tier final review. See
+[Delivery workflows](#delivery-workflows).
+
 For regulated work, Baton can also run as a **governance harness** (policy hooks
 evaluate every tool call and evidence bundles are generated automatically) or a
 **managed loop** (full plan→dispatch→gate→approval), and can import specs from
@@ -59,6 +66,154 @@ so you keep control and oversight while the agents do the heavy lifting.
 | Hope the AI got it *right* | Independent auditor / SME verification on risky work |
 | No record of what happened | Full traces, usage logs, retrospectives |
 | Single point of failure | Crash recovery via `baton execute resume` |
+
+---
+
+## Get Started in 5 Minutes
+
+### 1. Install the Python engine
+
+**From PyPI (recommended):**
+
+```bash
+pip install agent-baton          # Core engine + CLI
+pip install agent-baton[pmo]     # + REST API and PMO server
+pip install agent-baton[classify] # + AI risk classification
+```
+
+**From source (for development):**
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git
+cd agent-baton
+pip install -e ".[dev]"          # Core engine + CLI + test deps
+```
+
+Requires Python 3.10+. Runtime dependencies: PyYAML, pydantic, cryptography. The
+`pmo` extra adds FastAPI + uvicorn; `classify` adds the Anthropic SDK for
+AI-powered risk classification.
+
+The engine goes first because the asset installer in step 2 finishes by running
+`baton validate` over the agents it just copied — that verification only works if
+the CLI is already importable.
+
+### 2. Install the Claude Code assets
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git   # skip if already cloned
+cd agent-baton
+scripts/install.sh          # Linux/macOS
+# or: scripts/install.ps1   # Windows (no admin required)
+```
+
+The installer prompts for **scope** — user-level (`~/.claude/`, every project) or
+project-level (`.claude/`, this project only) — then copies **31 agent
+definitions**, **20 reference procedures**, **3 skills** (`baton-help`,
+`baton-beads`, `baton-learn`), 3 agent templates, and a `settings.json` carrying
+the policy hooks, and creates the `team-context/` and `knowledge/` working
+directories. A template `CLAUDE.md` is written to your project root (or
+`~/.claude/`) **only when none exists** — an existing `CLAUDE.md` is never
+overwritten; the installer tells you to merge it manually instead. It then offers
+an optional knowledge-infrastructure choice (knowledge packs, local RAG, or skip),
+notes the `~/.baton/central.db` it will create on first use, configures **git-notes
+refspecs** (`+refs/notes/*:refs/notes/*` on `remote.origin.fetch` and
+`remote.origin.push`) so bead anchors replicate on fetch and push — set
+`BATON_SKIP_GIT_NOTES_SETUP=1` to skip — and auto-installs **`bd`**, the mandatory
+bead backend, via npm or Homebrew (`--no-beads` or `BATON_SKIP_BEADS_INSTALL=1` to
+skip). Re-run it with `--upgrade` to refresh agents, references, and skills while
+preserving your `CLAUDE.md` and merging new hooks into an existing
+`settings.json`.
+
+### 3. Verify
+
+```bash
+# In Claude Code
+/agents                     # Should list ~31 agents
+
+# In terminal
+baton agents                # List agents from Python registry
+baton detect                # Detect your project's stack
+```
+
+### 4. Optional: install cymbal (recommended)
+
+[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter code indexer that
+agents use for symbol lookup (`cymbal investigate <symbol>`) and blast-radius
+analysis (`cymbal impact <symbol>`) before edits. Without it, agents fall back to
+grep — slower and less precise.
+
+```bash
+cymbal --help               # Check if already installed
+# If not, install the binary to ~/.local/bin/
+# (see cymbal docs for platform-specific instructions)
+```
+
+### 5. Run your first delivery
+
+The shortest path to a *correct* first result is the `adversarial-tdd` delivery
+workflow — tests get written and independently audited before any implementation
+runs:
+
+```bash
+cd ~/my-project
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --dry-run
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+baton execute start          # then drive the action loop
+# or, fully headless:
+baton execute run
+```
+
+`--dry-run` prints the reshaped seven-phase plan, the agent and model tier per
+step, the gate that will block, and a cost forecast — nothing is written.
+`--save --explain` commits `plan.json` + `plan.md` to `.claude/team-context/` and
+appends a `## Workflow` stage table to `explanation.md`. The first dispatch writes
+the spec to `.claude/team-context/executions/<task_id>/spec.md`; every later stage
+reads it. Full walkthrough: [Delivery workflows](#delivery-workflows).
+
+**Or hand the whole thing to the orchestrator** in a Claude Code session:
+
+```
+Use the orchestrator to add a health check endpoint with tests
+```
+
+The orchestrator plans the work (pillar 1), creates or selects the right
+specialists (pillar 2), dispatches each to its phase and runs QA gates between
+them (pillar 3), and invokes the auditor if risk warrants it (pillar 4). It
+delivers tested, committed code.
+
+### Usage examples
+
+**Orchestrated task** — complex, multi-domain work (add `--workflow
+adversarial-tdd` to the planning step when correctness outweighs speed):
+
+```
+Use the orchestrator to build a health check API with tests and documentation
+```
+
+**Engine-driven workflow** — explicit control over each step:
+
+```bash
+baton plan "Add input validation to the API" --save --explain
+baton execute start
+baton execute next              # Get next action
+baton execute record --step-id 1.1 --agent backend-engineer --status complete
+baton execute gate --phase-id 2 --result pass
+baton execute complete
+```
+
+**Direct agent invocation** — single-domain tasks that don't need a full plan:
+
+```
+Use the data-analyst to investigate our fleet utilization trends
+Use the security-reviewer to audit our authentication flow
+Use the test-engineer to add unit tests for the payment module
+```
+
+**Autonomous execution** — no Claude Code session required:
+
+```bash
+baton execute run               # Full loop: plan -> dispatch -> gate -> complete
+```
 
 ---
 
@@ -142,115 +297,6 @@ orchestrator level; specialists get their own context only for substantial work.
 Shared knowledge lives in reference documents instead of being duplicated across
 prompts. This is pillar 2 in practice — see [Pillar 2 — Compose the Right
 Team](#pillar-2--compose-the-right-team).
-
----
-
-## Get Started in 5 Minutes
-
-### 1. Install agent definitions
-
-```bash
-git clone https://github.com/DaveGerson/agent-baton.git
-cd agent-baton
-scripts/install.sh          # Linux/macOS
-# or: scripts/install.ps1   # Windows (no admin required)
-```
-
-The installer prompts for scope: user-level (`~/.claude/`) for all projects, or
-project-level (`.claude/`) for the current project only. It copies 31 agent
-definitions, 20 reference procedures, a template `CLAUDE.md`, `settings.json`
-hooks, and skills. It also attempts to install `bd` (the bead backend) via npm or
-Homebrew.
-
-### 2. Install the Python engine
-
-**From PyPI (recommended):**
-
-```bash
-pip install agent-baton          # Core engine + CLI
-pip install agent-baton[pmo]     # + REST API and PMO server
-pip install agent-baton[classify] # + AI risk classification
-```
-
-**From source (for development):**
-
-```bash
-pip install -e ".[dev]"          # Core engine + CLI + test deps
-```
-
-Requires Python 3.10+. Runtime dependencies: PyYAML, pydantic, cryptography. The
-`pmo` extra adds FastAPI + uvicorn; `classify` adds the Anthropic SDK for
-AI-powered risk classification.
-
-### 3. Verify
-
-```bash
-# In Claude Code
-/agents                     # Should list ~31 agents
-
-# In terminal
-baton agents                # List agents from Python registry
-baton detect                # Detect your project's stack
-```
-
-### 4. Optional: install cymbal (recommended)
-
-[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter code indexer that
-agents use for symbol lookup (`cymbal investigate <symbol>`) and blast-radius
-analysis (`cymbal impact <symbol>`) before edits. Without it, agents fall back to
-grep — slower and less precise.
-
-```bash
-cymbal --help               # Check if already installed
-# If not, install the binary to ~/.local/bin/
-# (see cymbal docs for platform-specific instructions)
-```
-
-### 5. Run your first task
-
-In a Claude Code session:
-
-```
-Use the orchestrator to add a health check endpoint with tests
-```
-
-The orchestrator plans the work (pillar 1), creates or selects the right
-specialists (pillar 2), dispatches each to its phase and runs QA gates between
-them (pillar 3), and invokes the auditor if risk warrants it (pillar 4). It
-delivers tested, committed code.
-
-### Usage examples
-
-**Orchestrated task** — complex, multi-domain work:
-
-```
-Use the orchestrator to build a health check API with tests and documentation
-```
-
-**Engine-driven workflow** — explicit control over each step:
-
-```bash
-baton plan "Add input validation to the API" --save --explain
-baton execute start
-baton execute next              # Get next action
-baton execute record --step-id 1.1 --agent backend-engineer --status complete
-baton execute gate --phase-id 2 --result pass
-baton execute complete
-```
-
-**Direct agent invocation** — single-domain tasks that don't need a full plan:
-
-```
-Use the data-analyst to investigate our fleet utilization trends
-Use the security-reviewer to audit our authentication flow
-Use the test-engineer to add unit tests for the payment module
-```
-
-**Autonomous execution** — no Claude Code session required:
-
-```bash
-baton execute run               # Full loop: plan -> dispatch -> gate -> complete
-```
 
 ---
 

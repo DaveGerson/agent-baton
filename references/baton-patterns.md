@@ -275,6 +275,75 @@ autonomy profile on the same plan.
 
 ---
 
+## Pattern 5: Named Delivery Workflow (adversarial-tdd)
+
+**Intent**: Request a repeatable, staged, model-tiered pipeline instead of
+hand-assembling phases. `--workflow NAME` runs a preset *after* the normal
+planning pipeline and reshapes the assembled plan into that preset's stages.
+
+**When to use**:
+- A new capability where correctness outweighs speed.
+- Tests must be authored and independently verified against a written spec
+  *before* any implementation runs.
+- A second-vendor verifier (gemini/codex CLI or any script) should check the
+  implementation beyond "tests pass".
+
+**When NOT to use**: manager-mode plans and imported plans — `--workflow` is
+mutually exclusive with `--manager-mode` and `--import` (a config-default
+manager mode is suppressed with a warning instead of erroring). Also skip it
+for quick bug fixes, where seven stages is pure overhead.
+
+**Structural signature**:
+
+```
+baton plan "<task>" --workflow adversarial-tdd --save --explain   # also on: baton goal
+```
+
+| # | Stage id | Phase | Agent | Model |
+|---|----------|-------|-------|-------|
+| 1 | `spec` | Brainstorm & Spec | `architect` | fable |
+| 2 | `architecture` | Architecture | `architect` | fable |
+| 3 | `test_authoring` | Test Authoring | `test-engineer` | opus |
+| 4 | `test_verification` | Test Verification | `test-adequacy-reviewer` (spec + tests only) | opus |
+| 5 | `implementation` | Implementation | base plan's harvested implement steps | sonnet |
+| 6 | `implementation_verification` | Implementation Verification | `code-reviewer` (+ optional external verifier) | opus |
+| 7 | `final_review` | Final Review | `code-reviewer` (fans out for large slices; default ≤3 reviewers) | fable |
+
+Base phases that were not harvested and contain an `auditor` step are appended
+**after** Final Review verbatim (ids renumbered, `workflow_stage="carryover"`,
+their own gates/approvals preserved) — regulated-domain coverage survives the
+reshape. The Implementation phase carries the **first test- or build-type gate
+found on a non-carryover base phase** (a stack-derived default gate when the
+base plan has none); other base-phase gates do not survive.
+
+The reshape is visible in `plan.json`: `plan.workflow` names the preset, each
+`step.workflow_stage` names its stage (the SQLite copy does not carry these
+fields), and each DISPATCH action prints the pinned tier on its `Model:` line.
+`--explain --save` appends a `## Workflow` stage table to `explanation.md`.
+
+**Example — per-stage overrides in `baton.yaml`**:
+
+```yaml
+workflow:
+  stages:
+    final_review: {model: opus}                     # retarget a stage tier
+    implementation_verification: {agent: security-reviewer}
+  external_command: "codex exec 'review the diff against spec.md'"
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3
+```
+
+`external_command` is appended to Implementation Verification as an engine
+automation step. `external_timeout_seconds` is stamped for
+forward-compatibility only — the v1 `baton execute run` automation runner caps
+commands at 300s, so budget vendor CLIs accordingly.
+
+Full flag/config reference: `docs/cli-reference.md` (Workflow presets); recipe:
+`docs/orchestrator-usage.md` §15.
+
+---
+
 <a id="executable-beads-trust-boundary"></a>
 
 ## Pattern: Executable Beads — Trust Boundary

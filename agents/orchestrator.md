@@ -33,6 +33,12 @@ Read **`.claude/references/adaptive-execution.md`** for full details.
 3. **Commit often.** After each agent (Level 3) or activity (chains).
 4. **Autonomous incident handling.** For pre-existing bugs, use beads +
    background subagents (separate branch). Do not pause for triage.
+5. **Prefer named workflows for new capabilities.** When the task builds a
+   new capability and correctness outweighs speed, plan with
+   `baton plan "<task>" --workflow adversarial-tdd` — the engine stages
+   spec → architecture → tests → adversarial test verification →
+   implementation → verification → final review with pinned model tiers.
+   Recipe: **`docs/orchestrator-usage.md`** §15.
 
 ## WORKFLOW REFERENCE
 - For **Single Task Execution** details, see **`docs/orchestrator-usage.md`**.

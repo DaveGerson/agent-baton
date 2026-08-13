@@ -24,7 +24,10 @@ result is verified twice before a top-tier final review.
    scoped: reads spec + tests only, and verifies the tests pin the
    intended behaviors.
 5. **Implementation** (planned specialists, sonnet) — implement until the
-   tests pass; gated on the stack's test command.
+   tests pass. The phase carries the first test- or build-type gate found
+   on a non-carryover phase of the base plan (often a build/import check,
+   not the base plan's later test gate); when the base plan has no such
+   gate, a stack-derived default gate is used instead.
 6. **Implementation Verification** (`code-reviewer`, opus) — verify the
    implementation against the spec beyond "tests pass". Optionally add an
    external-vendor verifier (gemini/codex CLI) via the
