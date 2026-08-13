@@ -596,3 +596,53 @@ an earlier edit was reverted). Known deferrals recorded in the design
 doc's §7 non-goals (no DB columns, no PMO-UI surface, no
 `baton workflows` command). Design doc:
 `docs/internal/adversarial-tdd-workflow-design.md` (Accepted, v2.3).
+
+## 2026-08-13 — Delivery-workflow usage journeys: new how-to page (WS-B)
+
+**Decision:** the four optimal-usage journeys for `--workflow` get **one
+new public page**, `docs/delivery-workflows.md` (Diátaxis **how-to**),
+rather than four more recipes in `docs/orchestrator-usage.md`.
+
+Rationale:
+
+1. All four journeys are task-oriented, so how-to is the correct quadrant
+   (an Explanation page was rejected — these are tasks, not concepts).
+2. `orchestrator-usage.md` already carries 15 recipes at ~560 lines; four
+   deep journeys would roughly double it. Recipe 15 stays as the quick
+   recipe and gains a "Deep journeys" pointer.
+3. `docs/cli-reference.md#workflow-presets` remains the **canonical**
+   flag/config reference. The journey page narrates and links; it
+   duplicates only the condensed stage list and the `baton.yaml` snippet.
+
+Wired in: `mkdocs.yml` nav (Getting Started, after Orchestrator Usage),
+`docs/index.md` ("Where to go next"), `docs/orchestrator-usage.md`
+(Recipe 15), `docs/cli-reference.md` (end of Workflow presets),
+`docs/examples/first-run.md` (Common Variations). Companion workstreams:
+README restructure (WS-A) and agent-facing discovery — baton-help SKILL,
+`references/baton-patterns.md`, `agents/orchestrator.md` (WS-C).
+
+**Accuracy fixes shipped in the same pass** (all confirmed against
+`agent_baton/core/workflow/applier.py` and smoke-tested plans):
+
+- `docs/cli-reference.md`, `docs/orchestrator-usage.md`, and
+  `docs/internal/adversarial-tdd-workflow-design.md` §3 claimed the
+  Implementation phase is "gated on the stack test command". It is not:
+  `_first_moveable_gate()` harvests the **first test- or build-type gate on
+  a non-carryover phase of the base plan** (for a Python plan typically the
+  build/import check; the later `pytest` gate is discarded with its phase),
+  falling back to the stack-derived `default_gate()` only when the base
+  plan has no such gate.
+- `docs/orchestrator-usage.md` Recipe 15 gave the spec path as
+  `executions/<task_id>/spec.md`; the applier writes
+  `.claude/team-context/executions/<task_id>/spec.md`.
+- `docs/pillars/compose-the-right-team.md` said "The 30 shipping agents"
+  and its Quality row omitted `test-adequacy-reviewer` (roster is 31);
+  `docs/index.md` said "the 30 specialist agents". Both corrected.
+
+Three caveats are mandatory wherever the relevant subject appears and are
+carried on the new page: `fable` is a **runtime alias** the installed
+Claude Code runtime must resolve (smoke-test before relying on
+fable-pinned stages); the v1 automation runner caps `external_command` at
+**300s** (`external_timeout_seconds` is forward-compatibility only); and
+goal amend-cycle phases carry **no** `workflow_stage` and no stage model
+pinning.

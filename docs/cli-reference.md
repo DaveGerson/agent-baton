@@ -86,7 +86,7 @@ baton plan SUMMARY [options]
 
 #### Workflow presets
 
-`--workflow adversarial-tdd` reshapes the assembled plan into a staged, model-tiered, adversarially verified TDD pipeline: Brainstorm & Spec (`architect`, fable) → Architecture (`architect`, fable) → Test Authoring (`test-engineer`, opus) → Test Verification (`test-adequacy-reviewer`, opus; scoped to spec + tests only) → Implementation (the base plan's implement steps, re-tiered to sonnet, gated on the stack test command) → Implementation Verification (`code-reviewer`, opus; optional external-vendor automation step) → Final Review (`code-reviewer`, fable; fans out to up to 3 reviewers for large slices). Base Audit phases containing `auditor` steps are carried over after Final Review, so regulated-domain coverage survives the reshape.
+`--workflow adversarial-tdd` reshapes the assembled plan into a staged, model-tiered, adversarially verified TDD pipeline: Brainstorm & Spec (`architect`, fable) → Architecture (`architect`, fable) → Test Authoring (`test-engineer`, opus) → Test Verification (`test-adequacy-reviewer`, opus; scoped to spec + tests only) → Implementation (the base plan's implement steps, re-tiered to sonnet, carrying the first test- or build-type gate found on a non-carryover phase of the base plan — often a build/import check rather than the base plan's later `pytest` gate, which is discarded with its phase; a stack-derived default gate is used when the base plan has no such gate) → Implementation Verification (`code-reviewer`, opus; optional external-vendor automation step) → Final Review (`code-reviewer`, fable; fans out to up to 3 reviewers for large slices). Base Audit phases containing `auditor` steps are carried over after Final Review, so regulated-domain coverage survives the reshape.
 
 Per-stage agents/models, the final-review fan-out, and an external verifier command (e.g. a gemini or codex CLI invocation, run as an engine automation step) are configurable in `baton.yaml`:
 
@@ -102,6 +102,8 @@ workflow:
 ```
 
 Notes: `external_timeout_seconds` is stamped onto the automation step for forward-compatibility, but the v1 automation runner in `baton execute run` caps commands at 300s — budget external verifiers accordingly. `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
+
+Task-oriented journeys (everyday delivery, goal-driven, regulated, external verifiers): [delivery-workflows.md](delivery-workflows.md).
 
 **Manager mode:**
 

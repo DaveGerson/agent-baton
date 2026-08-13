@@ -483,7 +483,8 @@ baton execute start
 The reshaped plan has seven phases (plus any carried-over Audit phases):
 
 1. **Brainstorm & Spec** — `architect` (fable) writes
-   `executions/<task_id>/spec.md`: behaviors, non-goals, acceptance criteria.
+   `.claude/team-context/executions/<task_id>/spec.md`: behaviors,
+   non-goals, acceptance criteria.
 2. **Architecture** — `architect` (fable) produces design notes + file
    boundaries.
 3. **Test Authoring** — `test-engineer` (opus) writes failing tests. No
@@ -491,7 +492,11 @@ The reshaped plan has seven phases (plus any carried-over Audit phases):
 4. **Test Verification** — `test-adequacy-reviewer` (opus), scoped to spec
    + tests only, verifies the tests pin the spec'd behaviors.
 5. **Implementation** — the base plan's implement steps (your routed
-   specialists), re-tiered to sonnet, gated on the stack test command.
+   specialists), re-tiered to sonnet. The phase carries the first test- or
+   build-type gate found on a non-carryover phase of the base plan (often a
+   build/import check, not the base plan's later `pytest` gate, which is
+   discarded with its phase); a stack-derived default gate is used when the
+   base plan has none.
 6. **Implementation Verification** — `code-reviewer` (opus), plus an
    optional external-vendor automation step (`workflow.external_command`
    in `baton.yaml` — e.g. a gemini or codex CLI invocation).
@@ -508,6 +513,10 @@ Overrides live in `baton.yaml` (see
 `workflow:` section): per-stage `{agent, model}`, fan-out knobs, external
 verifier command. `--workflow` composes with `--goal`; it is mutually
 exclusive with `--manager-mode` and `--import`.
+
+**Deep journeys**: goal-driven runs, regulated-domain audit carryover, and
+external-vendor verification are walked end-to-end in
+[delivery-workflows.md](delivery-workflows.md).
 
 **See also**: [Recipe 3](#3-run-a-high-risk-task-with-auditor-gates) (audit
 phases from regulated-domain plans are carried over automatically),

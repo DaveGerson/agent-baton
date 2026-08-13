@@ -117,6 +117,7 @@ nav:
       - Checks & Balances: pillars/checks-and-balances.md
   - Getting Started:
       - Orchestrator Usage: orchestrator-usage.md
+      - Delivery Workflows: delivery-workflows.md
       - Agent Roster: agent-roster.md
       - First Run: examples/first-run.md
   - Architecture:

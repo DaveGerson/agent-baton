@@ -173,6 +173,17 @@ pipeline for future runs.
 
 ## Common Variations
 
+**Staged TDD delivery** — reshape the plan into the adversarial-TDD
+pipeline (spec → tests → adversarial test verification → implementation →
+double verification → final review):
+
+```bash
+$ baton plan "Add request logging middleware to the FastAPI app" \
+    --workflow adversarial-tdd --save
+```
+
+See [delivery-workflows.md](../delivery-workflows.md) for the full journeys.
+
 **Crash recovery** — reload state after a session interruption:
 
 ```bash
