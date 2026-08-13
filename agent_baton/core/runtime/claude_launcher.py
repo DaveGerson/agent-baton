@@ -120,7 +120,13 @@ def _redact_stderr(text: str) -> str:
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Per-tier subprocess timeouts.  Ordering is monotonic in tier capability:
+# a higher tier is only ever selected for longer / harder steps, so it must
+# never be given *less* wall-clock than a lower tier.  ``fable`` was missing
+# here and silently fell through to ``default_timeout_seconds`` (600s) —
+# i.e. less time than ``opus`` on exactly the longest stages.
 _DEFAULT_MODEL_TIMEOUTS: dict[str, float] = {
+    "fable": 1200.0,
     "opus": 900.0,
     "sonnet": 600.0,
     "haiku": 300.0,

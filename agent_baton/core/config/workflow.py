@@ -65,6 +65,12 @@ def _known_stage_ids() -> list[str]:
 class WorkflowSettings(_Section):
     stages: dict[str, StageOverride] = Field(default_factory=dict)
     external_command: str = ""
+    #: Wall-clock budget for ``external_command``.  The applier stamps this
+    #: onto the generated automation step's ``timeout_seconds``, and both
+    #: automation runners (``baton execute run`` and the daemon
+    #: ``TaskWorker``) enforce it via
+    #: :func:`agent_baton.core.runtime.worker.resolve_automation_timeout`.
+    #: Expiry records the step as failed.
     external_timeout_seconds: int = Field(default=1800, ge=1)
     final_review_fanout_divisor: int = Field(default=4, ge=1)
     final_review_max_reviewers: int = Field(default=3, ge=1)

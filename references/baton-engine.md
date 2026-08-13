@@ -1799,7 +1799,7 @@ ACTION: DISPATCH
 | Field | Description |
 |-------|-------------|
 | `agent_name` | Agent to spawn (matches a definition in `.claude/agents/`) |
-| `agent_model` | Model tier from the plan step (`opus`, `sonnet`, `haiku`) |
+| `agent_model` | Model tier from the plan step (`fable`, `opus`, `sonnet`, `haiku`) |
 | `step_id` | Step identifier, e.g. `1.1` |
 | `message` | Human-readable description |
 | `delegation_prompt` | Full prompt to pass to the subagent |
@@ -1808,6 +1808,47 @@ ACTION: DISPATCH
 **You must** use the Agent tool to spawn the subagent.  Do not do the
 work yourself.  After the subagent returns, record the result with
 `baton execute record`.
+
+#### DISPATCH — automation variant
+
+A DISPATCH whose step is an **automation** step runs a shell command
+instead of spawning a subagent.  It has **no `Agent:` and no `Model:`
+line**; it carries `Type: automation` plus a `Command:` line and a
+delimited command block:
+
+```
+ACTION: DISPATCH
+  Step:    3.2
+  Type:    automation
+  Command: ./scripts/verify.sh
+  Message: Run the external verifier for: <task summary>.
+
+--- Command ---
+./scripts/verify.sh
+--- End Command ---
+
+When complete, record the result:
+  baton execute record --step 3.2 --agent automation --status complete --outcome "summary"
+  baton execute record --step 3.2 --agent automation --status failed --error "what went wrong"
+```
+
+| Field | Description |
+|-------|-------------|
+| `step_type` | Always `automation` for this variant |
+| `command` | Shell command to run (also echoed in the `--- Command ---` block) |
+| `step_id` | Step identifier, e.g. `3.2` |
+| `message` | Human-readable description |
+
+Run `command` with Bash — do **not** spawn a subagent — then record the
+outcome with `--agent automation` (the reserved agent name for
+engine-run commands).  The engine enforces the step's own
+`timeout_seconds` when it declares one (e.g. a workflow preset's
+`workflow.external_timeout_seconds`), otherwise a 300s default; a
+timeout is recorded as a step failure.
+
+`baton execute run` executes this variant itself (it runs the command
+and records the result for you); the hint lines matter when you are
+driving the loop by hand with `baton execute next`.
 
 ### GATE
 
