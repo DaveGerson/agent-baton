@@ -174,8 +174,9 @@ gates](orchestrator-usage.md#3-run-a-high-risk-task-with-auditor-gates).
 codex, or any script) before the final review. Baton has no vendor
 abstraction — instead, `workflow.external_command` makes the applier append
 an engine **automation** step (`task-runner`) to the Implementation
-Verification phase that runs your literal command as a subprocess in the
-project working directory.
+Verification phase. `baton execute run` runs your literal command as a
+shell subprocess, inheriting the working directory the loop was invoked
+from.
 
 ```yaml
 # baton.yaml (or .claude/baton.yaml)
