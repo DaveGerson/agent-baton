@@ -185,8 +185,20 @@ class BdClient:
         a bare, commit-less ``git init`` costs nothing and is enough to keep
         bd's discovery from reading — or worse, refusing to init over —
         whatever ``.beads/`` it finds further up the tree.
+
+        Creating a repository is a side effect on the user's filesystem, so it
+        is fenced by :meth:`_git_boundary_refusal`.  Anything that fence
+        rejects is skipped with a warning rather than initialised: a bd
+        workspace escaping upward is a contained annoyance, whereas
+        ``git init`` in ``$HOME`` is not.
         """
         if (self._cwd / ".git").exists():
+            return
+        refusal = self._git_boundary_refusal(self._cwd)
+        if refusal is not None:
+            _log.warning(
+                "declining to create a git boundary for bd at %s: %s", self._cwd, refusal
+            )
             return
         try:
             subprocess.run(
@@ -199,6 +211,51 @@ class BdClient:
             _log.warning(
                 "could not establish a git boundary for bd at %s: %s", self._cwd, exc
             )
+
+    @staticmethod
+    def _git_boundary_refusal(target: Path) -> str | None:
+        """Return why ``git init`` must not run at *target*, or ``None`` if safe.
+
+        Three refusals, each covering a way the ancestor-walking ``repo_root``
+        derivation can hand us somewhere it should never write:
+
+        * the filesystem root or any of its immediate children;
+        * the invoking user's home directory;
+        * any path already inside a git repository — a nested repo is not a
+          discovery floor, it is a hole in the parent's index that makes
+          ``git add -A`` fail with "does not have a commit checked out".
+
+        The repository walk deliberately stops before ``$HOME`` and the
+        filesystem root.  A ``.git`` at either is a dotfiles or system-image
+        repository rather than a project we would be nesting inside, and
+        counting it refuses every path on such a machine — which would leave
+        the guard permanently inert instead of merely cautious.
+        """
+        try:
+            resolved = target.expanduser().resolve()
+        except (OSError, RuntimeError) as exc:  # pragma: no cover - defensive
+            return f"path could not be resolved ({exc})"
+
+        if not resolved.is_dir():
+            return "path is not an existing directory"
+        if resolved == Path(resolved.anchor) or resolved.parent == Path(resolved.anchor):
+            return "path is the filesystem root or a top-level directory"
+        try:
+            if resolved == Path.home().resolve():
+                return "path is the user's home directory"
+        except (OSError, RuntimeError):  # pragma: no cover - home unresolvable
+            pass
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):  # pragma: no cover - home unresolvable
+            home = None
+        root = Path(resolved.anchor)
+        for ancestor in resolved.parents:
+            if ancestor == root or ancestor == home:
+                break
+            if (ancestor / ".git").exists():
+                return f"path is already inside the git repository at {ancestor}"
+        return None
 
     @staticmethod
     def _restore_gitignore(

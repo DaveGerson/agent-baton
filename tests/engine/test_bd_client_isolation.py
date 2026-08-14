@@ -247,6 +247,22 @@ def test_bead_store_query_does_not_leak_ancestor_beads(tmp_path):
 
 
 @pytest.mark.skipif(not _BD_AVAILABLE, reason="bd binary not installed")
+@pytest.mark.xfail(
+    reason=(
+        "Capability temporarily unsupported, not abandoned.  This test passed by "
+        "way of _ensure_git_boundary running `git init` in any directory lacking "
+        "a .git, which is unsafe two ways: the repo_root derivation walks "
+        "ancestors and can hand it $HOME or /, and creating a nested repo inside "
+        "the user's project makes `git add -A` there fail with 'does not have a "
+        "commit checked out'.  _git_boundary_refusal now declines those cases, "
+        "which costs this nested-project capability.  bd offers no substitute: "
+        "--db, BEADS_DIR and a pre-created .beads/ were each measured and none "
+        "stops `bd init` walking to an ancestor workspace.  The WS-F053 rework "
+        "must restore this through bd-native scoping and delete this marker; the "
+        "assertions below are the acceptance criteria and must not be relaxed."
+    ),
+    strict=False,
+)
 def test_nested_project_bootstraps_its_own_workspace(tmp_path):
     """A nested project must be able to init, and its writes must stay local."""
     outer = tmp_path / "outer"
