@@ -49,6 +49,9 @@ from agent_baton.core.engine.planning.rules.phase_roles import (
     PHASE_BLOCKED_ROLES,
 )
 from agent_baton.core.engine.planning.services import PlannerServices
+from agent_baton.core.engine.planning.utils.dependency_remap import (
+    remap_dependencies,
+)
 from agent_baton.core.engine.planning.utils.phase_builder import (
     consolidate_team_step,
     is_team_phase,
@@ -282,11 +285,26 @@ class ValidationStage:
         plan_reviewer = services.plan_reviewer
 
         # 12c. Consolidate multi-agent Implement/Fix phases into team steps.
+        # consolidate_team_step() deletes every non-surviving step id in the
+        # phase it collapses; capture the old-id -> surviving-id mapping for
+        # each collapsed phase as we go, then rewrite every depends_on edge
+        # in the plan through it atomically once all collapses are done —
+        # otherwise a dependent step (in this phase or a later one) is left
+        # pointing at a step id that no longer exists, which trips
+        # MachinePlan's plan-graph invariant at assembly time.
+        id_remap: dict[str, str] = {}
         for phase in plan_phases:
             if phase.phase_id in split_phase_ids:
                 continue
             if is_team_phase(phase, task_summary):
-                phase.steps = [consolidate_team_step(phase)]
+                old_step_ids = [step.step_id for step in phase.steps]
+                team_step = consolidate_team_step(phase)
+                phase.steps = [team_step]
+                for old_step_id in old_step_ids:
+                    if old_step_id != team_step.step_id:
+                        id_remap[old_step_id] = team_step.step_id
+        if id_remap:
+            remap_dependencies(plan_phases, id_remap)
 
         # 12c.4. Extract file paths
         extracted_paths = extract_file_paths(task_summary)

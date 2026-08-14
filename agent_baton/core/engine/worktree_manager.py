@@ -8,12 +8,14 @@ Each dispatched non-automation step receives an isolated git worktree at:
 The worktree is created at ``mark_dispatched`` time, used as the subprocess
 ``cwd`` for the launched Claude Code agent, and folded back into the parent
 branch on successful completion.  Failed worktrees are retained on disk for
-Wave 5.1 takeover and reclaimed by ``gc_stale()`` after 72h.
+Wave 5.1 takeover and reclaimed by ``gc_stale()`` after the stale threshold
+(bd-841d: 4h default; see ``_get_default_stale_hours()``).
 
 Configuration (env vars until baton.yaml Wave 1.2 lands):
-    BATON_WORKTREE_ENABLED   ``1`` (default) / ``0`` to disable entirely.
-    BATON_WORKTREE_GC_HOURS  default ``72``; max age for GC reclaim.
-    BATON_WORKTREE_ROOT      default ``.claude/worktrees`` relative to project root.
+    BATON_WORKTREE_ENABLED     ``1`` (default) / ``0`` to disable entirely.
+    BATON_WORKTREE_STALE_HOURS default ``4``; max age for GC reclaim (canonical).
+    BATON_WORKTREE_GC_HOURS    legacy alias for BATON_WORKTREE_STALE_HOURS.
+    BATON_WORKTREE_ROOT        default ``.claude/worktrees`` relative to project root.
 """
 from __future__ import annotations
 
@@ -693,6 +695,26 @@ class WorktreeManager:
                 return handle.base_sha
             commit_hash = current_sha
 
+        # RW-3 (extra 2): "merge"/"rebase" both finish with a working-tree-
+        # updating `git merge` run *in the canonical repo* — it integrates
+        # into whatever branch is checked out there, not necessarily
+        # ``handle.base_branch``.  If a human (or another orchestrator) has
+        # since checked out a different branch, that merge would silently
+        # graft the agent's commit onto the wrong branch and leave
+        # ``base_branch`` never advanced.  Refuse up front, before any git
+        # state is touched, so the worktree is left intact for retry.
+        if strategy in ("merge", "rebase"):
+            current_branch = self._current_canonical_branch()
+            if current_branch != handle.base_branch:
+                raise WorktreeFoldError(
+                    f"Refusing to fold step={handle.step_id}: canonical repo "
+                    f"is checked out on '{current_branch}', not the recorded "
+                    f"base_branch '{handle.base_branch}'. Check out "
+                    f"'{handle.base_branch}' in {self._canonical_repo} before "
+                    "folding, or the agent's work would land on the wrong "
+                    "branch."
+                )
+
         t_start = time.monotonic()
 
         _log.info(
@@ -733,6 +755,13 @@ class WorktreeManager:
         }, duration_ms=elapsed_ms)
 
         return new_head
+
+    def _current_canonical_branch(self) -> str:
+        """Return the branch currently checked out in the canonical repo."""
+        r = _run_git(
+            ["rev-parse", "--abbrev-ref", "HEAD"], cwd=self._canonical_repo,
+        )
+        return r.stdout.strip()
 
     def _rebase_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
         """Rebase worktree branch onto current working branch tip and FF.
@@ -1001,10 +1030,21 @@ class WorktreeManager:
         return 4
 
     # Execution statuses that mean "do not touch this worktree yet" — running
-    # work in progress, or a failed step held open for a developer takeover
-    # session (Wave 5.1).  Both own their worktree via `step_worktrees` and
-    # neither has reached a terminal state.
-    _LIVE_EXECUTION_STATUSES = ("running", "paused-takeover")
+    # work in progress, or any status in the blocked-on-input cluster
+    # (``AwaitingApprovalState`` in ``agent_baton/core/engine/states.py``):
+    # a failed step held open for a developer takeover session (Wave 5.1),
+    # a gate that failed or is pending, or an execution paused awaiting
+    # approval/feedback. All of these own their worktree via
+    # `step_worktrees` and none has reached a terminal state.
+    _LIVE_EXECUTION_STATUSES = (
+        "running",
+        "paused-takeover",
+        "gate_pending",
+        "gate_failed",
+        "approval_pending",
+        "feedback_pending",
+        "paused",
+    )
 
     def _is_in_flight(self, worktree_path: Path) -> tuple[bool, str]:
         """Return (True, task_id) if worktree_path is owned by a live execution.

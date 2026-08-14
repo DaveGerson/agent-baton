@@ -26,9 +26,11 @@ Event ownership split:
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
 
+from agent_baton.core.engine.errors import InvalidGateState
 from agent_baton.core.engine.protocols import ExecutionDriver
 from agent_baton.core.events.bus import EventBus
 from agent_baton.core.events import events as evt
@@ -37,6 +39,8 @@ from agent_baton.core.runtime.launcher import AgentLauncher
 from agent_baton.core.runtime.scheduler import StepScheduler, SchedulerConfig
 from agent_baton.models.decision import DecisionRequest
 from agent_baton.models.execution import ActionType
+
+_log = logging.getLogger(__name__)
 
 
 class TaskWorker:
@@ -386,6 +390,48 @@ class TaskWorker:
         )
 
     async def _handle_gate(self, action: object) -> None:  # action: ExecutionAction
+        """Handle a GATE action, absorbing a rejected gate recording (RW-2.4).
+
+        Delegates to :meth:`_handle_gate_inner` for the actual gate
+        execution/recording logic and catches :class:`InvalidGateState` from
+        any of its ``engine.record_gate_result`` call sites.
+
+        The GATE action this worker is holding can go stale while it awaits
+        a subprocess or a human decision: a CLI invocation, the REST API, or
+        another worker can advance the same execution's phase out from under
+        it.  When that happens the recording is correctly rejected by the
+        engine -- but that is a per-task problem, not a reason to take the
+        whole daemon (and every other task it supervises) down with it.
+
+        Swallowing the exception alone is not a fix: the execution loop
+        would simply ask for the next action again, get the same stale GATE,
+        and spin on it forever.  So a caught rejection also ends the task by
+        transitioning it to ``failed`` (when it isn't already terminal),
+        which the next ``next_action()`` call surfaces as a normal
+        ``FAILED`` action that the execution loop returns on.
+        """
+        try:
+            await self._handle_gate_inner(action)
+        except InvalidGateState as exc:
+            phase_id = getattr(action, "phase_id", 0)
+            _log.warning(
+                "TaskWorker._handle_gate: rejected gate recording for "
+                "phase_id=%s (reason=%s) -- the GATE action this worker was "
+                "holding went stale. Ending the task instead of spinning on "
+                "the same action: %s",
+                phase_id, getattr(exc, "reason", ""), exc,
+            )
+            state = self._engine._load_execution()  # type: ignore[attr-defined]
+            if state is not None and state.status not in ("complete", "failed"):
+                state.transition_to_failed(
+                    reason=(
+                        f"gate recording rejected "
+                        f"({getattr(exc, 'reason', 'invalid_gate_state')}): {exc}"
+                    ),
+                )
+                self._engine._save_execution(state)  # type: ignore[attr-defined]
+
+    async def _handle_gate_inner(self, action: object) -> None:  # action: ExecutionAction
         """Handle a GATE action.
 
         Programmatic gate types (``test``, ``build``, ``lint``, ``spec``) are

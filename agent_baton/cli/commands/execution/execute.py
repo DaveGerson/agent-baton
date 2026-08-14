@@ -28,7 +28,7 @@ from pathlib import Path
 
 from agent_baton.cli.colors import success, error as color_error, warning, info as color_info
 from agent_baton.cli.errors import user_error, validation_error
-from agent_baton.core.engine.errors import ExecutionVetoed
+from agent_baton.core.engine.errors import ExecutionVetoed, InvalidGateState
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.team_backends import UnknownTeamBackendError
 from agent_baton.core.engine.persistence import StatePersistence
@@ -405,9 +405,13 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p_wt_gc.add_argument(
         "--max-age-hours",
         type=int,
-        default=72,
+        default=None,
         metavar="N",
-        help="Reclaim worktrees older than N hours (default: 72)",
+        help=(
+            "Reclaim worktrees older than N hours (default: "
+            "WorktreeManager._get_default_stale_hours(), i.e. "
+            "BATON_WORKTREE_STALE_HOURS / BATON_WORKTREE_GC_HOURS or 4h)"
+        ),
     )
     p_wt_gc.add_argument(
         "--dry-run",
@@ -810,9 +814,15 @@ def handler(args: argparse.Namespace) -> None:
     # unknown under BATON_TEAMS_BACKEND_STRICT=1. Catch it at the command
     # entry so the CLI prints a clean message (matching the API's str(exc)
     # mapping) and exits non-zero instead of surfacing a traceback.
+    #
+    # InvalidGateState (RW-2.4) is the same shape of problem for
+    # `baton execute gate`: a mistyped --phase-id or a gate recorded against
+    # a phase that isn't ready is an operator error, not a crash.
     try:
         _dispatch(args)
     except UnknownTeamBackendError as exc:
+        user_error(str(exc))
+    except InvalidGateState as exc:
         user_error(str(exc))
 
 
@@ -3078,7 +3088,10 @@ def _handle_worktree_gc(args: argparse.Namespace) -> None:
     Calls ``WorktreeManager.gc_stale()`` and prints a summary of reclaimed
     and skipped worktrees.  Exits non-zero if gc raises unexpectedly.
     """
-    max_age_hours: int = getattr(args, "max_age_hours", 72)
+    # RW-3.4: no CLI-level hardcoded default — None delegates to
+    # WorktreeManager._get_default_stale_hours() (env-var aware), so the CLI
+    # can never drift from the manager's own default again.
+    max_age_hours: int | None = getattr(args, "max_age_hours", None)
     dry_run: bool = getattr(args, "dry_run", False)
 
     context_root = _resolve_context_root()
@@ -3088,13 +3101,21 @@ def _handle_worktree_gc(args: argparse.Namespace) -> None:
     try:
         from agent_baton.core.engine.worktree_manager import WorktreeManager
         mgr = WorktreeManager(project_root=project_root)
+        effective_max_age_hours = (
+            max_age_hours
+            if max_age_hours is not None
+            else WorktreeManager._get_default_stale_hours()
+        )
         reclaimed = mgr.gc_stale(max_age_hours=max_age_hours, dry_run=dry_run)
     except Exception as exc:
         print(f"error: worktree-gc failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
     prefix = "[DRY RUN] Would reclaim" if dry_run else "Reclaimed"
-    print(f"{prefix} {len(reclaimed)} worktree(s) (max_age_hours={max_age_hours})")
+    print(
+        f"{prefix} {len(reclaimed)} worktree(s) "
+        f"(max_age_hours={effective_max_age_hours})"
+    )
     for h in reclaimed:
         print(f"  step={h.step_id}  path={h.path}")
 

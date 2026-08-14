@@ -678,9 +678,31 @@ class ExecutionEngine:
         # For now, run a best-effort background GC on engine init.
         if self._worktree_mgr is not None:
             import threading as _threading
+            # RW-3.3: pass terminal_step_ids so this best-effort init GC
+            # cannot reclaim a worktree whose step never reached a terminal
+            # result (e.g. a crashed run left mid-dispatch) — the execution's
+            # own status is not enough on its own, since a step's worktree
+            # must survive until its *step* result is terminal, not merely
+            # until the execution row says so.
+            try:
+                _init_state = self._load_execution()
+            except Exception as _init_gc_exc:
+                _log.debug(
+                    "Init GC: could not load execution state for "
+                    "terminal_step_ids (non-fatal): %s", _init_gc_exc,
+                )
+                _init_state = None
+            _init_terminal_step_ids: set[str] = set()
+            if _init_state is not None:
+                _init_terminal_step_ids = (
+                    _init_state.completed_step_ids | _init_state.failed_step_ids
+                )
             _gc_thread = _threading.Thread(
                 target=self._worktree_mgr.gc_stale,
-                kwargs={"max_age_hours": None},
+                kwargs={
+                    "max_age_hours": None,
+                    "terminal_step_ids": _init_terminal_step_ids,
+                },
                 daemon=True,
             )
             _gc_thread.start()
@@ -3689,6 +3711,32 @@ class ExecutionEngine:
                 phase_id=phase_id,
                 current_phase_id=current_phase_id,
             )
+        if state.status == "approval_pending":
+            raise InvalidGateState(
+                reason=InvalidGateState.REASON_NOT_PENDING,
+                message=(
+                    f"record_gate_result: cannot record a gate for "
+                    f"phase_id={phase_id} while the engine is parked on "
+                    "approval_pending. Recording it would advance the phase "
+                    "with a raw status write that leaves "
+                    "pending_approval_request behind, corrupting the state "
+                    "file. Resolve the pending approval first."
+                ),
+                phase_id=phase_id,
+                current_phase_id=current_phase_id,
+            )
+        if target_phase.gate is None:
+            raise InvalidGateState(
+                reason=InvalidGateState.REASON_NO_GATE,
+                message=(
+                    f"record_gate_result: phase_id={phase_id} has no gate in "
+                    "the plan. Recording a gate result for it would forge an "
+                    "assurance row for a check that was never planned and "
+                    "never ran."
+                ),
+                phase_id=phase_id,
+                current_phase_id=current_phase_id,
+            )
         if passed and not _is_phase_complete(state, phase_id):
             raise InvalidGateState(
                 reason=InvalidGateState.REASON_STEPS_INCOMPLETE,
@@ -4258,6 +4306,23 @@ class ExecutionEngine:
                     gate_output = f"Gate re-run error: {exc}"
 
                 if gate_passed:
+                    # RW-2.1: `record_gate_result` requires every step in the
+                    # phase to have reached a terminal status before it will
+                    # record a passing gate (F002 steps_incomplete guard).
+                    # A takeover step is still "dispatched" at this point —
+                    # no agent ever completed it, the human did, by hand, in
+                    # the worktree — so record that completion here before
+                    # asking for the gate to be recorded.  This is the truth
+                    # of what happened (the step *is* done) rather than a
+                    # guard bypass, and it keeps step_results consistent with
+                    # the rest of the phase-completion machinery.
+                    self.record_step_result(
+                        step_id=step_id,
+                        agent_name=agent_name,
+                        status="complete",
+                        outcome="Completed via human takeover.",
+                        commit_hash=new_head,
+                    )
                     self.record_gate_result(
                         phase_id=phase_obj.phase_id,
                         passed=True,
@@ -4489,13 +4554,36 @@ class ExecutionEngine:
                             )
                 # Failed worktrees: retained — GC will handle after max_age_hours.
 
+        # RW-3 (race fix, uncovered by RW-3.3): the background GC thread
+        # below queries `executions.status` through gc_stale()'s in-flight
+        # guard. That guard can only see status="complete" if the row has
+        # already been written — so the save must happen *before* the
+        # thread starts, not after. Persisting afterward (the previous
+        # order) raced the daemon thread against this synchronous save:
+        # when gc_stale() won the race, it would still see the prior
+        # (non-terminal) status, treat the execution as in-flight, and skip
+        # a worktree that both this method's own terminal_step_ids gate and
+        # the execution's real status agree is safe to reclaim.
+        self._save_execution(state)
+
         # bd-841d: aggressive GC on every execute-complete (daemon thread, non-blocking)
         if self._worktree_mgr is not None:
             import threading as _gc_threading  # noqa: PLC0415
 
+            # RW-3.3: terminal_step_ids gates gc_stale's safety check — a
+            # step whose result never went "complete"/"failed" (e.g. still
+            # "dispatched" because the wave never finished, or the process
+            # died mid-step) must keep its worktree even though the
+            # *execution* itself is being marked complete here.
+            _complete_terminal_step_ids = (
+                state.completed_step_ids | state.failed_step_ids
+            )
+
             def _run_gc_on_complete() -> None:
                 try:
-                    self._worktree_mgr.gc_stale()
+                    self._worktree_mgr.gc_stale(
+                        terminal_step_ids=_complete_terminal_step_ids,
+                    )
                 except Exception as _gc_exc:
                     logger.warning(
                         "BEAD_WARNING: gc_stale on execute-complete raised (non-fatal): %s",
@@ -4523,8 +4611,6 @@ class ExecutionEngine:
                 name=f"worktree-gc-{state.task_id}",
             )
             _gc_thread.start()
-
-        self._save_execution(state)
 
         # Finalise trace.
         # In CLI mode each call creates a fresh engine instance, so self._trace

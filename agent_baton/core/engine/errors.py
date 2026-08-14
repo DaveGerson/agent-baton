@@ -139,6 +139,12 @@ class InvalidGateState(RuntimeError):
        terminal status (``complete``, ``failed``, or ``interrupted``) —
        otherwise a single mistyped gate-pass would skip un-run steps
        permanently.
+    4. ``state.status`` must not be ``approval_pending`` (RW-2) — recording a
+       gate in that window would advance the phase with a raw ``status``
+       write that leaves ``pending_approval_request`` set, violating I1 and
+       leaving the state file unloadable.
+    5. ``target_phase.gate`` must not be ``None`` (RW-2) — a phase the
+       planner gave no gate has no gate result to forge.
 
     The ``reason`` attribute is a short machine-readable tag from this class
     (``REASON_*`` constants) so that callers (e.g. the API layer) can map
@@ -148,6 +154,8 @@ class InvalidGateState(RuntimeError):
     REASON_UNKNOWN_PHASE: str = "unknown_phase"
     REASON_PHASE_MISMATCH: str = "phase_mismatch"
     REASON_STEPS_INCOMPLETE: str = "steps_incomplete"
+    REASON_NOT_PENDING: str = "gate_while_approval_pending"
+    REASON_NO_GATE: str = "no_gate_on_phase"
 
     def __init__(
         self,

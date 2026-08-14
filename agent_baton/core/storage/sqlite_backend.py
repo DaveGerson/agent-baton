@@ -2124,7 +2124,13 @@ def _replace_collection_rows(
                 (
                     task_id,
                     str(step_id),
-                    str(payload_dict.get("worktree_path", "")),
+                    # RW-3.1: WorktreeHandle.to_dict() emits the worktree
+                    # location under the key "path" (also the key read back
+                    # by from_dict() and the on-disk .baton-worktree.json
+                    # manifest that gc_stale() parses) — never "worktree_path".
+                    # Prefer "path"; fall back to "worktree_path" for any
+                    # payload written by an older/alternate caller.
+                    str(payload_dict.get("path") or payload_dict.get("worktree_path", "")),
                     str(payload_dict.get("branch", "")),
                     str(payload_dict.get("base_branch", "")),
                     str(payload_dict.get("head_sha", "")),

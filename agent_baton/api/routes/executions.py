@@ -22,6 +22,7 @@ from agent_baton.api.models.requests import (
     StartExecutionRequest,
 )
 from agent_baton.api.models.responses import ActionResponse, ExecutionResponse, RecordFeedbackResponse
+from agent_baton.core.engine.errors import InvalidGateState
 from agent_baton.core.engine.executor import ExecutionEngine
 from agent_baton.core.engine.team_backends import UnknownTeamBackendError
 from agent_baton.core.runtime.decisions import DecisionManager
@@ -254,6 +255,11 @@ async def record_gate(
 
     Raises:
         HTTPException 404: If no active execution matches *task_id*.
+        HTTPException 409: If ``InvalidGateState`` is raised — the gate was
+            recorded against a phase that doesn't exist, isn't current,
+            hasn't finished its steps, has no gate at all, or is being
+            recorded while the engine is parked on ``approval_pending``.
+            This is a caller mistake, not a server fault (RW-2.4).
         HTTPException 500: If the engine encounters an internal error.
     """
     _assert_active_task(engine, task_id)
@@ -264,6 +270,8 @@ async def record_gate(
             passed=(req.result in ("pass", "pass_with_notes")),
             output=req.notes or "",
         )
+    except InvalidGateState as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

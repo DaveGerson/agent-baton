@@ -647,10 +647,21 @@ def verify_bundle(path: Path) -> tuple[bool, list[str], int]:
                 aibom_anchor = aibom_data.get("chain_anchor", "")
                 segment_tail = _chain_head_hash(segment_path)
                 if aibom_anchor and segment_tail and aibom_anchor != segment_tail:
-                    warnings.append(
-                        "WARNING: AIBOM chain_anchor does not match compliance-segment "
-                        "tail hash — the compliance log may have grown since bundle "
-                        "creation (non-fatal)"
+                    # F015/RW-4: this is the only independent witness against a
+                    # whole-segment re-forge (drop a row, recompute every digest
+                    # from genesis — internally flawless, so
+                    # ``_verify_segment_chain`` alone cannot catch it). Both
+                    # ``aibom.json`` and ``compliance-segment.jsonl`` are
+                    # snapshotted together in the same ``build()`` call and
+                    # ship frozen inside this bundle, so there is no
+                    # legitimate post-bundle-creation drift between them —
+                    # a mismatch here always means one of the two artifacts
+                    # was altered after the bundle was built. Fatal, not a
+                    # warning.
+                    errors.append(
+                        "AIBOM chain_anchor does not match compliance-segment "
+                        "tail hash — the compliance segment may have been "
+                        "altered after the bundle was built"
                     )
             except (OSError, json.JSONDecodeError):
                 pass

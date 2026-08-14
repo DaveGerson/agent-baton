@@ -205,11 +205,15 @@ class TakeoverSession:
             )
         handle = self._mgr.handle_for(self._task_id, step_id)  # type: ignore[attr-defined]
         if handle is None:
+            # RW-3.4: quote the threshold actually in force rather than a
+            # hardcoded number — _get_default_stale_hours() already resolves
+            # BATON_WORKTREE_STALE_HOURS / BATON_WORKTREE_GC_HOURS.
+            _stale_hours = self._mgr._get_default_stale_hours()  # type: ignore[attr-defined]
             raise TakeoverWorktreeMissingError(
                 f"No retained worktree found for step '{step_id}' "
                 f"(task_id={self._task_id!r}). "
-                "The worktree may have been GC'd (72h default) or the step "
-                "never ran with worktree isolation. "
+                f"The worktree may have been GC'd ({_stale_hours}h default) "
+                "or the step never ran with worktree isolation. "
                 "Check: baton execute worktree-gc --dry-run"
             )
         return handle

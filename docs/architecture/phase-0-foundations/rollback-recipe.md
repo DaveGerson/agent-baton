@@ -276,3 +276,28 @@ EXIT   non-zero
 - If you maintain offsite copies of `compliance-audit.jsonl` for
   regulatory retention, keep both the pre-rechain and post-rechain
   versions and document the upgrade event in the audit log itself.
+
+### F015 digest-formula change inverts which logs verify across a rollback
+
+F015 changed the `entry_hash` formula itself: `entry_hash` now commits to
+`prev_hash` as well as the row payload (previously it covered the payload
+only). This is a **second**, later upgrade boundary on top of the
+pre-Phase-0 one described above, and it matters specifically for rollback:
+
+- **Roll forward across F015** (upgrade): rows written under the old
+  payload-only formula stop verifying under the new formula.
+  `baton compliance verify` reports `entry_hash mismatch` and (since the
+  RW-4 fix) names the F015 boundary and advises `baton compliance
+  rechain` — this is an upgrade boundary, not tampering.
+- **Roll back across F015** (this recipe): the inverse happens. Rows
+  written (or rechained) under the *current* prev_hash-committing formula
+  will no longer verify once the code is rolled back to a pre-F015
+  build, because the older binary recomputes `entry_hash` from the
+  payload alone and gets a different digest. A rollback therefore
+  silently flips which rows in `compliance-audit.jsonl` read as intact.
+
+Before rolling back across the F015 commit, back up
+`compliance-audit.jsonl` exactly as in step 1 above, and expect to
+re-`rechain` once you decide which side of the boundary the log should
+live on — don't assume `baton compliance verify` failing immediately
+after a rollback means the log was tampered with in transit.

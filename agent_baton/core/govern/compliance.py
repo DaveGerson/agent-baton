@@ -445,6 +445,41 @@ def verify_chain(log_path: Path) -> tuple[bool, str]:
 
             recomputed = _entry_hash(entry)
             if recomputed != stored_hash:
+                # RW-4/F015 — before reporting bare tamper evidence, check
+                # whether this row's stored digest matches the *legacy*
+                # (pre-F015) payload-only formula: canonical JSON of the
+                # payload alone, not committing to prev_hash.  A genuine
+                # pre-F015 row will match that formula exactly, because it
+                # really was hashed that way when written.  This is
+                # detect-and-advise, not accept: ``ok`` still comes back
+                # ``False`` either way, so a legacy row is never treated as
+                # valid and the F015 fix (committing entry_hash to
+                # prev_hash) is not weakened — there is no version flag an
+                # attacker could flip to downgrade a row to the weak
+                # scheme; we only recognize the legacy formula to phrase a
+                # better error message.
+                legacy_payload = {
+                    k: v for k, v in entry.items()
+                    if k not in ("prev_hash", "entry_hash")
+                }
+                legacy_canonical = json.dumps(
+                    legacy_payload, sort_keys=True, separators=(",", ":")
+                )
+                legacy_hash = hashlib.sha256(
+                    legacy_canonical.encode("utf-8")
+                ).hexdigest()
+                if legacy_hash == stored_hash:
+                    return (
+                        False,
+                        f"Line {line_number}: entry_hash mismatch — this row "
+                        f"predates the F015 digest change (it was written "
+                        f"under the legacy payload-only formula, before "
+                        f"entry_hash committed to prev_hash). This is an "
+                        f"upgrade boundary, not tampering — run "
+                        f"``baton compliance rechain --log {log_path}`` "
+                        f"once to migrate this log to the current chained "
+                        f"format.",
+                    )
                 return (
                     False,
                     f"Line {line_number}: entry_hash mismatch "

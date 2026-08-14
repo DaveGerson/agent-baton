@@ -24,6 +24,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from agent_baton.core.engine.planning.utils.dependency_remap import (
+    remap_dependencies,
+)
 from agent_baton.models.execution import PlanPhase, PlanStep
 from agent_baton.models.taxonomy import ForesightInsight, StepIntent
 
@@ -411,24 +414,12 @@ class ForesightEngine:
         # Rewrite every dependency edge through the remap now that all ids
         # are final. Inserted foresight steps never appear in id_remap (they
         # never existed under an old id), so a pre-existing step can never
-        # end up depending on one. Edges that don't resolve to a known
-        # pre-existing step are dropped rather than silently retained.
-        for phase in new_phases:
-            for step in phase.steps:
-                if not step.depends_on:
-                    continue
-                remapped: list[str] = []
-                for dep in step.depends_on:
-                    new_dep = id_remap.get(dep)
-                    if new_dep is None:
-                        logger.warning(
-                            "Foresight renumbering dropped unmappable "
-                            "dependency %r on step %r",
-                            dep, step.step_id,
-                        )
-                        continue
-                    remapped.append(new_dep)
-                step.depends_on = remapped
+        # end up depending on one. id_remap covers every pre-existing step
+        # id (built above), so a miss means the edge never pointed at a real
+        # step; drop_unmapped=True drops those rather than silently
+        # retaining a dangling edge. Shared with team consolidation's remap
+        # (planning/stages/validation.py) via the same helper.
+        remap_dependencies(new_phases, id_remap, drop_unmapped=True)
 
         return new_phases, insights
 

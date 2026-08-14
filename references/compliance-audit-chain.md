@@ -44,13 +44,46 @@ Resolve once per project:
 the same hashes and reports the same count. Use `--out PATH` for
 dry-runs or air-gapped review without an in-place swap.
 
+## Upgrade boundary: F015 digest-formula change
+
+F015 made `entry_hash` commit to `prev_hash` (previously `entry_hash` was a
+pure function of the row's own payload, and `prev_hash` was an
+unauthenticated pointer field — an attacker could delete, reorder, or
+splice rows and repair the log by rewriting a single hex string per row).
+This closes that hole, but it is an *unconditional* formula change: any
+row written before F015 (every F0.3-era row, since the old `entry_hash`
+never covered `prev_hash`) no longer matches the new formula.
+
+Crossing the F015 boundary, `verify` will report:
+
+```
+Line N: entry_hash mismatch — this row predates the F015 digest change (it
+was written under the legacy payload-only formula, before entry_hash
+committed to prev_hash). This is an upgrade boundary, not tampering — run
+`baton compliance rechain --log <path>` once to migrate this log to the
+current chained format.
+```
+
+That message is *detect-and-advise*, not accept — `verify` still returns
+failure for a legacy row, so a pre-F015 row is never treated as valid.
+There is deliberately no version flag that lets an old-formula row pass;
+resolve it the same way as the pre-F0.3 boundary:
+
+1. Stop any in-flight executions writing to the log.
+2. `baton compliance rechain --log .claude/team-context/compliance-audit.jsonl`
+3. `baton compliance verify --log .claude/team-context/compliance-audit.jsonl`
+   — must report `Chain intact`.
+4. Resume executions; new appends extend the chain under the current
+   (`prev_hash`-committing) formula.
+
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `missing prev_hash/entry_hash` on a row | Pre-F0.3 plain-text entry | `baton compliance rechain` |
 | `prev_hash mismatch` | Row inserted/deleted from middle of log | Investigate; chain is broken — restore from backup, then rechain |
-| `entry_hash mismatch` | Row payload mutated in place | Investigate; same remediation as above |
+| `entry_hash mismatch`, message names the **F015** upgrade boundary | Genuine pre-F015 row (payload-only digest); not tampering | `baton compliance rechain` — see "Upgrade boundary: F015 digest-formula change" above |
+| `entry_hash mismatch`, message does **not** name the F015 boundary | Row payload mutated in place | Investigate; chain is broken — restore from backup, then rechain |
 | `JSON parse error` | Torn write from a killed writer | Operator strips the torn line; future appends continue cleanly (see `tests/govern/test_chain_writer_concurrency.py`) |
 
 ## Concurrency

@@ -79,7 +79,7 @@ Within a task, steps whose `depends_on` sets are satisfied can run in parallel. 
 
 ### Worktree isolation
 
-When steps run concurrently, `WorktreeManager` (`agent_baton/core/engine/worktree_manager.py`) creates a separate git worktree for each step under `.claude/worktrees/<task_id>/<step_id>/`. The agent process runs with that worktree as its working directory. On success the worktree is folded back into the parent branch; on failure it is preserved for forensic inspection or developer takeover. Stale worktrees are reclaimed by `gc_stale()` after 72 hours (`BATON_WORKTREE_GC_HOURS`).
+When steps run concurrently, `WorktreeManager` (`agent_baton/core/engine/worktree_manager.py`) creates a separate git worktree for each step under `.claude/worktrees/<task_id>/<step_id>/`. The agent process runs with that worktree as its working directory. On success the worktree is folded back into the parent branch; on failure it is preserved for forensic inspection or developer takeover. Stale worktrees are reclaimed by `gc_stale()` after a configurable threshold (`BATON_WORKTREE_STALE_HOURS`, default 4 hours; `BATON_WORKTREE_GC_HOURS` is a legacy alias).
 
 The `_WORKTREE_DISCIPLINE_BLOCK` injected into every isolation-mode prompt tells the agent exactly how to operate inside its worktree boundary.
 
