@@ -219,6 +219,9 @@ async def approve_spec_draft(
     Raises:
         HTTPException 404: If the spec draft does not exist.
         HTTPException 409: If the spec draft is not in ``enriched`` status.
+        HTTPException 401: If no caller identity was presented in ``team``
+            approval mode (identity is required to enforce segregation of
+            duties).
         HTTPException 403: If the actor is the same as the submitter in
             ``team`` approval mode.
     """
@@ -233,6 +236,11 @@ async def approve_spec_draft(
 
     actor: str = getattr(request.state, "user_id", "local-user")
     approval_mode: str = getattr(request.state, "approval_mode", "local")
+    if approval_mode == "team" and not actor:
+        raise HTTPException(
+            status_code=401,
+            detail="X-Baton-User (or a bearer token) identity is required to approve in team approval mode.",
+        )
     if approval_mode == "team" and actor == draft.submitted_by:
         raise HTTPException(
             status_code=403,
@@ -274,6 +282,9 @@ async def bounce_spec_draft(
     Raises:
         HTTPException 404: If the spec draft does not exist.
         HTTPException 409: If the spec draft is not in ``enriched`` status.
+        HTTPException 401: If no caller identity was presented in ``team``
+            approval mode (docs/api-reference.md requires identity for
+            approve *and* bounce in team mode).
         HTTPException 422: If feedback is empty (enforced by Pydantic min_length=1).
     """
     draft = store.get(spec_id)
@@ -286,6 +297,12 @@ async def bounce_spec_draft(
         )
 
     actor: str = getattr(request.state, "user_id", "local-user")
+    approval_mode: str = getattr(request.state, "approval_mode", "local")
+    if approval_mode == "team" and not actor:
+        raise HTTPException(
+            status_code=401,
+            detail="X-Baton-User (or a bearer token) identity is required to bounce in team approval mode.",
+        )
     review = ReviewData(action="bounced", actor=actor, feedback=req.feedback)
     updated = store.update_status(spec_id, "bounced", review=review)
     return SpecDraftResponse.from_draft(updated)

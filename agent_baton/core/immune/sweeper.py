@@ -21,6 +21,8 @@ Kind                       Agent
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
@@ -53,6 +55,9 @@ AUTO_FIX_KINDS: frozenset[str] = frozenset({
 
 # Minimum confidence for an auto_fix_directive to be populated.
 _AUTO_FIX_CONFIDENCE_THRESHOLD = 0.85
+
+# Sweep agents are cheap classification passes — run them on the Haiku tier.
+_SWEEP_MODEL = "haiku"
 
 
 @dataclass
@@ -130,13 +135,7 @@ class Sweeper:
         prompt = self._build_prompt(target, context_snapshot)
 
         try:
-            result = self._launcher.launch(  # type: ignore[union-attr]
-                agent_name=agent_name,
-                prompt=prompt,
-                cwd_override=str(target.path.parent)
-                if target.path.is_file()
-                else str(target.path),
-            )
+            result = asyncio.run(self._launch(agent_name, prompt, target))
         except Exception as exc:
             _log.warning(
                 "Sweeper: launch failed for %s/%s: %s",
@@ -145,6 +144,28 @@ class Sweeper:
             return None
 
         return self._parse_result(target, result)
+
+    async def _launch(
+        self, agent_name: str, prompt: str, target: "SweepTarget"
+    ) -> object:
+        """Call ``launcher.launch()`` and drive it to completion.
+
+        ``launch()`` is a coroutine function on the real
+        ``ClaudeCodeLauncher`` (and may return an awaitable from a
+        launcher double too), so the result must actually be awaited
+        rather than treated as if it were returned synchronously.
+        """
+        raw = self._launcher.launch(  # type: ignore[union-attr]
+            agent_name=agent_name,
+            model=_SWEEP_MODEL,
+            prompt=prompt,
+            cwd_override=str(target.path.parent)
+            if target.path.is_file()
+            else str(target.path),
+        )
+        if inspect.isawaitable(raw):
+            raw = await raw
+        return raw
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -178,12 +199,14 @@ class Sweeper:
         if raw is None:
             return None
 
-        # LaunchResult → try .output attribute first.
+        # LaunchResult → try .outcome attribute first (its actual field name;
+        # NOT .output, which LaunchResult does not have).
+        data: dict | None = None
         text: str = ""
         if isinstance(raw, str):
             text = raw
-        elif hasattr(raw, "output") and isinstance(raw.output, str):
-            text = raw.output
+        elif hasattr(raw, "outcome") and isinstance(raw.outcome, str):
+            text = raw.outcome
         elif isinstance(raw, dict):
             data = raw
         else:

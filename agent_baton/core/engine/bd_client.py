@@ -71,6 +71,13 @@ def bd_prefix() -> str:
     return (os.environ.get(_PREFIX_ENV, "").strip() or _DEFAULT_PREFIX)
 
 
+# Commands that are not scoped to a project's ``.beads/`` database — they must
+# run even when *repo_root* has no local database yet (``init``, obviously)
+# or don't touch a database at all (``version``).  Every other command is
+# pinned to ``repo_root/.beads`` via ``--db`` once it exists; see ``_run()``.
+_UNSCOPED_COMMANDS = frozenset({"init", "version"})
+
+
 class BdClient:
     """Stateless wrapper around the ``bd`` CLI for one project workspace.
 
@@ -121,32 +128,91 @@ class BdClient:
 
         The flags below keep ``bd init`` from touching the host project — by
         default ``bd init`` runs an onboarding flow that *appends to
-        ``CLAUDE.md``*, writes ``AGENTS.md`` / ``.agents`` / ``.codex``, installs
-        git hooks via ``core.hooksPath`` (which then auto-commit), and edits the
-        tracked ``.gitignore``.  baton owns those surfaces, so we suppress all of
-        it:
+        ``CLAUDE.md``*, writes ``AGENTS.md`` / ``.agents`` / ``.codex``, and
+        installs git hooks via ``core.hooksPath`` (which then auto-commit).
+        baton owns those surfaces, so we suppress that part of it:
 
         - ``--skip-agents``  — no CLAUDE.md/AGENTS.md/Codex onboarding edits.
         - ``--skip-hooks``   — no git-hook install / ``core.hooksPath`` hijack.
-        - ``--setup-exclude``— keep ``.beads/`` local via ``.git/info/exclude``
-          (untracked) instead of editing the project's ``.gitignore``.
+        - ``--setup-exclude``— also configure ``.git/info/exclude`` for
+          ``.beads/`` (belt-and-suspenders; see the gitignore point below).
         - ``--quiet --non-interactive`` — no prompts, no chatter.
+
+        What the flags do **not** stop: bd 1.2.x appends its own block to the
+        tracked ``.gitignore`` regardless of ``--setup-exclude`` — including a
+        bare ``*.db`` rule broad enough to git-ignore baton's own state DB. We
+        don't trust the flag; we snapshot ``.gitignore`` (or its absence)
+        before calling bd and restore it byte-for-byte afterwards, so this
+        method never leaves a tracked file dirty.
+
+        Separately, ``bd`` discovers ``.beads/`` (and pre-flights this very
+        call's "already initialized" check) by walking *upward* from cwd all
+        the way to the filesystem root — a walk that ``--db``/``BEADS_DIR``
+        do not stop. The walk does stop at a directory's own ``.git``, so we
+        make sure ``repo_root`` has one (a bare, uncommitted ``git init`` is
+        enough) before calling bd, so a nested project boots its own database
+        instead of tripping over an ancestor project's.
         """
         if self.db_exists():
             return
         self._cwd.mkdir(parents=True, exist_ok=True)
-        self._run(
-            [
-                "init",
-                "--prefix", prefix or bd_prefix(),
-                "--skip-agents",
-                "--skip-hooks",
-                "--setup-exclude",
-                "--quiet",
-                "--non-interactive",
-            ],
-            json_output=False,
-        )
+        self._ensure_git_boundary()
+        gitignore = self._cwd / ".gitignore"
+        had_gitignore = gitignore.exists()
+        original_gitignore = gitignore.read_bytes() if had_gitignore else None
+        try:
+            self._run(
+                [
+                    "init",
+                    "--prefix", prefix or bd_prefix(),
+                    "--skip-agents",
+                    "--skip-hooks",
+                    "--setup-exclude",
+                    "--quiet",
+                    "--non-interactive",
+                ],
+                json_output=False,
+            )
+        finally:
+            self._restore_gitignore(gitignore, had_gitignore, original_gitignore)
+
+    def _ensure_git_boundary(self) -> None:
+        """Give bd's ancestor-walking discovery a floor at ``self._cwd``.
+
+        No-op when ``self._cwd`` already has a ``.git`` (the common case —
+        ``repo_root`` is usually already the project's git root, or a git
+        worktree, both of which already stop the walk). Best-effort otherwise:
+        a bare, commit-less ``git init`` costs nothing and is enough to keep
+        bd's discovery from reading — or worse, refusing to init over —
+        whatever ``.beads/`` it finds further up the tree.
+        """
+        if (self._cwd / ".git").exists():
+            return
+        try:
+            subprocess.run(
+                ["git", "init", "-q", str(self._cwd)],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log.warning(
+                "could not establish a git boundary for bd at %s: %s", self._cwd, exc
+            )
+
+    @staticmethod
+    def _restore_gitignore(
+        path: Path, had_before: bool, original: bytes | None
+    ) -> None:
+        """Undo whatever ``bd init`` did to *path*, restoring the prior state."""
+        now_exists = path.exists()
+        if had_before:
+            if not now_exists or path.read_bytes() != original:
+                path.write_bytes(original)  # type: ignore[arg-type]
+                _log.info("restored .gitignore that bd init rewrote: %s", path)
+        elif now_exists:
+            path.unlink()
+            _log.info("removed .gitignore that bd init created: %s", path)
 
     # ------------------------------------------------------------------
     # Writes
@@ -292,13 +358,33 @@ class BdClient:
     # ------------------------------------------------------------------
 
     def _run(self, args: list[str], *, json_output: bool) -> str:
-        """Run ``bd <args>`` in cwd and return stdout (raises on failure)."""
+        """Run ``bd <args>`` in cwd and return stdout (raises on failure).
+
+        Every command except ``init``/``version`` is pinned to
+        ``repo_root/.beads`` via ``--db``. Without this, ``bd`` auto-discovers
+        ``.beads/`` by walking upward from cwd all the way to the filesystem
+        root, so a project that hasn't created its own ``.beads/`` yet would
+        silently read (and, worse, write into) whatever ancestor workspace
+        ``bd`` finds first. When there's nothing local to pin to, fail closed
+        instead of shelling out and risking that leak — callers (``show()``,
+        ``BdBeadStore.read``/``query``) already treat a raised ``BdError`` as
+        "nothing here".
+        """
         if not self.available():
             raise BdNotAvailable(
                 f"'{self._bin}' not found. Install beads (see install.sh) or set "
                 f"{_BIN_ENV} to the bd binary path."
             )
+        command = args[0] if args else ""
+        scoped = command not in _UNSCOPED_COMMANDS
+        if scoped and not self.db_exists():
+            raise BdError(
+                f"no local bead database found under {self._cwd} (not found); "
+                "call BdClient.init() first"
+            )
         cmd = [self._bin, *args]
+        if scoped:
+            cmd += ["--db", str(self._cwd / ".beads")]
         if json_output:
             cmd.append("--json")
         try:

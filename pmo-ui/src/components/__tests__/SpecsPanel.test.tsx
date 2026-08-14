@@ -39,4 +39,63 @@ describe('SpecsPanel', () => {
 
     expect(await screen.findByText(/1 spec\b/)).toBeInTheDocument();
   });
+
+  it('renders specs from the bare-array shape the production backend returns', async () => {
+    // GET /api/v1/specs is served by agent_baton/api/routes/specs.py::list_specs,
+    // which is declared `-> list[dict[str, Any]]` and returns
+    // `[s.to_dict() for s in specs]` — a bare JSON array. This is the ONLY
+    // shape a real deployment ever produces, so a non-empty array must be
+    // rendered, not silently dropped.
+    vi.spyOn(api, 'listSpecs').mockResolvedValue([
+      {
+        spec_id: 'spec-aaa',
+        project_id: 'default',
+        author_id: 'ada',
+        task_type: 'feature',
+        template_id: 'feature',
+        title: 'real spec one',
+        state: 'approved',
+        content: 'goal: ship it',
+        content_hash: 'deadbeef',
+        score_json: '{}',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-02T00:00:00Z',
+        approved_at: '2026-01-02T00:00:00Z',
+        approved_by: 'grace',
+        linked_plan_ids: [],
+      },
+      {
+        spec_id: 'spec-bbb',
+        project_id: 'default',
+        author_id: 'grace',
+        task_type: 'bug-fix',
+        template_id: 'bug-fix',
+        title: 'real spec two',
+        state: 'draft',
+        content: 'goal: fix it',
+        content_hash: 'cafebabe',
+        score_json: '{}',
+        created_at: '2026-01-03T00:00:00Z',
+        updated_at: '2026-01-04T00:00:00Z',
+        approved_at: '',
+        approved_by: '',
+        linked_plan_ids: [],
+      },
+    ] as never);
+
+    render(<SpecsPanel onBack={() => {}} />);
+
+    // Header counter reflects what the backend actually returned.
+    expect(await screen.findByText(/2 specs/)).toBeInTheDocument();
+
+    // Both specs are visible as rows.
+    expect(screen.getByText('real spec one')).toBeInTheDocument();
+    expect(screen.getByText('real spec two')).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    // And the panel must NOT claim the store is empty — the silent-failure
+    // symptom this pins is a confident, error-free "no specs" screen.
+    expect(screen.queryByText(/No specs yet/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 });

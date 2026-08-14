@@ -309,17 +309,37 @@ class BudgetTuner:
             threshold, suitable for automatic application without human
             review.
         """
-        all_recs = self.analyze()
-        eligible: list[BudgetRecommendation] = []
+        return [
+            rec for rec in self.analyze() if self.is_auto_applicable(rec, threshold)
+        ]
 
-        for rec in all_recs:
-            # Only downgrades are auto-applicable
-            if _tier_index(rec.recommended_tier) >= _tier_index(rec.current_tier):
-                continue
-            if rec.confidence >= threshold:
-                eligible.append(rec)
+    @staticmethod
+    def is_auto_applicable(rec: BudgetRecommendation, threshold: float = 0.8) -> bool:
+        """Return whether *rec* meets the cost-safety auto-apply guardrail.
 
-        return eligible
+        Same rule enforced by :meth:`auto_apply_recommendations`: only
+        DOWNGRADE recommendations at or above *threshold* confidence are
+        auto-applicable.  Upgrades are never auto-applicable at any
+        confidence -- increasing spend without human oversight violates the
+        cost-safety principle.
+
+        Callers that read ``budget-recommendations.json`` directly (e.g.
+        :func:`agent_baton.core.engine.planning.utils.risk_and_policy.select_budget_tier`)
+        must run every recommendation through this check before honouring
+        it, so that a recommendation the improvement loop escalates for
+        human review cannot silently take effect via the read path.
+
+        Args:
+            rec: The recommendation to evaluate.
+            threshold: Minimum confidence score (0.0 -- 1.0) required.
+
+        Returns:
+            ``True`` if *rec* is a downgrade meeting the confidence
+            threshold, ``False`` otherwise.
+        """
+        if _tier_index(rec.recommended_tier) >= _tier_index(rec.current_tier):
+            return False
+        return rec.confidence >= threshold
 
     def merge_cross_project_cost_signals(
         self,

@@ -310,11 +310,14 @@ class TestApproveGate:
         assert body["task_id"] == card.card_id
         assert body["phase_id"] == 1
 
-        mock_record.assert_called_once_with(
-            phase_id=1,
-            result="approve",
-            feedback="Looks good",
-        )
+        # Only the plan-shaped kwargs are pinned here; identity plumbing
+        # (actor / decision_source) is covered in
+        # tests/test_api_pmo_gate_identity.py.
+        assert mock_record.call_count == 1
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["phase_id"] == 1
+        assert kwargs["result"] == "approve"
+        assert kwargs["feedback"] == "Looks good"
 
     def test_approve_without_notes_uses_empty_string_feedback(
         self, tmp_path: Path, registered_store: PmoStore
@@ -331,11 +334,11 @@ class TestApproveGate:
             )
 
         assert r.status_code == 200
-        mock_record.assert_called_once_with(
-            phase_id=2,
-            result="approve",
-            feedback="",
-        )
+        assert mock_record.call_count == 1
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["phase_id"] == 2
+        assert kwargs["result"] == "approve"
+        assert kwargs["feedback"] == ""
 
     def test_returns_500_when_engine_raises_runtime_error(
         self, tmp_path: Path, registered_store: PmoStore
@@ -438,11 +441,11 @@ class TestRejectGate:
         assert body["task_id"] == card.card_id
         assert body["phase_id"] == 1
 
-        mock_record.assert_called_once_with(
-            phase_id=1,
-            result="reject",
-            feedback="Quality gates not met",
-        )
+        assert mock_record.call_count == 1
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["phase_id"] == 1
+        assert kwargs["result"] == "reject"
+        assert kwargs["feedback"] == "Quality gates not met"
 
     def test_returns_500_when_engine_raises_value_error(
         self, tmp_path: Path, registered_store: PmoStore

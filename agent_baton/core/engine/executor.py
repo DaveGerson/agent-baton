@@ -3632,6 +3632,59 @@ class ExecutionEngine:
             actor: Best-available identity string (A2).
         """
         state = self._require_execution("record_gate_result")
+
+        # ── F002 validation: reject before mutating ─────────────────────────
+        # A gate recording that is stamped against a phase that doesn't
+        # exist, isn't current, or hasn't finished its steps must not touch
+        # state at all — that's the guard against silently discarding
+        # planned work and forging the assurance trail.
+        from agent_baton.core.engine.errors import InvalidGateState
+        from agent_baton.core.engine._executor_helpers import (
+            is_phase_complete as _is_phase_complete,
+        )
+
+        target_phase = next(
+            (p for p in state.plan.phases if p.phase_id == phase_id), None
+        )
+        current_phase_obj = state.current_phase_obj
+        current_phase_id = (
+            current_phase_obj.phase_id if current_phase_obj is not None else None
+        )
+        if target_phase is None:
+            raise InvalidGateState(
+                reason=InvalidGateState.REASON_UNKNOWN_PHASE,
+                message=(
+                    f"record_gate_result: phase_id={phase_id} does not exist "
+                    f"in plan {state.plan.task_id!r}."
+                ),
+                phase_id=phase_id,
+                current_phase_id=current_phase_id,
+            )
+        if target_phase is not current_phase_obj:
+            raise InvalidGateState(
+                reason=InvalidGateState.REASON_PHASE_MISMATCH,
+                message=(
+                    f"record_gate_result: phase_id={phase_id} is not the "
+                    f"current phase (current is {current_phase_id!r}). "
+                    "Recording a gate for a non-current phase would silently "
+                    "advance past unrun work."
+                ),
+                phase_id=phase_id,
+                current_phase_id=current_phase_id,
+            )
+        if passed and not _is_phase_complete(state, phase_id):
+            raise InvalidGateState(
+                reason=InvalidGateState.REASON_STEPS_INCOMPLETE,
+                message=(
+                    f"record_gate_result: cannot record a passing gate for "
+                    f"phase_id={phase_id} while its steps have not all "
+                    "reached a terminal status. This would discard the "
+                    "un-run steps."
+                ),
+                phase_id=phase_id,
+                current_phase_id=current_phase_id,
+            )
+
         # G1: bump turn_count for the overlay.
         state.turn_count += 1
 
@@ -4817,7 +4870,17 @@ class ExecutionEngine:
                     plan_snapshot=state.plan.to_dict(),
                 )
 
-        self.recover_dispatched_steps()
+        # ``recover_dispatched_steps()`` loads and saves its *own* copy of the
+        # execution state rather than mutating ``state`` above. If it actually
+        # cleared anything, ``state`` is now stale — driving the resolver loop
+        # on it and then saving it back at the end of this method would undo
+        # the recovery it just persisted. Reload after a real recovery so the
+        # rest of ``resume()`` (and its own final save) operates on the
+        # post-recovery state, not the pre-crash snapshot.
+        if self.recover_dispatched_steps():
+            reloaded = self._load_execution()
+            if reloaded is not None:
+                state = reloaded
 
         # ── Resume: restore run-level spend counter (bd-3f80) ────────────────
         # Reconstruct BudgetEnforcer seeded with the persisted cumulative spend

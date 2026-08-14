@@ -244,12 +244,22 @@ def select_budget_tier(
     agent_count: int,
     budget_tuner: "BudgetTuner",
 ) -> str:
-    """Select budget tier, preferring a BudgetTuner recommendation if available."""
+    """Select budget tier, preferring a BudgetTuner recommendation if available.
+
+    Guardrail (F066): ``budget-recommendations.json`` may contain recommendations
+    the improvement loop has escalated for human review rather than applied --
+    it writes the full, unfiltered analysis so ``baton improve budget`` can
+    display it.  Honouring an entry here therefore requires the same
+    cost-safety check :class:`~agent_baton.core.learn.budget_tuner.BudgetTuner`
+    applies before auto-applying anything: only downgrades at or above the
+    confidence threshold are used.  Upgrades and low-confidence recommendations
+    fall through to the agent-count default below.
+    """
     try:
         recs = budget_tuner.load_recommendations()
         if recs:
             for rec in recs:
-                if rec.task_type == task_type:
+                if rec.task_type == task_type and budget_tuner.is_auto_applicable(rec):
                     return rec.recommended_tier
     except Exception:
         pass

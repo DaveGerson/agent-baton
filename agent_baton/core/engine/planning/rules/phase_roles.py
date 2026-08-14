@@ -1,6 +1,8 @@
 """Phase ↔ agent role affinity tables."""
 from __future__ import annotations
 
+from agent_baton.core.orchestration.router import REVIEWER_AGENTS
+
 # Preferred agent roles per phase, in priority order.  The 4-pass
 # affinity assignment in ``planning.stages.routing`` walks these to
 # match agents to phases where they are the natural fit (e.g. architect
@@ -31,10 +33,22 @@ PHASE_IDEAL_ROLES: dict[str, list[str]] = {
 # bd-0e36 (architects on Implement) and bd-1974 (implementers on Review)
 # both surfaced from violations of this table; keeping it as data here
 # makes the constraints visible and overridable per project.
+#
+# Every implement-type phase also blocks REVIEWER_AGENTS (bd-<...>):
+# ``assign_agents_to_phases()``'s round-robin/fallback passes had no
+# reason to skip a reviewer-class agent for "draft"/"build"/"develop"
+# (only "implement"/"fix" blocked architects), so a reviewer that lost
+# the race for the single review-type phase slot was silently force-
+# landed in an implement-type phase — exactly the plan shape
+# ValidationStage's ``agent_phase_mismatch`` gate hard-blocks.  Keeping
+# the block here (not just in the gate) stops the planner from ever
+# building that plan in the first place.
 PHASE_BLOCKED_ROLES: dict[str, set[str]] = {
-    "implement": {"architect", "ai-systems-architect"},
-    "fix": {"architect", "ai-systems-architect"},
-    "draft": set(),
+    "implement": {"architect", "ai-systems-architect"} | REVIEWER_AGENTS,
+    "fix": {"architect", "ai-systems-architect"} | REVIEWER_AGENTS,
+    "draft": set(REVIEWER_AGENTS),
+    "build": set(REVIEWER_AGENTS),
+    "develop": set(REVIEWER_AGENTS),
     "review": {
         "backend-engineer", "frontend-engineer", "devops-engineer",
         "data-engineer", "data-scientist", "data-analyst",

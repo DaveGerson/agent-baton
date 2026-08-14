@@ -106,6 +106,7 @@ def enrich(title: str, body: str) -> EnrichmentData:
 
     try:
         from agent_baton.core.engine.cost_estimator import forecast_plan as _forecast_plan
+        from agent_baton.core.engine.cost_estimator import step_cost_usd as _step_cost_usd
         from agent_baton.models.execution import MachinePlan, PlanPhase, PlanStep
 
         agents = _DEFAULT_ROSTER_BY_RISK.get(risk_level, ["developer"])
@@ -132,17 +133,15 @@ def enrich(title: str, body: str) -> EnrichmentData:
         est_usd_mid = round(mid, 6)
         est_usd_high = round(1.25 * mid, 6)
 
-        # Per-agent breakdown
+        # Per-agent breakdown. ``fc.per_step_tokens`` is a list of
+        # ``(step_id, tokens)`` in the same order as ``steps`` (the stub
+        # plan has a single phase with no team members), so zip them
+        # positionally to recover the agent each token count belongs to.
         breakdown = [
-            {"agent_name": step.agent_name, "model": "sonnet",
-             "est_steps": 1, "est_tokens": tokens, "est_usd": round(cost_usd, 6)}
-            for (_, tokens), cost_usd in zip(
-                fc.per_step_tokens,
-                [
-                    (t / 1_000_000.0) * fc.total_cost_usd / max(fc.total_tokens, 1) * 1_000_000
-                    for _, t in fc.per_step_tokens
-                ],
-            )
+            {"agent_name": step.agent_name, "model": step.model,
+             "est_steps": 1, "est_tokens": tokens,
+             "est_usd": round(_step_cost_usd(tokens, step.model), 6)}
+            for step, (_step_id, tokens) in zip(steps, fc.per_step_tokens)
         ]
 
         # Attempt history-calibrated upgrade
@@ -163,7 +162,7 @@ def enrich(title: str, body: str) -> EnrichmentData:
                 logger.debug("History-calibrated cost forecast failed; using defaults", exc_info=True)
 
     except Exception:  # noqa: BLE001
-        logger.debug("Cost forecast failed; returning zeros", exc_info=True)
+        logger.warning("Cost forecast failed; returning zeros", exc_info=True)
 
     # --- Step 4: spec-quality rubric (deterministic, no LLM) ----------------
     spec_quality: dict | None = None

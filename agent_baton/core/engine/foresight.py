@@ -349,6 +349,21 @@ class ForesightEngine:
         if not insertions:
             return phases, []
 
+        # Pre-pass: compute the old-step-id -> new-step-id remap for every
+        # pre-existing step BEFORE any id is actually reassigned. This must
+        # happen as a single pass over the original ids; doing it interleaved
+        # with the renumbering below would let a later phase's original id
+        # collide with an already-assigned new id, producing a plausible but
+        # wrong edge (the exact bug this remap exists to prevent).
+        id_remap: dict[str, str] = {}
+        remap_next_phase_id = 1
+        for phase in phases:
+            if phase.phase_id in insertions:
+                remap_next_phase_id += len(insertions[phase.phase_id])
+            for i, step in enumerate(phase.steps, start=1):
+                id_remap[step.step_id] = f"{remap_next_phase_id}.{i}"
+            remap_next_phase_id += 1
+
         # Build new phase list with insertions
         new_phases: list[PlanPhase] = []
         next_phase_id = 1
@@ -392,6 +407,28 @@ class ForesightEngine:
                 step.step_id = f"{next_phase_id}.{i}"
             new_phases.append(phase)
             next_phase_id += 1
+
+        # Rewrite every dependency edge through the remap now that all ids
+        # are final. Inserted foresight steps never appear in id_remap (they
+        # never existed under an old id), so a pre-existing step can never
+        # end up depending on one. Edges that don't resolve to a known
+        # pre-existing step are dropped rather than silently retained.
+        for phase in new_phases:
+            for step in phase.steps:
+                if not step.depends_on:
+                    continue
+                remapped: list[str] = []
+                for dep in step.depends_on:
+                    new_dep = id_remap.get(dep)
+                    if new_dep is None:
+                        logger.warning(
+                            "Foresight renumbering dropped unmappable "
+                            "dependency %r on step %r",
+                            dep, step.step_id,
+                        )
+                        continue
+                    remapped.append(new_dep)
+                step.depends_on = remapped
 
         return new_phases, insights
 

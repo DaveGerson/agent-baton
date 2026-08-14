@@ -1951,6 +1951,10 @@ async def approve_gate(
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
 
+    # Resolve once and reuse for both the engine call and the approval_log
+    # audit row, so the two audit trails always agree on one identity.
+    user_id: str = getattr(request.state, "user_id", "local-user")
+
     context_root = project_root / ".claude" / "team-context"
     try:
         backend = detect_backend(context_root)
@@ -1965,6 +1969,8 @@ async def approve_gate(
             phase_id=req.phase_id,
             result="approve",
             feedback=req.notes or "",
+            actor=user_id,
+            decision_source="api",
         )
     except (InvalidApprovalState, ComplianceWriteError, ExecutionStateInconsistency) as exc:
         status, body = _approval_error_response(exc)
@@ -1973,7 +1979,6 @@ async def approve_gate(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Write approval_log entry (best-effort — never block the response).
-    user_id: str = getattr(request.state, "user_id", "local-user")
     try:
         central_store: CentralStore = central  # type: ignore[assignment]
         central_store.execute(
@@ -2072,6 +2077,10 @@ async def reject_gate(
 
     card, project_root = _locate_awaiting_card(task_id, scanner, store)
 
+    # Resolve once and reuse for both the engine call and the approval_log
+    # audit row, so the two audit trails always agree on one identity.
+    user_id: str = getattr(request.state, "user_id", "local-user")
+
     context_root = project_root / ".claude" / "team-context"
     try:
         backend = detect_backend(context_root)
@@ -2086,6 +2095,8 @@ async def reject_gate(
             phase_id=req.phase_id,
             result="reject",
             feedback=req.reason,
+            actor=user_id,
+            decision_source="api",
         )
     except (InvalidApprovalState, ComplianceWriteError, ExecutionStateInconsistency) as exc:
         status, body = _approval_error_response(exc)
@@ -2094,7 +2105,6 @@ async def reject_gate(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Write approval_log entry (best-effort — never block the response).
-    user_id: str = getattr(request.state, "user_id", "local-user")
     try:
         central_store: CentralStore = central  # type: ignore[assignment]
         central_store.execute(

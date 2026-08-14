@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; if echo \"$FILE\" | grep -qE \"(/(\\\\.|^)\\.env($|/)|/secrets/|/node_modules/|\\\\.(pem|key)$|/\\.credentials)\"; then echo \"BLOCKED: Write to protected path: $FILE\" >&2; exit 2; fi; exit 0'"
+            "command": "bash -c 'FILE=$(python3 -c \"import sys, json; d = json.load(sys.stdin); print(d.get(\\\"tool_input\\\", {}).get(\\\"file_path\\\") or d.get(\\\"tool_input\\\", {}).get(\\\"path\\\", \\\"\\\"))\" 2>/dev/null); if [ -z \"$FILE\" ]; then echo \"BLOCKED: could not resolve target file path\" >&2; exit 2; fi; if echo \"$FILE\" | grep -qE \"(^|/)\\.env($|/|\\.)|(^|/)secrets/|(^|/)node_modules/|\\.(pem|key)$|(^|/)\\.credentials\"; then echo \"BLOCKED: Write to protected path: $FILE\" >&2; exit 2; fi; exit 0'"
           }
         ]
       },

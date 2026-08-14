@@ -505,7 +505,6 @@ class ClaudeCodeLauncher:
                 subagent's bead/state writes target the correct task.
         """
         start = time.monotonic()
-        pre_commit = await self._git_rev_parse()
 
         agent: AgentDefinition | None = None
         if self._registry is not None:
@@ -521,6 +520,11 @@ class ClaudeCodeLauncher:
         use_stdin = len(prompt.encode()) > self._config.prompt_file_threshold
         # Wave 1.3: cwd_override takes precedence over the configured directory.
         cwd = cwd_override or str(self._config.working_directory or Path.cwd())
+        # Probe HEAD in the same directory the agent subprocess will run in
+        # (the worktree, when cwd_override is set) — otherwise a commit made
+        # inside an isolated worktree is invisible, and a concurrent commit
+        # on the parent repo gets misattributed to the worktree agent.
+        pre_commit = await self._git_rev_parse(cwd=cwd)
 
         if use_stdin:
             # Large prompt — deliver via stdin; drop the -p flag from the command.
@@ -559,12 +563,15 @@ class ClaudeCodeLauncher:
 
             break
 
-        # Populate git fields if the agent committed anything.
+        # Populate git fields if the agent committed anything. Probe in the
+        # same directory as the pre-commit probe above (see comment there).
         if result.status == "complete" and pre_commit:
-            post_commit = await self._git_rev_parse()
+            post_commit = await self._git_rev_parse(cwd=cwd)
             if post_commit and post_commit != pre_commit:
                 result.commit_hash = post_commit
-                result.files_changed = await self._git_diff_files(pre_commit, post_commit)
+                result.files_changed = await self._git_diff_files(
+                    pre_commit, post_commit, cwd=cwd
+                )
 
         return result
 
@@ -892,8 +899,15 @@ class ClaudeCodeLauncher:
         lower = stderr.lower()
         return "rate limit" in lower or "429" in lower
 
-    async def _git_rev_parse(self) -> str:
-        """Return the current HEAD commit hash, or ``""`` on failure."""
+    async def _git_rev_parse(self, cwd: str | None = None) -> str:
+        """Return the current HEAD commit hash, or ``""`` on failure.
+
+        Args:
+            cwd: Directory to probe HEAD in. Defaults to the configured
+                working directory. Callers must pass the worktree path
+                (Wave 1.3 ``cwd_override``) so the probe reflects the
+                repo the agent actually ran in, not the parent repo.
+        """
         if self._git_bin is None:
             return ""
         try:
@@ -901,7 +915,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "rev-parse", "HEAD",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd or str(self._config.working_directory or Path.cwd()),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode == 0:
@@ -910,8 +924,17 @@ class ClaudeCodeLauncher:
             pass
         return ""
 
-    async def _git_diff_files(self, from_commit: str, to_commit: str) -> list[str]:
-        """Return files changed between *from_commit* and *to_commit*."""
+    async def _git_diff_files(
+        self, from_commit: str, to_commit: str, cwd: str | None = None
+    ) -> list[str]:
+        """Return files changed between *from_commit* and *to_commit*.
+
+        Args:
+            cwd: Directory to run ``git diff`` in. Defaults to the
+                configured working directory; pass the worktree path so
+                the diff is resolved against the repo that produced the
+                commits (see :meth:`_git_rev_parse`).
+        """
         if self._git_bin is None or not from_commit or not to_commit:
             return []
         try:
@@ -919,7 +942,7 @@ class ClaudeCodeLauncher:
                 self._git_bin, "diff", "--name-only", from_commit, to_commit,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=str(self._config.working_directory or Path.cwd()),
+                cwd=cwd or str(self._config.working_directory or Path.cwd()),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:

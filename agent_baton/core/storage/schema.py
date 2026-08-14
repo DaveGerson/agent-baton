@@ -40,7 +40,7 @@ throughout the storage subsystem.  Three distinct schemas are defined:
     current ``SCHEMA_VERSION``.
 """
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 
 # Sequential migration scripts: {version: DDL_string}
 MIGRATIONS: dict[int, str] = {
@@ -1412,6 +1412,23 @@ ALTER TABLE plans ADD COLUMN manager_mode INTEGER NOT NULL DEFAULT 0;
 -- published, so databases migrated by master must still receive this column.
 ALTER TABLE plans ADD COLUMN plan_diagnostics TEXT NOT NULL DEFAULT '{}';
 """,
+    48: """
+-- v48 (F023): persist an explicit intra-phase ordinal on plan_steps.
+--
+-- step_id is free-form TEXT (planner ids look like "1.10", "1.2", ...), so
+-- reconstructing step order via ``ORDER BY step_id`` sorts lexicographically
+-- and scrambles any phase with ten or more steps ("1.10" < "1.2" as text).
+-- step_ordinal records the author-declared position explicitly so load
+-- order no longer depends on step_id's text shape.
+--
+-- Applied to BOTH project and central databases via
+-- ConnectionManager._run_migrations() (see v45's note above). Existing
+-- rows default to 0 -- callers that re-save a plan (the common case, since
+-- _upsert_plan always rewrites plan_steps in full) get correct ordinals on
+-- the next save; rows that are never re-saved keep whatever order the
+-- pre-v48 fallback produced.
+ALTER TABLE plan_steps ADD COLUMN step_ordinal INTEGER NOT NULL DEFAULT 0;
+""",
 }
 
 # =====================================================================
@@ -1609,6 +1626,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
     step_type             TEXT NOT NULL DEFAULT 'developing',
     command               TEXT NOT NULL DEFAULT '',
+    -- v48 (F023): explicit intra-phase position -- see MIGRATIONS[48] above.
+    step_ordinal          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, step_id),
     FOREIGN KEY (task_id, phase_id) REFERENCES plan_phases(task_id, phase_id) ON DELETE CASCADE
 );
@@ -2722,6 +2741,8 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     knowledge_attachments TEXT NOT NULL DEFAULT '[]',
     step_type             TEXT NOT NULL DEFAULT 'developing',
     command               TEXT NOT NULL DEFAULT '',
+    -- v48 (F023): explicit intra-phase position -- see MIGRATIONS[48] above.
+    step_ordinal          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, task_id, step_id)
 );
 CREATE INDEX IF NOT EXISTS idx_central_steps_agent ON plan_steps(agent_name);

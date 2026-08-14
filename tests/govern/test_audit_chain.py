@@ -56,11 +56,19 @@ def test_entry_hash_is_reproducible() -> None:
 
 
 def test_entry_hash_excludes_hash_fields() -> None:
-    # Both prev_hash and entry_hash are stripped before hashing.
-    # Two entries with same payload but different hash fields must produce same hash.
+    # F015: entry_hash MUST depend on prev_hash -- that's what makes the
+    # chain tamper-evident (a differing predecessor pointer must produce a
+    # differing digest, otherwise prev_hash is an unauthenticated field an
+    # attacker can rewrite freely). This inverts the pre-fix assertion,
+    # which enshrined exactly that vulnerability.
     e1 = {"event": "x", "prev_hash": "aaa", "entry_hash": "bbb"}
     e2 = {"event": "x", "prev_hash": "ccc", "entry_hash": "ddd"}
-    assert _entry_hash(e1) == _entry_hash(e2)
+    assert _entry_hash(e1) != _entry_hash(e2)
+
+    # entry_hash must still be independent of the entry_hash field itself
+    # -- a digest cannot cover its own output.
+    e1_diff_own_hash = {"event": "x", "prev_hash": "aaa", "entry_hash": "different"}
+    assert _entry_hash(e1) == _entry_hash(e1_diff_own_hash)
 
     # Two entries with different payload must produce different hash.
     e3 = {"event": "y", "prev_hash": "aaa", "entry_hash": "bbb"}

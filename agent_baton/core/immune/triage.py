@@ -21,6 +21,8 @@ Auto-fix dispatch uses the ``immune-autofix`` Haiku micro-agent: a synthetic
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 __all__ = ["FindingTriage"]
+
+# The immune-autofix micro-agent runs on the Haiku tier.
+_AUTOFIX_MODEL = "haiku"
 
 
 class FindingTriage:
@@ -164,14 +169,8 @@ class FindingTriage:
                 "FindingTriage: dispatching auto-fix step_id=%s for bead %s",
                 step_id, bead_id,
             )
-            self._launcher.launch(  # type: ignore[union-attr]
-                agent_name="immune-autofix",
-                prompt=prompt,
-                cwd_override=str(finding.target.path.parent)
-                if finding.target.path.is_file()
-                else str(finding.target.path),
-            )
-            # Record the token spend against the immune daily budget.
+            asyncio.run(self._launch(prompt, finding))
+            # Launch completed without raising — only now book the spend.
             # Estimate: 4K input + 1K output for a Haiku micro-fix.
             self._budget.record_immune_spend(
                 target_path=str(finding.target.path),
@@ -183,3 +182,25 @@ class FindingTriage:
             _log.warning(
                 "FindingTriage: auto-fix dispatch failed for %s: %s", bead_id, exc
             )
+
+    async def _launch(self, prompt: str, finding: "SweepFinding") -> object:
+        """Call ``launcher.launch()`` and drive it to completion.
+
+        ``launch()`` is a coroutine function on the real
+        ``ClaudeCodeLauncher`` (and may return an awaitable from a
+        launcher double too).  Calling it without awaiting the result
+        would silently no-op the dispatch while still appearing to
+        succeed — this is what let auto-fix spend get booked for
+        launches that never actually ran.
+        """
+        raw = self._launcher.launch(  # type: ignore[union-attr]
+            agent_name="immune-autofix",
+            model=_AUTOFIX_MODEL,
+            prompt=prompt,
+            cwd_override=str(finding.target.path.parent)
+            if finding.target.path.is_file()
+            else str(finding.target.path),
+        )
+        if inspect.isawaitable(raw):
+            raw = await raw
+        return raw

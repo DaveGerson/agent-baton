@@ -85,9 +85,41 @@ class UsageLogger:
     # ── Read ───────────────────────────────────────────────────────────────
 
     def read_all(self) -> list[TaskUsageRecord]:
-        """Read all usage records from the log file.
+        """Read all usage records, merging the JSONL log with SQLite (F098).
+
+        ``ExecutionEngine`` may be built with a SQLite storage backend (the
+        CLI path and — since the F098 fix — the daemon path via
+        ``ExecutionContext.build``) or with none (legacy/file mode); either
+        way it writes usage through exactly one sink, never both. A
+        ``UsageLogger`` constructed against a bare JSONL path — as
+        ``PerformanceScorer``, ``BudgetTuner``, and ``PatternLearner`` all do
+        — would therefore see only half of a project's usage history unless
+        it also reaches for the SQLite rows.
+
+        When a ``baton.db`` already exists next to this log's directory, its
+        ``usage_records`` are merged in, deduplicated by ``task_id`` with the
+        SQLite copy taking precedence — the same merge
+        :class:`~agent_baton.core.observe.dashboard.DashboardGenerator`
+        already performs when an explicit storage backend is supplied.  When
+        no ``baton.db`` is present (pure legacy/file-mode projects), behavior
+        is unchanged: only the JSONL file is read, and no database is
+        created as a read-side effect.
 
         Blank lines and malformed JSON lines are silently skipped.
+        """
+        jsonl_records = self._read_jsonl()
+        storage_records = self._read_storage_records()
+        if not storage_records:
+            return jsonl_records
+
+        # Deduplicate: storage wins; exclude task_ids already in storage.
+        storage_task_ids = {r.task_id for r in storage_records}
+        jsonl_only = [r for r in jsonl_records if r.task_id not in storage_task_ids]
+        return storage_records + jsonl_only
+
+    def _read_jsonl(self) -> list[TaskUsageRecord]:
+        """Read usage records from the JSONL log file only.
+
         Returns an empty list if the file does not exist.
         """
         if not self._log_path.exists():
@@ -106,6 +138,26 @@ class UsageLogger:
                     # Skip malformed lines gracefully
                     continue
         return records
+
+    def _read_storage_records(self) -> list[TaskUsageRecord]:
+        """Best-effort read of ``usage_records`` from a sibling ``baton.db``.
+
+        Only attempted when a database file already exists next to this
+        logger's directory — this method must never create one as a side
+        effect of a read.  Any failure (corrupt DB, schema mismatch) is
+        swallowed and treated as "no SQLite records", matching
+        ``DashboardGenerator``'s fallback-to-JSONL-only behavior.
+        """
+        db_path = self._log_path.parent / "baton.db"
+        if not db_path.exists():
+            return []
+        try:
+            from agent_baton.core.storage import get_project_storage
+
+            storage = get_project_storage(self._log_path.parent)
+            return storage.read_usage()
+        except Exception:
+            return []
 
     def read_recent(self, count: int = 10) -> list[TaskUsageRecord]:
         """Read the N most recent usage records."""

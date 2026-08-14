@@ -141,6 +141,15 @@ class ValidationStage:
     # silently dropping it (phase_roles.IMPLEMENT_PHASE_NAMES includes "draft").
     _IMPLEMENT_PHASE_KEYS = IMPLEMENT_PHASE_NAMES
     _REVIEWER_BASES = REVIEWER_AGENTS - {"auditor"}
+    # Phase-key aliases that count as review coverage.  "verify" is the
+    # INVESTIGATIVE archetype's terminal reviewer phase (decomposition.py
+    # ``_build_investigative_phases`` — kept as "Verify" rather than
+    # "Review" per the phase-ordering pinned in
+    # tests/test_archetype_decomposition.py); it carries a code-reviewer
+    # step exactly like a Review phase does, so the review_missing gate
+    # must recognise it too.
+    _REVIEW_PHASE_KEYS = frozenset({"review", "verify"})
+
     def run(self, draft: PlanDraft, services: PlannerServices) -> PlanDraft:
         # Step 10+11+11b — score check, budget tier, policy validation.
         # _check_scores writes score_warnings and policy_violations onto draft
@@ -502,7 +511,7 @@ class ValidationStage:
 
     def _has_review_coverage(self, draft: PlanDraft) -> bool:
         for phase in draft.plan_phases:
-            if self._phase_key(phase.name) != "review":
+            if self._phase_key(phase.name) not in self._REVIEW_PHASE_KEYS:
                 continue
             for step in phase.steps:
                 if self._step_agent_bases(step) & self._REVIEWER_BASES:

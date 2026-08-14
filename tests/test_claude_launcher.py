@@ -1128,3 +1128,190 @@ class TestWaveOneThreeStateEnvInjection:
         assert env["BATON_DB_PATH"] == "/explicit/test/baton.db"  # preserved
         assert "BATON_TEAM_CONTEXT_ROOT" in env  # newly added
         assert env["BATON_TASK_ID"] == "t"
+
+
+# ===========================================================================
+# WS-F048: git probes must observe the directory the agent actually ran in
+# ===========================================================================
+
+def _git_sync(cwd, *args: str) -> str:
+    """Run a git command synchronously in *cwd* and return stripped stdout."""
+    import subprocess  # noqa: PLC0415 — stdlib, intentional lazy import
+
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_repo(root) -> str:
+    """Create a git repo with one commit at *root*; return its HEAD sha."""
+    root.mkdir(parents=True, exist_ok=True)
+    _git_sync(root, "init", "-b", "main")
+    _git_sync(root, "config", "user.email", "baton-test@example.com")
+    _git_sync(root, "config", "user.name", "Baton Test")
+    _git_sync(root, "config", "commit.gpgsign", "false")
+    (root / "README.md").write_text("base\n")
+    _git_sync(root, "add", "README.md")
+    _git_sync(root, "commit", "-m", "initial")
+    return _git_sync(root, "rev-parse", "HEAD")
+
+
+def _patch_which_real_git(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Resolve ``claude`` to a stub path but ``git`` to the real binary."""
+    import shutil as _shutil  # noqa: PLC0415 — stdlib, intentional lazy import
+
+    real_git = _shutil.which("git")
+    assert real_git is not None, "git binary required for this test"
+    real_which = _shutil.which
+
+    def fake_which(name: str):
+        if name == "git":
+            return real_git
+        return "/usr/bin/claude" if "claude" in str(name) else real_which(name)
+
+    monkeypatch.setattr("shutil.which", fake_which)
+    return real_git
+
+
+def _route_git_to_real_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    git_bin: str,
+    on_agent_launch,
+) -> None:
+    """Let real ``git`` subprocesses run; fake out the ``claude`` subprocess.
+
+    ``on_agent_launch`` is invoked (with the launch kwargs) at the moment the
+    agent subprocess would have started, so a test can simulate the agent
+    doing work in its working directory.
+    """
+    real_exec = asyncio.create_subprocess_exec
+
+    async def routed(*args: Any, **kwargs: Any):
+        program = str(args[0]) if args else ""
+        if program == str(git_bin):
+            return await real_exec(*args, **kwargs)
+        on_agent_launch(kwargs)
+        return FakeProcess(stdout=_ok_json(), returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", routed)
+
+
+class TestWorktreeGitProbes:
+    """The launcher runs the agent in ``cwd_override`` (the Wave 1.3 worktree),
+    so its pre/post HEAD probes must read that same directory.
+
+    Reading HEAD from the parent repo instead means a specialist that commits
+    inside its worktree comes back with ``commit_hash == ""`` and
+    ``files_changed == []`` — which the executor treats as "no work done" and
+    responds to by removing the worktree and force-deleting its branch,
+    destroying the commits.
+    """
+
+    def test_commit_made_inside_worktree_is_reported_in_launch_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        repo = tmp_path / "parent"
+        _init_repo(repo)
+        worktree = tmp_path / "wt"
+        _git_sync(repo, "worktree", "add", "-b", "agent/step-1", str(worktree))
+
+        git_bin = _patch_which_real_git(monkeypatch)
+
+        def agent_commits(kwargs: dict) -> None:
+            # The fake agent does exactly what the Worktree Discipline block
+            # tells specialists to do: commit inside its own worktree.
+            cwd = kwargs.get("cwd")
+            assert cwd == str(worktree)
+            (worktree / "feature.py").write_text("print('work')\n")
+            _git_sync(worktree, "add", "feature.py")
+            _git_sync(worktree, "commit", "-m", "agent work")
+
+        _route_git_to_real_subprocess(monkeypatch, git_bin, agent_commits)
+
+        launcher = ClaudeCodeLauncher(ClaudeCodeConfig(working_directory=repo))
+
+        async def _run():
+            return await launcher.launch(
+                "backend", "sonnet", "task", "1.1",
+                cwd_override=str(worktree),
+            )
+
+        result = asyncio.run(_run())
+
+        worktree_head = _git_sync(worktree, "rev-parse", "HEAD")
+        assert result.status == "complete"
+        assert result.commit_hash == worktree_head, (
+            "commit_hash must be the HEAD of the worktree the agent ran in; "
+            "an empty value makes the executor destroy the worktree branch"
+        )
+        assert "feature.py" in result.files_changed
+
+    def test_parent_repo_commit_is_not_attributed_to_the_worktree_agent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """A concurrent commit on the parent repo must not be reported as this
+        agent's work when the agent ran in an isolated worktree and committed
+        nothing."""
+        repo = tmp_path / "parent"
+        _init_repo(repo)
+        worktree = tmp_path / "wt"
+        _git_sync(repo, "worktree", "add", "-b", "agent/step-2", str(worktree))
+
+        git_bin = _patch_which_real_git(monkeypatch)
+
+        def other_agent_commits_in_parent(kwargs: dict) -> None:
+            (repo / "unrelated.py").write_text("# someone else\n")
+            _git_sync(repo, "add", "unrelated.py")
+            _git_sync(repo, "commit", "-m", "unrelated parent commit")
+
+        _route_git_to_real_subprocess(
+            monkeypatch, git_bin, other_agent_commits_in_parent
+        )
+
+        launcher = ClaudeCodeLauncher(ClaudeCodeConfig(working_directory=repo))
+
+        async def _run():
+            return await launcher.launch(
+                "backend", "sonnet", "task", "1.2",
+                cwd_override=str(worktree),
+            )
+
+        result = asyncio.run(_run())
+
+        assert result.status == "complete"
+        assert result.commit_hash == "", (
+            "the agent committed nothing in its worktree, so no commit may be "
+            f"attributed to it (got {result.commit_hash!r})"
+        )
+        assert result.files_changed == []
+
+    def test_commit_in_working_directory_still_reported_without_cwd_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Regression guard: the non-worktree path must keep working."""
+        repo = tmp_path / "parent"
+        _init_repo(repo)
+
+        git_bin = _patch_which_real_git(monkeypatch)
+
+        def agent_commits(kwargs: dict) -> None:
+            (repo / "inline.py").write_text("x = 1\n")
+            _git_sync(repo, "add", "inline.py")
+            _git_sync(repo, "commit", "-m", "inline work")
+
+        _route_git_to_real_subprocess(monkeypatch, git_bin, agent_commits)
+
+        launcher = ClaudeCodeLauncher(ClaudeCodeConfig(working_directory=repo))
+
+        async def _run():
+            return await launcher.launch("backend", "sonnet", "task", "1.3")
+
+        result = asyncio.run(_run())
+
+        assert result.commit_hash == _git_sync(repo, "rev-parse", "HEAD")
+        assert "inline.py" in result.files_changed

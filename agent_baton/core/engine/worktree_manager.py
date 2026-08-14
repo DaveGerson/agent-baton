@@ -391,6 +391,53 @@ class WorktreeManager:
                         exc,
                     )
 
+        if self._enabled:
+            self._ensure_worktrees_root_excluded()
+
+    def _ensure_worktrees_root_excluded(self) -> None:
+        """Best-effort: keep ``worktrees_root`` out of ``git status`` in the
+        canonical repo via ``.git/info/exclude``.
+
+        Linked worktrees live inside the canonical repo's own working tree
+        (default ``.claude/worktrees/``), so without this they show up as an
+        untracked directory in ``git status`` — which would make ``fold_back``
+        integrate the agent's commit cleanly and then still leave the
+        canonical working tree "dirty" from git's point of view.  Mirrors the
+        convention ``bd_client.init()`` uses for ``.beads/`` (``--setup-exclude``):
+        untracked-but-ignored via the repo-local, non-tracked exclude file,
+        never the project's own (tracked) ``.gitignore``.
+        """
+        try:
+            rel = self._worktrees_root.relative_to(self._canonical_repo)
+        except ValueError:
+            return  # worktrees_root lives outside the canonical repo; nothing to do
+
+        try:
+            git_dir_r = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True, text=True, cwd=str(self._canonical_repo),
+            )
+            if git_dir_r.returncode != 0:
+                return
+            git_common_dir = Path(git_dir_r.stdout.strip())
+            if not git_common_dir.is_absolute():
+                git_common_dir = (self._canonical_repo / git_common_dir).resolve()
+
+            pattern = f"/{rel.as_posix()}/"
+            exclude_path = git_common_dir / "info" / "exclude"
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = exclude_path.read_text("utf-8") if exclude_path.exists() else ""
+            if pattern not in existing.splitlines():
+                with exclude_path.open("a", encoding="utf-8") as f:
+                    if existing and not existing.endswith("\n"):
+                        f.write("\n")
+                    f.write(pattern + "\n")
+        except Exception as exc:
+            _log.debug(
+                "WorktreeManager: could not update git exclude for worktrees root %s: %s",
+                self._worktrees_root, exc,
+            )
+
     # ── Trace helpers ────────────────────────────────────────────────────────
 
     def _emit(self, event_type: str, details: dict, duration_ms: int = 0) -> None:
@@ -688,19 +735,27 @@ class WorktreeManager:
         return new_head
 
     def _rebase_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
-        """Rebase worktree branch onto current working branch tip and FF."""
-        # Step 1: fetch the worktree's branch ref into the canonical repo
-        _run_git(
-            ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
-            cwd=self._canonical_repo,
-        )
+        """Rebase worktree branch onto current working branch tip and FF.
 
-        # Step 2: rebase agent's commits onto current working-branch tip
+        The worktree's branch is checked out *inside the linked worktree*, so
+        the canonical repo cannot ``git fetch`` (or otherwise write) that ref —
+        git refuses with "refusing to fetch into branch ... checked out at
+        ...".  Do the rebase where the branch actually lives: inside the
+        worktree itself, rebasing onto the base branch's current tip.  Once
+        the worktree's HEAD is a clean linear descendant of the working
+        branch, integrate it into the canonical repo's working tree with a
+        real ``git merge --ff-only`` (never a bare ``update-ref``, which would
+        move the branch out from under the canonical repo's checked-out
+        working tree and leave it dirty/stale).
+        """
+        # Step 1: rebase the agent's commits onto the working branch's
+        # current tip, from *inside the worktree* (where the branch is
+        # actually checked out).
         rebase_result = subprocess.run(
             ["git", "rebase", "--onto", handle.base_branch, handle.base_sha, handle.branch],
             capture_output=True,
             text=True,
-            cwd=str(self._canonical_repo),
+            cwd=str(handle.path),
         )
 
         if rebase_result.returncode != 0:
@@ -708,7 +763,7 @@ class WorktreeManager:
             subprocess.run(
                 ["git", "rebase", "--abort"],
                 capture_output=True,
-                cwd=str(self._canonical_repo),
+                cwd=str(handle.path),
             )
             # Find conflict files from rebase output
             conflict_files = self._parse_conflict_files(rebase_result.stdout + rebase_result.stderr)
@@ -717,24 +772,35 @@ class WorktreeManager:
                 conflict_files=conflict_files,
             )
 
-        # Step 3: resolve new tip of the rebased branch
+        # Step 2: resolve new tip of the rebased branch (still readable from
+        # the canonical repo — linked worktrees share the same .git ref store).
         tip_r = _run_git(["rev-parse", handle.branch], cwd=self._canonical_repo)
         new_tip = tip_r.stdout.strip()
 
-        # Step 4: fast-forward working branch to new tip
-        _run_git(
-            ["update-ref", f"refs/heads/{handle.base_branch}", new_tip],
-            cwd=self._canonical_repo,
+        # Step 3: fast-forward the canonical repo's working tree to the new
+        # tip with a real working-tree-updating merge (not a bare ref write).
+        merge_result = subprocess.run(
+            ["git", "merge", "--ff-only", new_tip],
+            capture_output=True,
+            text=True,
+            cwd=str(self._canonical_repo),
         )
+        if merge_result.returncode != 0:
+            raise WorktreeFoldError(
+                f"Fast-forward of {handle.base_branch} to rebased tip failed for "
+                f"step={handle.step_id}: {merge_result.stderr.strip()}"
+            )
 
         return new_tip
 
     def _merge_fold(self, handle: WorktreeHandle, commit_hash: str) -> str:
-        """Merge worktree branch into working branch."""
-        _run_git(
-            ["fetch", str(handle.path), f"{handle.branch}:{handle.branch}"],
-            cwd=self._canonical_repo,
-        )
+        """Merge worktree branch into working branch.
+
+        As with ``_rebase_fold``, the worktree's branch cannot be fetched
+        into the canonical repo while it is checked out there — but the ref
+        is already visible from the canonical repo (linked worktrees share
+        the ref store), so ``git merge`` can target it directly.
+        """
         merge_result = subprocess.run(
             ["git", "merge", "--no-ff", handle.branch, "-m",
              f"Merge worktree/{handle.step_id} into {handle.base_branch}"],
@@ -934,63 +1000,79 @@ class WorktreeManager:
                 pass
         return 4
 
-    def _is_in_flight(self, worktree_path: Path) -> tuple[bool, str]:
-        """Return (True, task_id) if worktree_path is referenced by a running execution.
+    # Execution statuses that mean "do not touch this worktree yet" — running
+    # work in progress, or a failed step held open for a developer takeover
+    # session (Wave 5.1).  Both own their worktree via `step_worktrees` and
+    # neither has reached a terminal state.
+    _LIVE_EXECUTION_STATUSES = ("running", "paused-takeover")
 
-        Walks up from _project_root to find baton.db, queries executions
-        WHERE status='running', then checks each execution's state.json
-        step_worktrees dict for a path match.  Best-effort: any exception
-        returns (False, "").
+    def _is_in_flight(self, worktree_path: Path) -> tuple[bool, str]:
+        """Return (True, task_id) if worktree_path is owned by a live execution.
+
+        Walks up from _project_root to find baton.db, then joins the
+        production ``step_worktrees`` table (where worktree ownership is
+        actually persisted) against ``executions`` to find a live-status
+        execution whose worktree_path matches.
+
+        Fail-safe: if the guard cannot be evaluated at all (DB missing,
+        corrupt, unreadable, schema mismatch), this returns (True, "unknown")
+        so gc_stale() retains the worktree rather than deleting it — an
+        unreadable safety check must block deletion, not authorise it.
         """
         import sqlite3 as _sqlite3  # noqa: PLC0415
 
+        db_path_env = os.environ.get("BATON_DB_PATH")
+        baton_db: Path | None = None
+        if db_path_env:
+            candidate = Path(db_path_env)
+            if candidate.exists():
+                baton_db = candidate
+        if baton_db is None:
+            search = self._project_root
+            for _ in range(8):
+                candidate1 = search / ".claude" / "team-context" / "baton.db"
+                candidate2 = search / "baton.db"
+                if candidate1.exists():
+                    baton_db = candidate1
+                    break
+                if candidate2.exists():
+                    baton_db = candidate2
+                    break
+                parent = search.parent
+                if parent == search:
+                    break
+                search = parent
+
+        if baton_db is None:
+            # No state DB at all: nothing to protect against, and nothing to
+            # fail closed on either — this is the "no baton project here" case.
+            return (False, "")
+
+        wt_str = str(worktree_path.resolve())
+        placeholders = ",".join("?" for _ in self._LIVE_EXECUTION_STATUSES)
+
         try:
-            db_path_env = os.environ.get("BATON_DB_PATH")
-            baton_db: Path | None = None
-            if db_path_env:
-                candidate = Path(db_path_env)
-                if candidate.exists():
-                    baton_db = candidate
-            if baton_db is None:
-                search = self._project_root
-                for _ in range(8):
-                    candidate1 = search / ".claude" / "team-context" / "baton.db"
-                    candidate2 = search / "baton.db"
-                    if candidate1.exists():
-                        baton_db = candidate1
-                        break
-                    if candidate2.exists():
-                        baton_db = candidate2
-                        break
-                    parent = search.parent
-                    if parent == search:
-                        break
-                    search = parent
-
-            if baton_db is None:
-                return (False, "")
-
-            wt_str = str(worktree_path.resolve())
-
             with _sqlite3.connect(str(baton_db), timeout=5) as _conn:
                 _conn.row_factory = _sqlite3.Row
                 rows = _conn.execute(
-                    "SELECT task_id, state_json FROM executions WHERE status = 'running'"
+                    "SELECT w.task_id, w.worktree_path, e.status "
+                    "FROM step_worktrees w "
+                    "JOIN executions e ON e.task_id = w.task_id "
+                    f"WHERE e.status IN ({placeholders})",
+                    self._LIVE_EXECUTION_STATUSES,
                 ).fetchall()
+        except Exception as exc:
+            _log.warning(
+                "WorktreeManager._is_in_flight: could not query %s (%s) — "
+                "failing safe and treating %s as in-flight",
+                baton_db, exc, worktree_path,
+            )
+            return (True, "unknown")
 
-            for row in rows:
-                task_id = row["task_id"]
-                try:
-                    state_data = json.loads(row["state_json"] or "{}")
-                    step_worktrees = state_data.get("step_worktrees", {})
-                    for _step_id, wt_dict in step_worktrees.items():
-                        wt_path_in_state = str(Path(wt_dict.get("path", "")).resolve())
-                        if wt_path_in_state == wt_str:
-                            return (True, task_id)
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        for row in rows:
+            wt_path_in_state = str(Path(row["worktree_path"] or "").resolve())
+            if wt_path_in_state == wt_str:
+                return (True, row["task_id"])
         return (False, "")
 
     def gc_stale(

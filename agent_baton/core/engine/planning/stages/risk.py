@@ -228,9 +228,6 @@ class RiskStage:
 
         current_bases = {_base(a) for a in draft.resolved_agents}
 
-        injected_reviewer = False
-        injected_auditor = False
-
         if needs_reviewer and "code-reviewer" not in current_bases:
             draft.resolved_agents.append("code-reviewer")
             draft.routing_notes.append(
@@ -241,7 +238,6 @@ class RiskStage:
                 risk.value,
                 draft.task_id,
             )
-            injected_reviewer = True
 
         if needs_auditor and "auditor" not in current_bases:
             draft.resolved_agents.append("auditor")
@@ -252,24 +248,31 @@ class RiskStage:
                 "Safety roster: injected auditor — compliance keyword detected task_id=%s",
                 draft.task_id,
             )
-            injected_auditor = True
 
-        # Presence flags computed from the PRE-INJECTION roster (current_bases,
-        # captured above before either append happens) OR'd with this call's
-        # own injection — i.e. true whenever a reviewer/auditor is (or is about
-        # to be) on the roster, regardless of whether THIS call is what put it
-        # there.  This must stay in lockstep with ValidationStage._REVIEWER_BASES
-        # (validation.py:143) / _review_required (validation.py:485-489), which
-        # gate on roster membership alone — not on "did RiskStage just inject
-        # it".  Without this, a code-reviewer that was already on the roster at
-        # medium/low risk (no injection needed) leaves classified_phases without
-        # a Review slot, so the phase builder force-lands the reviewer in the
+        # Recomputed AFTER both injections above, from draft.resolved_agents
+        # directly — so this is true whenever a reviewer/auditor is on the
+        # roster, regardless of whether THIS call is what put it there (an
+        # injection appends straight onto draft.resolved_agents, so a fresh
+        # read already includes it).  This must stay in lockstep with
+        # ValidationStage._REVIEWER_BASES (validation.py:143) /
+        # _review_required (validation.py:485-489), which gate on roster
+        # membership alone — not on "did RiskStage just inject it".  Without
+        # this, a code-reviewer that was already on the roster at medium/low
+        # risk (no injection needed) leaves classified_phases without a
+        # Review slot, so the phase builder force-lands the reviewer in the
         # Implement team-step and consolidate_team_step() (phase_builder.py)
         # filters it back out — zero review coverage, hard-blocked plan.
-        reviewer_present = injected_reviewer or bool(
-            current_bases & self._REVIEWER_BASES
-        )
-        auditor_present = injected_auditor or ("auditor" in current_bases)
+        #
+        # ``reviewer_bases`` is every DISTINCT non-auditor reviewer-class
+        # agent on the roster (sorted for determinism) — not just a boolean.
+        # ``assign_agents_to_phases()`` places at most ONE primary agent per
+        # phase in Pass 1, so two distinct reviewers (e.g. a rostered
+        # security-reviewer plus an injected code-reviewer) competing for a
+        # single "Review" slot strands the runner-up in an implement-type
+        # phase.  Each distinct reviewer therefore needs its own slot.
+        post_injection_bases = {_base(a) for a in draft.resolved_agents}
+        reviewer_bases = sorted(post_injection_bases & self._REVIEWER_BASES)
+        auditor_present = "auditor" in post_injection_bases
 
         # When a reviewer/auditor is present, guarantee that review-type
         # phases exist in classified_phases so it has a home.
@@ -283,23 +286,30 @@ class RiskStage:
         # Assignment algorithm constraint: assign_agents_to_phases() places at
         # most ONE primary agent per phase in Pass 1.  If both code-reviewer and
         # auditor are on the roster they need SEPARATE review-type phase slots —
-        # one takes "Review" and the other takes "Audit".
-        if (reviewer_present or auditor_present) and draft.classified_phases is not None:
+        # one takes "Review" and the other takes "Audit". Likewise, N distinct
+        # reviewer-class agents need N "Review" slots between them.
+        if (reviewer_bases or auditor_present) and draft.classified_phases is not None:
             new_phases = list(draft.classified_phases)
             added: list[str] = []
 
-            if reviewer_present and "Review" not in new_phases:
+            existing_review_slots = sum(
+                1 for name in new_phases
+                if name.lower().split(":")[0].strip() == "review"
+            )
+            review_slots_needed = len(reviewer_bases) - existing_review_slots
+            for _ in range(max(0, review_slots_needed)):
                 new_phases.append("Review")
                 added.append("Review")
 
             if auditor_present:
                 # auditor needs its own phase slot distinct from "Review"
-                # (which code-reviewer claims).  Use "Audit" — it maps to the
-                # review ideal-roles table and is not blocked anywhere.
-                if reviewer_present and "Audit" not in new_phases:
+                # (which the reviewer-class agents above claim).  Use
+                # "Audit" — it maps to the review ideal-roles table and is
+                # not blocked anywhere.
+                if reviewer_bases and "Audit" not in new_phases:
                     new_phases.append("Audit")
                     added.append("Audit")
-                elif "Review" not in new_phases:
+                elif not reviewer_bases and "Review" not in new_phases:
                     # No reviewer competing — auditor can take Review directly.
                     new_phases.append("Review")
                     added.append("Review")

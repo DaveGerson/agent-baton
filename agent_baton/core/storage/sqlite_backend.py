@@ -2292,8 +2292,11 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
         )
 
         # Steps (plan_phases DELETE cascades to plan_steps, but we're
-        # re-inserting phases so we need to insert steps explicitly)
-        for step in phase.steps:
+        # re-inserting phases so we need to insert steps explicitly).
+        # step_ordinal (F023) records each step's declared position within
+        # the phase explicitly -- step_id is free-form TEXT ("1.10", "1.2",
+        # ...) and cannot be trusted to sort back into author order.
+        for ordinal, step in enumerate(phase.steps):
             conn.execute(
                 """
                 INSERT INTO plan_steps
@@ -2301,8 +2304,8 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                      task_description, model, depends_on,
                      deliverables, allowed_paths, blocked_paths,
                      context_files, knowledge_attachments,
-                     step_type, command)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     step_type, command, step_ordinal)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.task_id,
@@ -2319,6 +2322,7 @@ def _upsert_plan(conn: sqlite3.Connection, plan: "MachinePlan") -> None:  # noqa
                     json.dumps([a.to_dict() for a in step.knowledge]),
                     step.step_type,
                     step.command,
+                    ordinal,
                 ),
             )
 
@@ -2398,8 +2402,12 @@ def _load_plan_struct(
         "SELECT * FROM plan_phases WHERE task_id = ? ORDER BY phase_id",
         (task_id,),
     ).fetchall()
+    # Order by the persisted ordinal (F023), not step_id: step_id is
+    # free-form TEXT ("1.10", "1.2", ...) and sorts lexicographically,
+    # which scrambles any phase with ten or more steps.
     step_rows = conn.execute(
-        "SELECT * FROM plan_steps WHERE task_id = ? ORDER BY phase_id, step_id",
+        "SELECT * FROM plan_steps WHERE task_id = ? "
+        "ORDER BY phase_id, step_ordinal",
         (task_id,),
     ).fetchall()
     member_rows = conn.execute(

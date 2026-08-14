@@ -1076,7 +1076,25 @@ class PromptDispatcher:
             )
 
         inner = "; ".join(parts)
-        return f'bash -c \'FILE="$CLAUDE_TOOL_INPUT_FILE_PATH"; {inner}; exit 0\''
+        # The hook runtime does not set an env var with the tool's target
+        # path — it sends a PreToolUse JSON payload on stdin (see
+        # agent_baton/cli/commands/govern/policy_check.py, the real
+        # interface). Resolve FILE from stdin, and fail closed (exit 2)
+        # if it cannot be resolved rather than silently disarming the
+        # allowed/blocked checks below. Python string literals below use
+        # escaped double quotes (never single quotes) so the whole script
+        # can be embedded verbatim inside the single-quoted `bash -c '...'`
+        # wrapper without prematurely closing it.
+        resolve_file = (
+            'FILE=$(python3 -c "import sys, json; '
+            "d = json.load(sys.stdin); "
+            'print(d.get(\\"tool_input\\", {}).get(\\"file_path\\") '
+            'or d.get(\\"tool_input\\", {}).get(\\"path\\", \\"\\"))" 2>/dev/null); '
+            'if [ -z "$FILE" ]; then '
+            f'echo "BLOCKED: Step {step.step_id} — could not resolve target file path" >&2; '
+            "exit 2; fi"
+        )
+        return f"bash -c '{resolve_file}; {inner}; exit 0'"
 
     def build_action(
         self,

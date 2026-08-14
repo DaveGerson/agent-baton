@@ -56,12 +56,35 @@ class ExecutionContext:
         bus: EventBus | None = None,
         persist_events: bool = True,
         task_id: str | None = None,
+        storage=None,  # StorageBackend | None — explicit override
+        use_project_storage: bool = True,
     ) -> ExecutionContext:
         """Build a correctly-wired execution context.
 
         ``ExecutionEngine`` auto-wires ``EventPersistence`` as a bus subscriber
         when a bus is provided, so this factory delegates persistence setup to
         the engine rather than creating a duplicate subscriber.
+
+        F098 fix: this factory is the daemon / worker-supervisor entry point.
+        Before this fix it always built an ``ExecutionEngine`` with no
+        storage backend, so a daemon-driven task's usage landed only in
+        ``usage-log.jsonl`` while the CLI path (which injects
+        ``get_project_storage()``) wrote only to ``baton.db``. The two sinks
+        were disjoint — ``baton chargeback``, ``baton aibom``, and
+        ``/api/v1/metrics`` (all SQLite readers) silently missed every
+        daemon-run task. Wiring the same project storage backend here closes
+        that gap so both entry points share one ``usage_records`` table.
+
+        The default is only applied when *task_id* is given. ``executor.py``
+        ``start()`` only repairs ``StatePersistence``'s state path for a
+        storage-backed engine that was constructed without a task_id
+        (``set_task_id()``'s "storage mode" branch) — it otherwise preserves
+        the legacy flat ``execution-state.json`` path for the unnamespaced
+        single-execution daemon flow. Auto-wiring storage there too would
+        silently move that flow onto the namespaced path and break
+        ``WorkerSupervisor.status()``, which reads execution state through a
+        separate, storage-less ``ExecutionEngine``. Namespaced (task_id-bound)
+        runs are unaffected by that legacy path and safely get storage.
 
         Args:
             launcher: Agent launcher implementation.
@@ -72,14 +95,32 @@ class ExecutionContext:
                 constructed without a bus and no events are persisted.
             task_id: Optional task ID for namespaced execution state. When
                 provided, state files are stored under
-                ``<team_context_root>/executions/<task_id>/``.
+                ``<team_context_root>/executions/<task_id>/``, and (unless
+                *storage* is overridden) the project's SQLite storage is
+                wired in automatically.
+            storage: Explicit storage backend to use. When ``None`` (the
+                default), ``use_project_storage`` is True, and *task_id* is
+                provided, the project's SQLite storage (``get_project_storage``)
+                is wired in automatically.
+            use_project_storage: Escape hatch for callers (e.g. tests) that
+                need the legacy no-storage / JSONL-only engine even when a
+                task_id is supplied. Ignored when *storage* is passed
+                explicitly.
         """
         bus = bus or EventBus()
         engine_bus = bus if persist_events else None
+        if storage is None and use_project_storage and task_id:
+            from agent_baton.core.storage import get_project_storage
+
+            resolved_root = (
+                team_context_root or ExecutionEngine._DEFAULT_CONTEXT_ROOT
+            ).resolve()
+            storage = get_project_storage(resolved_root)
         engine = ExecutionEngine(
             team_context_root=team_context_root,
             bus=engine_bus,
             task_id=task_id,
+            storage=storage,
         )
         # Surface the engine's internal persistence reference so callers can
         # replay events without constructing a parallel reader.

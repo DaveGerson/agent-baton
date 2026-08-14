@@ -169,10 +169,42 @@ _GENESIS_HASH = "0" * 64
 
 
 def _entry_hash(entry: dict[str, Any]) -> str:
-    """Compute SHA-256 over the canonical JSON of an entry (sans hash fields)."""
+    """Compute SHA-256 over ``prev_hash`` plus the canonical JSON payload.
+
+    F015 fix: the digest now covers ``prev_hash`` (via ``entry["prev_hash"]``,
+    read from the entry itself), not just the row's own payload.  Under the
+    pre-fix formula, ``entry_hash`` was a pure function of the payload and
+    ``prev_hash`` was an *unauthenticated* pointer field — an attacker could
+    delete, reorder, or splice rows and repair the log by rewriting a single
+    hex string per row, without the tamper being detectable.  Committing to
+    ``prev_hash`` means a row's digest depends on its position in the chain,
+    so it can no longer be relinked or transplanted without recomputing the
+    entire tail.  This mirrors the prev_hash-covering scheme already used by
+    :func:`_hash_entry` / ``LockedJSONLChainWriter`` elsewhere in this module.
+
+    ``entry_hash`` itself is still excluded — a digest cannot cover its own
+    output.
+
+    Backward compatibility: this is an unconditional formula change, not a
+    version-gated one.  Logs written under the old (payload-only) scheme —
+    whether pre-F0.3 plain rows with no hash fields at all, or F0.3 rows
+    whose ``entry_hash`` didn't cover ``prev_hash`` — will no longer verify
+    against this formula, because their stored ``entry_hash`` was computed
+    without the predecessor's hash as input. Both cases are migrated the
+    same way: run :func:`rechain`, which strips any existing hash fields
+    and recomputes the whole chain from scratch under the current formula.
+    There is deliberately no per-entry version flag selecting between old
+    and new formulas — that would let an attacker "downgrade" any single
+    row to the weak scheme just by tweaking (or omitting) the flag, which
+    would defeat the fix.
+    """
+    prev_hash = entry.get("prev_hash", "")
     clean = {k: v for k, v in entry.items() if k not in ("prev_hash", "entry_hash")}
     canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    h = hashlib.sha256()
+    h.update(str(prev_hash).encode("utf-8"))
+    h.update(canonical.encode("utf-8"))
+    return h.hexdigest()
 
 
 @contextmanager

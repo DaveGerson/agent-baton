@@ -220,20 +220,29 @@ class TestApproveNotEnriched:
 
 
 class TestSelfApprovalTeamMode:
-    def test_self_approval_rejected_in_team_mode(self, client, store, monkeypatch):
-        # Patch the approval_mode in middleware to return 'team'
+    def test_self_approval_rejected_in_team_mode(
+        self, tmp_path, spec_db, store, monkeypatch
+    ):
+        """alice must not approve her own spec when the daemon runs in team mode.
+
+        The app is built *after* BATON_APPROVAL_MODE is set so the middleware
+        reflects the operator's configuration rather than whatever the
+        environment held when the module was first imported.
+        """
+        monkeypatch.setenv("BATON_SPEC_DRAFT_DB", str(spec_db))
         monkeypatch.setenv("BATON_APPROVAL_MODE", "team")
+        team_client = TestClient(create_app(team_context_root=tmp_path))
+
         draft = store.create(title="Team spec", body="body", submitted_by="alice")
         store.update_enrichment(draft.id, _mock_enrichment())
-        # alice tries to approve her own spec
-        r = client.post(
+
+        r = team_client.post(
             f"/api/v1/pmo/specs/{draft.id}/approve",
             headers={"X-Baton-User": "alice"},
         )
-        # 403 only if middleware propagates approval_mode='team'
-        # (in test mode middleware may use local mode; we check either 200 or 403)
-        # If the middleware didn't propagate, the test passes 200 (local mode fallback)
-        assert r.status_code in (200, 403)
+
+        assert r.status_code == 403, r.text
+        assert store.get(draft.id).status == "enriched"
 
 
 # ---------------------------------------------------------------------------

@@ -121,6 +121,48 @@ class InvalidApprovalState(RuntimeError):
         super().__init__(message)
 
 
+class InvalidGateState(RuntimeError):
+    """Raised when ``record_gate_result`` is called against an invalid state.
+
+    F002 fix.  Mirrors :class:`InvalidApprovalState`.  Covers the three
+    pre-conditions a gate recording must satisfy:
+
+    1. ``phase_id`` must identify a phase that actually exists in the plan —
+       recording against a phantom phase would forge a ``GateResult`` with a
+       ``gate_type`` stolen from whatever phase happens to be current.
+    2. ``phase_id`` must be the *current* phase
+       (``phase is state.current_phase_obj``) — recording a gate for a phase
+       that is not current would advance the phase pointer past whatever
+       phase the engine is actually in, silently discarding its planned
+       work.
+    3. A passing result requires every step in that phase to have reached a
+       terminal status (``complete``, ``failed``, or ``interrupted``) —
+       otherwise a single mistyped gate-pass would skip un-run steps
+       permanently.
+
+    The ``reason`` attribute is a short machine-readable tag from this class
+    (``REASON_*`` constants) so that callers (e.g. the API layer) can map
+    specific failures to HTTP status codes without parsing the message.
+    """
+
+    REASON_UNKNOWN_PHASE: str = "unknown_phase"
+    REASON_PHASE_MISMATCH: str = "phase_mismatch"
+    REASON_STEPS_INCOMPLETE: str = "steps_incomplete"
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        message: str,
+        phase_id: int | str | None = None,
+        current_phase_id: int | str | None = None,
+    ) -> None:
+        self.reason = reason
+        self.phase_id = phase_id
+        self.current_phase_id = current_phase_id
+        super().__init__(message)
+
+
 class IllegalStateTransition(RuntimeError):
     """Raised when an ``ExecutionState.transition_to_X`` precondition fails.
 

@@ -11,7 +11,11 @@ Resolution order
 2. ``Authorization: Bearer <token>`` header — the token value is used as
    the user ID when present (simple single-token deployments).
 3. Fallback — ``"local-user"`` in ``local`` approval mode (the default),
-   which grants admin access without authentication.
+   which grants admin access without authentication.  In ``team`` mode
+   there is no synthetic fallback: an unidentified caller resolves to an
+   empty ``user_id`` so route-level segregation-of-duties checks (e.g.
+   "approver must differ from submitter") cannot be bypassed by simply
+   omitting the header.
 
 Approval modes (``BATON_APPROVAL_MODE`` env var)
 -------------------------------------------------
@@ -22,7 +26,9 @@ Approval modes (``BATON_APPROVAL_MODE`` env var)
 ``team``
     A different ``user_id`` is required to approve a decision than the
     one who created the task.  The middleware still resolves identity the
-    same way; enforcement of the team rule is done in the route handler.
+    same way, except it never mints a synthetic identity for an
+    unauthenticated caller; enforcement of the team rule (including
+    rejecting missing identity) is done in the route handler.
 """
 from __future__ import annotations
 
@@ -31,8 +37,6 @@ import os
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
-_APPROVAL_MODE = os.environ.get("BATON_APPROVAL_MODE", "local").lower()
 
 
 class UserIdentityMiddleware(BaseHTTPMiddleware):
@@ -51,7 +55,12 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
 
     def __init__(self, app, approval_mode: str | None = None) -> None:
         super().__init__(app)
-        self.approval_mode = (approval_mode or _APPROVAL_MODE).lower()
+        # Read the environment at construction time (not import time), so a
+        # process that sets BATON_APPROVAL_MODE before create_app() actually
+        # gets the mode it asked for. The constructor arg still wins when
+        # given explicitly (tests rely on this to override the environment).
+        default_mode = os.environ.get("BATON_APPROVAL_MODE", "local").lower()
+        self.approval_mode = (approval_mode or default_mode).lower()
 
     async def dispatch(self, request: Request, call_next) -> Response:
         """Resolve user identity and store it in ``request.state``.
@@ -77,13 +86,17 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
         Resolution order:
         1. ``X-Baton-User`` header
         2. ``Authorization: Bearer <token>`` (token used as user ID)
-        3. ``"local-user"`` fallback (local mode only)
+        3. ``"local-user"`` fallback — ``local`` approval mode only
 
         Args:
             request: The incoming HTTP request.
 
         Returns:
-            A non-empty string identifying the caller.
+            A non-empty string identifying the caller in ``local`` mode.
+            In ``team`` mode, an empty string when no identity was
+            presented — callers must never receive a usable synthetic
+            identity that could satisfy an approver-differs-from-submitter
+            check.
         """
         # 1. Explicit header set by a trusted upstream.
         user_header = request.headers.get("X-Baton-User", "").strip()
@@ -97,5 +110,8 @@ class UserIdentityMiddleware(BaseHTTPMiddleware):
             if token:
                 return token
 
-        # 3. Local-mode fallback.
-        return "local-user"
+        # 3. Local-mode fallback. Team (and any other non-local) mode must
+        # not mint a synthetic identity for an unauthenticated caller.
+        if self.approval_mode == "local":
+            return "local-user"
+        return ""
