@@ -190,12 +190,13 @@ A gemini equivalent is just a different command string — e.g.
 With the setting in place, a `--dry-run` preview shows phase 6 with a
 second step: `6.2 Implementation Ve  task-runner`.
 
-!!! warning "300-second cap on external commands"
-    The v1 automation runner in `baton execute run` hard-caps automation
-    commands at **300s**. `external_timeout_seconds` is stamped onto the
-    step for forward-compatibility only and is not honored there yet —
-    budget vendor CLIs accordingly (scope the prompt, or run the long
-    version outside the loop).
+!!! note "External-command timeout"
+    Both automation runners (`baton execute run` and the daemon worker)
+    enforce the step's own `timeout_seconds` — stamped from
+    `external_timeout_seconds`, default **1800s**. A command with no
+    declared budget falls back to a 300s default, and expiry records the
+    step as **failed**, so budget vendor CLIs accordingly (scope the
+    prompt, or raise `external_timeout_seconds`).
 
 Prefer a different *agent* for the same stage — instead of, or alongside,
 the external command? Retarget it:
@@ -228,8 +229,8 @@ workflow:
 |-----|--------|
 | `stages.<stage_id>.agent` | Retarget a stage's agent. Ignored for the harvesting stage (`implementation`) — those agents come from the base plan. |
 | `stages.<stage_id>.model` | Retarget a stage's tier (`haiku`/`sonnet`/`opus`/`fable`). Use this to move stages 1, 2, and 7 off `fable` if your runtime does not resolve that alias. |
-| `external_command` | Literal command for the Implementation Verification automation step. Empty = no external verifier. Capped at 300s by the v1 runner. |
-| `external_timeout_seconds` | Stamped on the step for forward-compatibility; **not** honored by the v1 runner. |
+| `external_command` | Literal command for the Implementation Verification automation step. Empty = no external verifier. |
+| `external_timeout_seconds` | Wall-clock budget for `external_command`, enforced by both automation runners (default 1800s; expiry fails the step). |
 | `final_review_fanout_divisor` | Reviewers = `ceil(implementation dispatch units / divisor)`. |
 | `final_review_max_reviewers` | Hard cap on that fan-out. |
 

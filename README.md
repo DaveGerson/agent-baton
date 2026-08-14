@@ -359,10 +359,10 @@ Three caveats worth knowing up front:
 
 - `--workflow` is **mutually exclusive** with `--manager-mode` and `--import`.
 - `external_command` is appended to Implementation Verification as an engine
-  automation step, so any CLI or script can act as an independent verifier — but
-  the v1 automation runner **hard-caps every automation command at 300 seconds**.
-  `external_timeout_seconds` is stamped for forward compatibility only; budget
-  vendor CLIs against the 300s cap.
+  automation step, so any CLI or script can act as an independent verifier.
+  The automation runners enforce the step's `external_timeout_seconds`
+  (default 1800s); a command with no declared budget falls back to a 300s
+  default. Expiry records the step as failed.
 - Audit phases from a regulated-domain plan are carried over verbatim *after*
   Final Review, keeping their own gates and approvals.
 
@@ -417,10 +417,12 @@ not a hope.
 
 ```bash
 # Preview the plan, cost forecast, and gate timing without saving
-baton plan "Add OAuth2 login" --dry-run
+baton plan "Add CSV export to the reports page" --dry-run
 
-# Save the plan and see why these agents and phases were chosen
-baton plan "Add OAuth2 login" --save --explain
+# Save the plan and see why these agents and phases were chosen.
+# Auth work is compliance-routed: the validator requires the auditor
+# on the roster, so include it (or let `baton plan` tell you to).
+baton plan "Add OAuth2 login" --agents architect,backend-engineer,security-reviewer,auditor,code-reviewer --save --explain
 
 # Override complexity when you know more than the classifier
 baton plan "Rename a constant across 2 files" --complexity light

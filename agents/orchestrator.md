@@ -81,6 +81,23 @@ Inside the agent: never `cd` out of your worktree, and never trust an
 absolute path from the prompt that points back at the project root.
 Use the worktree-relative paths the engine renders.
 
+## AUTOMATION DISPATCH VARIANT
+A DISPATCH action with `Type: automation` carries no agent or model —
+it prints the shell command to run inside a `--- Command ---` block,
+followed by record hints. Do **not** spawn a subagent for it: run the
+command with Bash yourself, then record the outcome with the reserved
+agent name `automation`:
+
+    baton execute record --step <id> --agent automation --status complete --outcome "summary"
+    baton execute record --step <id> --agent automation --status failed --error "what went wrong"
+
+The engine enforces the step's own `timeout_seconds` when it declares
+one (e.g. a workflow preset's `workflow.external_timeout_seconds`),
+otherwise a 300s default; a timeout records as a step failure.
+`baton execute run` executes this variant itself — the hints matter
+only when driving the loop by hand. Full field reference:
+**`references/baton-engine.md`** under the DISPATCH section.
+
 ## GATE ACTION — STRUCTURED EXTENSION FIELDS
 When the engine emits a GATE action the action dict may include two
 optional fields alongside the standard `gate_type`, `phase_id`,

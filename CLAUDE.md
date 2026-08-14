@@ -91,7 +91,7 @@ When dispatching a worktree-isolated specialist, include the expected branch-tip
 
 Handle bugs/failures without pausing the main flow:
 
-1. **Bead it** — `baton beads create --type warning --message "<incident>"`.
+1. **Bead it** — `baton beads create --type warning --content "<incident>"`.
 2. **Fix in parallel** — launch a subagent on a separate branch (use `isolation: "worktree"` for concurrent agents).
 3. **Require a regression test.**
 4. **Continue the main flow.**

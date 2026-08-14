@@ -495,6 +495,32 @@ def _render_workflow_explain_section(decisions) -> str:
         lines.append(
             f"- Carried-over phases: {', '.join(decisions.carried_over_phases)}"
         )
+
+    # §5.3: the reshape's discards must be visible in --explain, not only in
+    # plan_diagnostics["workflow"].  Same public-field contract as above.
+    dropped = getattr(decisions, "dropped_steps", None) or []
+    if dropped:
+        lines.append("")
+        lines.append("### Dropped base steps")
+        lines.append("")
+        lines.append(
+            "The reshape discarded these base-plan steps (neither harvested "
+            "into Implementation nor carried over):"
+        )
+        lines.append("")
+        for entry in dropped:
+            lines.append(
+                f"- `{entry.get('step_id')}` {entry.get('agent_name')} "
+                f"({entry.get('step_type')}, phase {entry.get('phase_name')!r}): "
+                f"{entry.get('task_description')}"
+            )
+    warnings = getattr(decisions, "warnings", None) or []
+    if warnings:
+        lines.append("")
+        lines.append("### Workflow warnings")
+        lines.append("")
+        for warning in warnings:
+            lines.append(f"- {warning}")
     lines.append("")
 
     return "\n".join(lines).rstrip("\n") + "\n"
@@ -786,7 +812,10 @@ def handler(args: argparse.Namespace) -> None:
         from agent_baton.core.config.workflow import load_workflow_settings
         from agent_baton.core.engine.planning.utils.gates import default_gate
         from agent_baton.core.orchestration.router import StackProfile
-        from agent_baton.core.workflow.applier import WorkflowApplier
+        from agent_baton.core.workflow.applier import (
+            WorkflowApplier,
+            WorkflowReshapeError,
+        )
 
         workflow_settings = load_workflow_settings(project_root)
         harvesting_stage = next(
@@ -819,9 +848,27 @@ def handler(args: argparse.Namespace) -> None:
             gate_scope=gate_scope,
             project_root=project_root,
         )
-        workflow_decisions = WorkflowApplier().apply(
-            plan, workflow_preset, workflow_settings, fallback_gate=fallback_gate
-        )
+        try:
+            workflow_decisions = WorkflowApplier().apply(
+                plan, workflow_preset, workflow_settings, fallback_gate=fallback_gate
+            )
+        except WorkflowReshapeError as exc:
+            # §5.12: the applier's output validation failed.  The likeliest
+            # user-reachable cause is a bad `workflow:` override in baton.yaml
+            # (e.g. `stages.<stage_id>.agent: ""`), so surface it as a
+            # validation error (exit 2) with the config pointer instead of a
+            # traceback.
+            validation_error(
+                str(exc),
+                hint=(
+                    "Check the `workflow:` block in baton.yaml "
+                    "(.claude/baton.yaml or ./baton.yaml) -- especially "
+                    "`stages.<stage_id>.agent` overrides -- or re-run without "
+                    "--workflow. If the config is clean, this is an "
+                    "agent-baton bug: please report it."
+                ),
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
 
     # A1.d: surface claude-teams + long-running resumability warnings.
     # Strict mode (BATON_TEAMS_STRICT_RESUMABILITY=1) treats the warning

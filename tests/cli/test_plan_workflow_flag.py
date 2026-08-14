@@ -523,6 +523,68 @@ class TestExplain:
     ) -> None:
         assert "stub explanation" in self._explanation(monkeypatch, tmp_path, capsys)
 
+    def test_explanation_lists_dropped_steps(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # The shared base plan's Design/Test/Review steps are neither
+        # harvested nor carried over -- §5.3 requires the drop to be visible
+        # in --explain, not only in plan_diagnostics["workflow"].
+        explanation = self._explanation(monkeypatch, tmp_path, capsys)
+        assert "Dropped base steps" in explanation
+        assert "architect" in explanation  # the dropped Design step's agent
+
+    def test_explanation_renders_auditor_drop_warning(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        from tests.workflow._plans import build_auditor_in_implement_phase_plan
+
+        _run_plan(
+            monkeypatch,
+            tmp_path,
+            [
+                "plan",
+                "add rate limiting",
+                "--workflow",
+                "adversarial-tdd",
+                "--save",
+                "--explain",
+            ],
+            plan_factory=build_auditor_in_implement_phase_plan,
+        )
+        capsys.readouterr()
+        explanation = (
+            tmp_path / ".claude" / "team-context" / "explanation.md"
+        ).read_text(encoding="utf-8")
+        assert "Workflow warnings" in explanation
+        assert "auditor" in explanation
+
+
+# ---------------------------------------------------------------------------
+# §5.12 WorkflowReshapeError → exit 2 with an actionable message
+# ---------------------------------------------------------------------------
+
+class TestReshapeErrorHandling:
+    _BAD_CONFIG = 'workflow:\n  stages:\n    spec: {agent: ""}\n'
+
+    def test_invalid_override_exits_2_not_traceback(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        # `stages.spec.agent: ""` passes config validation (str | None) but
+        # produces a step with an empty agent_name, which MachinePlan's own
+        # validators reject -- the applier raises WorkflowReshapeError and
+        # the CLI must turn that into a validation error, not a traceback.
+        _write_baton_yaml(tmp_path, self._BAD_CONFIG)
+        with pytest.raises(SystemExit) as excinfo:
+            _run_plan(
+                monkeypatch,
+                tmp_path,
+                ["plan", "add rate limiting", "--workflow", "adversarial-tdd"],
+            )
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "baton.yaml" in err
+        assert "adversarial-tdd" in err
+
 
 # ---------------------------------------------------------------------------
 # Config-default manager mode is suppressed, not an error (interaction matrix)

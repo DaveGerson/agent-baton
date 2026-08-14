@@ -646,3 +646,40 @@ fable-pinned stages); the v1 automation runner caps `external_command` at
 **300s** (`external_timeout_seconds` is forward-compatibility only); and
 goal amend-cycle phases carry **no** `workflow_stage` and no stage model
 pinning.
+
+---
+
+## 2026-08-13 — Final-review pass: docs re-synced to the patch-wave behavior
+
+Status: Accepted
+
+The two adversarial patch waves that followed the docs overhaul changed
+shipped behavior; the docs written mid-fleet still described v1. Fixed:
+
+- **The 300s automation cap is gone.** Both automation runners now enforce
+  the step's own `timeout_seconds` (stamped from
+  `workflow.external_timeout_seconds`, default 1800s) via
+  `runtime/worker.resolve_automation_timeout`, with a `plan.json` rescue
+  for the SQLite reload gap and a 300s last-resort default. Corrected in
+  `README.md` (Delivery workflows caveats), `docs/delivery-workflows.md`
+  (Journey 4 admonition + config table), `docs/cli-reference.md`
+  (Workflow presets note), and `references/baton-patterns.md` (Pattern 5).
+  The previous audit entry's "300s cap" mandatory caveat is **superseded**
+  by this wording; the other two caveats (fable runtime alias, amend-cycle
+  phases) stand.
+- **README Pillar-1 key commands** used `baton plan "Add OAuth2 login"`
+  bare, which the deterministic classifier blocks in a clean project
+  (`audit_missing`: auth work is compliance-routed and requires the
+  auditor). The dry-run example now uses a neutral task; the `--save
+  --explain` example keeps OAuth2 but adds the auditor-bearing `--agents`
+  roster with a one-line explanation. All README/docs example plan
+  commands smoke-tested from a temp project.
+- **`agents/orchestrator.md`** gained an "Automation DISPATCH variant"
+  section (run the command with Bash, record with `--agent automation`,
+  timeout semantics) matching the additive `_print_action()` record
+  hints; bundled mirror re-synced via `scripts/sync_bundled_agents.sh`.
+- **Spec** `docs/internal/adversarial-tdd-workflow-design.md` bumped to
+  v2.4 with inline amendments (§2#6, §3, §5.2/5.3/5.4/5.5/5.7/5.12, §7)
+  and a §10 post-ship amendment log.
+- **Root `CLAUDE.md` / `GEMINI.md`**: `baton beads create` takes
+  `--content`, not `--message` (verified against the CLI).

@@ -101,7 +101,7 @@ workflow:
   final_review_max_reviewers: 3
 ```
 
-Notes: `external_timeout_seconds` is stamped onto the automation step for forward-compatibility, but the v1 automation runner in `baton execute run` caps commands at 300s — budget external verifiers accordingly. `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
+Notes: `external_timeout_seconds` (default 1800) is stamped onto the automation step's `timeout_seconds` and enforced by both automation runners (`baton execute run` and the daemon worker); a step with no declared budget falls back to a 300s default, and expiry records the step as failed. `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
 
 Task-oriented journeys (everyday delivery, goal-driven, regulated, external verifiers): [delivery-workflows.md](delivery-workflows.md).
 

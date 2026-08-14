@@ -41,4 +41,7 @@ def handler(args: argparse.Namespace) -> None:
             flavor_tag = f" (flavor: {agent.flavor})" if agent.is_flavored else ""
             print(f"  {name:<35} {model_tag:<10}{flavor_tag}")
 
-    print(f"\n{count} agents loaded.")
+    # ``count`` sums per-directory loads, so an agent overridden by a
+    # higher-priority directory would be counted twice -- report the number
+    # of distinct agents actually available instead.
+    print(f"\n{len(registry.agents)} agents loaded.")

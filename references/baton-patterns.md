@@ -335,9 +335,9 @@ workflow:
 ```
 
 `external_command` is appended to Implementation Verification as an engine
-automation step. `external_timeout_seconds` is stamped for
-forward-compatibility only — the v1 `baton execute run` automation runner caps
-commands at 300s, so budget vendor CLIs accordingly.
+automation step. `external_timeout_seconds` (default 1800s) is stamped onto
+the step and enforced by the automation runners; expiry records the step as
+failed, so budget vendor CLIs accordingly.
 
 Full flag/config reference: `docs/cli-reference.md` (Workflow presets); recipe:
 `docs/orchestrator-usage.md` §15.

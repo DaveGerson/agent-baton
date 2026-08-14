@@ -121,7 +121,7 @@ Any work touching regulated data, compliance systems, audit-controlled records, 
 
 Handle bugs/failures without pausing the main flow:
 
-1. **Bead it** — `baton beads create --type warning --message "<incident>"`.
+1. **Bead it** — `baton beads create --type warning --content "<incident>"`.
 2. **Fix in parallel** — launch a subagent on a separate branch (use `isolation: "worktree"` for concurrent agents).
 3. **Require a regression test.**
 4. **Continue the main flow.**

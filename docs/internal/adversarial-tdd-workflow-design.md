@@ -1,8 +1,9 @@
 # Adversarial-TDD Workflow — design spec
 
-Status: Accepted (v2.3 — amended through architecture review, adversarial
-test verification, independent implementation verification, and final
-review). Implemented 2026-08-09; ADR-26 in `docs/design-decisions.md`.
+Status: Accepted (v2.4 — amended through architecture review, adversarial
+test verification, independent implementation verification, final review,
+and the 2026-08-13 post-ship adversarial patch waves; see §10).
+Implemented 2026-08-09; ADR-26 in `docs/design-decisions.md`.
 Owner: maintainers
 Date: 2026-08-09
 
@@ -42,7 +43,7 @@ mechanism so more named workflows can be added later.
 | 3 | **Presets are code-defined data**, in `agent_baton/core/workflow/presets.py` (frozen dataclasses + registry), not JSON templates. | The staged shape depends on the planned task (implementation steps come from the base plan), so a static plan JSON cannot express it. `templates/learning-cycle-plan.json` remains the precedent for fully static plans. |
 | 4 | **Pure & idempotent applier.** `WorkflowApplier.apply(plan, preset, settings, fallback_gate=None)` does no clock reads and no filesystem/network IO; safe to call twice. Any IO-dependent input (the stack-detected fallback gate) is computed by the CLI wiring layer and passed in. Idempotency marker: `MachinePlan.workflow` + non-empty `PlanStep.workflow_stage`. | Mirrors `PhasePolicyApplier` (`core/manager/phase_policy.py`). `default_gate` does filesystem IO, so it cannot be called from inside the applier. |
 | 5 | **Two new plan-model fields, declared + serialized**: `MachinePlan.workflow: str = ""`, `PlanStep.workflow_stage: str = ""`. Emitted by `to_dict()` only when non-empty (golden-fixture compatible). The applier also records its `WorkflowDecisions` under `plan_diagnostics["workflow"]`. **The SQLite copy of the plan is lossy for these fields in v1** (column-mapped `_upsert_plan` has no such columns); `plan.json` is canonical, and the PMO UI does not display workflow stages in v1. | Models use `extra="ignore"` + hand-written `to_dict` allow-lists — undeclared fields do not survive the plan.json round-trip. DB columns + migration deferred to a PMO-UI increment. |
-| 6 | **Vendor-neutral external verification via an automation step.** Config `workflow.external_command` (baton.yaml); when set, the applier appends a `step_type="automation"` step (`agent_name="task-runner"`, `command=<external_command>`, `timeout_seconds` from config) to the Implementation Verification phase. **v1 constraint:** `baton execute run`'s automation runner caps commands at 300s (`execute.py`/`worker.py` hardcode `timeout=300`); `timeout_seconds` is stamped for forward-compatibility but not yet honored there. Documented. | Baton has no vendor abstraction (`claude_launcher.py` is claude-only). An automation step is the engine-native way to run *any* CLI — `gemini`, `codex`, a script — with zero engine changes. |
+| 6 | **Vendor-neutral external verification via an automation step.** Config `workflow.external_command` (baton.yaml); when set, the applier appends a `step_type="automation"` step (`agent_name="task-runner"`, `command=<external_command>`, `timeout_seconds` from config) to the Implementation Verification phase. **Amended (v2.4):** both automation runners (`baton execute run` and the daemon `TaskWorker`) now resolve the timeout via `agent_baton.core.runtime.worker.resolve_automation_timeout` — the step's `timeout_seconds` when declared (with a `plan.json` rescue for the SQLite reload gap), then `BATON_DEFAULT_STEP_TIMEOUT_S`, then a 300s default. The original v1 hard-coded 300s cap is gone. | Baton has no vendor abstraction (`claude_launcher.py` is claude-only). An automation step is the engine-native way to run *any* CLI — `gemini`, `codex`, a script — with zero engine changes. |
 | 7 | **`--workflow` is mutually exclusive with `--manager-mode` and `--import` in v1** (typed CLI error, exit 2). | Manager mode's `PhasePolicyApplier` keys idempotency solely on the `review-` step-id prefix and would inject adversarial-review steps into all 7 workflow phases — including the three that *are* reviews. Composition is deferred until `_has_review_step` understands `workflow_stage`. `--import` bypasses `create_plan()`; reshaping imported plans is untested territory. |
 | 8 | **One new agent: `test-adequacy-reviewer` (opus, reviewer class).** Implementation verification reuses `code-reviewer` pinned to opus; final review reuses `code-reviewer` pinned to fable. No planner-rules registration (`REVIEWER_AGENTS`, `step_types.py`) in v1 — the applier stamps `step_type` explicitly and the planner never seats this agent on its own. No `_VALID_MODELS`/fable validator change — the validator only checks agent frontmatter, and no shipped agent uses `model: fable`. | Test-vs-behavior verification is a genuinely distinct role with distinct scoping. Minimal global blast radius. |
 | 9 | **CLI**: `baton plan --workflow NAME` (+ passthrough on `baton goal`). Unknown name → `UnknownWorkflowError` caught by the CLI and rendered as a validation error listing available presets (exit 2). A standalone `baton workflows` list command is deferred to v2; discoverability = docs + `--explain` + the error listing. | Mirrors `--manager-mode` wiring. Smallest surface that satisfies out-of-the-box use. |
@@ -78,6 +79,12 @@ Notes:
   (`audit_missing`) mandated them; the workflow must not strip them.
 - **Dependencies**: phases execute in engine order; intra-implementation
   `depends_on` re-keyed to new step ids; no cross-phase step deps.
+  **Amended (v2.4)**: flattening several base phases (Preparation +
+  Implementation + Remediation) into the one Implementation phase must not
+  erase the ordering those phases encoded — each later origin-phase group
+  gains `depends_on` edges onto the previous group's steps (intra-group
+  parallelism untouched), and `parallel_safe` is demoted on steps whose
+  new edges no longer satisfy the planner's own predicate (see §5.4).
 - **Step ids** renumbered numerically `"<phase_id>.<n>"` (plan-graph
   invariants: unique across plan, no forward refs).
 
@@ -198,26 +205,61 @@ class WorkflowApplier:
    harvest steps with `step_type not in {"reviewing", "planning"}`.
    Fallbacks, in order: (a) if no phase qualifies **or the qualifying
    phases yield no harvested steps**, harvest all steps with
-   `step_type == "developing"` anywhere in the plan; (b) if still empty,
-   synthesize one implementation step from the implement-phase fallback
-   agent (`backend-engineer`), briefed from the task summary.
+   `step_type == "developing"` anywhere in the plan — **except (v2.4)
+   inside a carryover-eligible (auditor-bearing, see rule 7) phase**;
+   (b) if still empty, synthesize one implementation step from the
+   implement-phase fallback agent (`backend-engineer`), briefed from the
+   task summary. **Ordering (v2.4)**: carryover eligibility is computed
+   from the primary harvest's results, BEFORE fallback (a) runs, so an
+   auditor-bearing phase is protected from it — otherwise fallback (a)
+   would strip the `developing` step out of a mixed Audit phase, the
+   phase would count as "partly harvested", and its `auditor` step would
+   silently vanish. Carryover preserves such a phase whole, developing
+   step included.
 3. **Discard rule (explicit)**: all base steps not harvested per rule 2 and
    not carried over per rule 7 are discarded; their work is assumed
    re-covered by the preset stages. `plan_diagnostics` entries computed on
    the pre-reshape plan may reference discarded step ids — known-stale,
-   `plan_diagnostics["workflow"]` marks the reshape.
+   `plan_diagnostics["workflow"]` marks the reshape. **Amended (v2.4): the
+   discard is no longer silent** — `WorkflowDecisions.dropped_steps`
+   records every discarded step (`step_id`, `agent_name`, `phase_name`,
+   `step_type`, `task_description`) and `WorkflowDecisions.warnings`
+   carries human-readable notes for drops that deserve attention (today:
+   dropped `auditor` work). Both are persisted in
+   `plan_diagnostics["workflow"]` and rendered by `--explain`
+   ("Dropped base steps" / "Workflow warnings" subsections). The no-op
+   guard (rule 1) reads them back from the persisted record rather than
+   reporting an empty list.
 4. **Rebuild `plan.phases`** in preset stage order; implementation steps are
    flattened into the harvesting stage's single phase in original order.
+   **Amended (v2.4): base-phase ordering is preserved across the flatten** —
+   harvested steps are grouped by originating base phase, and each later
+   group gains `depends_on` edges onto every step of the previous group
+   (existing edges are not duplicated; intra-group parallelism is
+   untouched). Steps that received such an edge have `parallel_safe`
+   cleared when they no longer satisfy the planner's own predicate
+   (`strategies.annotate_parallel_safe`: same-`depends_on` siblings with
+   non-empty, mutually disjoint `allowed_paths`); the applier only ever
+   demotes, never promotes, `parallel_safe`.
 5. **Field preservation (inverted rule)**: harvested steps preserve **all**
    fields except: `step_id` (renumbered), `depends_on` (re-keyed),
    `workflow_stage` (stamped), and `model` (stamped to the stage tier —
    including `TeamMember.model` recursively through `sub_team` — **except**
    steps with `step_type` in {"automation", "task"}, whose model is unused
    and left untouched). `step_type` is stamped only on applier-created
-   steps, never on harvested ones. `TeamMember.member_id` values are
-   preserved verbatim (NOT re-keyed to the renumbered step id — member
-   `depends_on` references member ids, so re-keying is not free; v1 keeps
-   them stable).
+   steps, never on harvested ones. **Amended (v2.4, inverts the original
+   ruling): `TeamMember.member_id` values ARE re-keyed to the renumbered
+   step id** — for harvested steps and carryover steps alike. Member ids
+   are not decoration: `execute.py` derives a member's parent step from
+   the id prefix (`_validators.parent_step_id`), so a step renumbered
+   `3.1 → 5.2` whose members still read `3.1.a` makes DISPATCH print a
+   wrong `Parent-Step:` that either hard-errors or attaches results to an
+   unrelated step. Re-keying mirrors the engine's own
+   `ExecutionEngine._renumber_phases`: the original suffix is preserved
+   when the member id is prefixed by the step's old id (including nested
+   `3.1.a.i` forms); otherwise a positional suffix (`a`, `b`, …, `m27`+)
+   is assigned. Intra-team member `depends_on` is remapped through the
+   same old→new map; references that do not resolve are dropped.
 6. **Gates**: the Implementation phase gets the first test/build gate found
    on any **non-carryover** base phase, else `fallback_gate` (may be None) —
    carryover phases keep their own gates and must not be aliased/double-run.
@@ -233,7 +275,18 @@ class WorkflowApplier:
    `auditor` step *inside* a harvested implementation-like phase is
    excluded by the §5.2 step filter and is NOT carried over — dedicated
    Audit phases are the carryover unit; inline audit work is re-covered by
-   the verification and final-review stages.
+   the verification and final-review stages (the drop is recorded per
+   rule 3's `warnings`). **Amended (v2.4)**: (i) "non-harvested" is keyed
+   on *harvest-source contribution* — a phase is carryover-eligible iff it
+   contributed no step to the primary harvest, so an implementation-named
+   phase that yielded nothing can still carry its auditor over, while the
+   original §5.7 ruling for harvested phases stands; eligibility is
+   computed before fallback harvesting (rule 2). (ii) Auditor detection
+   recurses through `step.team`/`sub_team` — `ValidationStage.
+   _consolidate_team` folds multi-step phases into a single
+   `agent_name="team"` step whose members carry the real agent names, so a
+   step-level name test alone silently dropped consolidated Audit phases.
+   (iii) Carryover steps' team member ids are re-keyed per rule 5.
 8. **Final-review fan-out**: implementation units =
    Σ over harvested steps of `max(1, len(step.team))`. Reviewer count =
    `min(final_review_max_reviewers, max(1, ceil(units / final_review_fanout_divisor)))`
@@ -259,7 +312,15 @@ class WorkflowApplier:
     applies (agents come from the base plan).
 12. **Validity**: output must satisfy `MachinePlan` model validators
     (unique ids, no forward deps, non-empty agent names). A violation is an
-    applier bug, not a user error.
+    applier bug, not a user error. **Amended (v2.4): enforced, not
+    assumed** — `apply()` re-runs the validators over the reshaped plan
+    (a `from_dict(to_dict())` round-trip, since `validate_assignment=False`
+    means in-place mutation never re-triggers them) and raises the typed
+    `WorkflowReshapeError(RuntimeError)` (in `core/workflow/applier.py`,
+    engine-errors style per decision #11) instead of letting an invalid
+    `plan.json` reach disk. The CLI catches it and renders a validation
+    error (exit 2) pointing at the `workflow:` block in `baton.yaml` — the
+    one user-reachable trigger is a `stages.<stage_id>.agent: ""` override.
 
 ### CLI interaction matrix (v1)
 
@@ -289,8 +350,14 @@ class WorkflowApplier:
 - No path-level sandbox enforcement of test-verification scoping.
 - No manager-mode composition; no `--from-template` revival; no
   `baton workflows` command; no PMO-UI surface; no DB columns for the new
-  fields (plan.json canonical); no automation-timeout engine change.
-- No changes to the execution engine, protocol, or `_print_action()`.
+  fields (plan.json canonical — the automation runners rescue
+  `timeout_seconds` from `plan.json` on reload, see §10).
+- ~~No automation-timeout engine change. No changes to the execution
+  engine, protocol, or `_print_action()`.~~ **Superseded by the v2.4
+  patch waves (§10)**: the automation runners now honor per-step
+  timeouts, `_print_action()` gained additive record hints on the
+  automation DISPATCH variant, and the worktree manager seeds/harvests
+  per-task team-context deliverables.
 - Runtime assumption (documented): the installed Claude Code runtime
   resolves the `fable` model alias at dispatch. Smoke-test before relying
   on fable-pinned stages in production.
@@ -368,3 +435,20 @@ Adversarial-verification addenda (must be pinned):
    verifier command without code changes.
 5. All existing planner/CLI tests stay green; plans without `--workflow`
    are byte-identical to before (both fields absent from JSON).
+
+## 10. Post-ship amendment log (v2.4, 2026-08-13 adversarial patch waves)
+
+Behavior changes shipped after v2.3 acceptance; each inline amendment above
+is tagged **(v2.4)**. Summary:
+
+| Area | Change | Where |
+|------|--------|-------|
+| §5.5 (inverted) | Team member ids re-keyed onto renumbered step ids (harvest + carryover); member `depends_on` remapped | `applier._rekey_team` |
+| §5.2/§5.7 | Carryover eligibility computed before fallback harvest; keyed on harvest-source contribution; auditor detection recurses `team`/`sub_team` | `applier._primary_harvest` / `_carryover_candidates` |
+| §5.3 | `WorkflowDecisions.dropped_steps` + `warnings`; rendered in `--explain`; persisted in `plan_diagnostics["workflow"]` | `applier`, `plan_cmd._render_workflow_explain_section` |
+| §5.4 | Base-phase ordering preserved across the flatten via `depends_on` edges; stale `parallel_safe` demoted | `applier._apply_phase_ordering` |
+| §5.12 | Output validation enforced; typed `WorkflowReshapeError`; CLI exit 2 with baton.yaml pointer | `applier._validate_reshaped_plan`, `plan_cmd` |
+| Decision #6 | Automation runners honor per-step `timeout_seconds` (`external_timeout_seconds` default 1800; `plan.json` rescue for the SQLite reload gap; 300s only as last-resort default) | `runtime/worker.resolve_automation_timeout`, `execute._run_loop` |
+| Protocol (additive) | Automation DISPATCH variant emits `record --agent automation` hints | `execute._print_action`, `agents/orchestrator.md`, `references/baton-engine.md` |
+| Engine (adjacent) | Worktree manager seeds parent `.claude/team-context/executions/<task_id>/` into each worktree on create and harvests it back on fold-back/cleanup/GC (newest-wins, engine bookkeeping excluded) — without this, `spec.md` written in one worktree-isolated step was invisible to the next | `engine/worktree_manager.py` |
+| Forecast/runtime | `fable` tier priced and time-budgeted explicitly (was silently falling through to sonnet pricing / 600s default timeout) | `observe/cost_forecaster.py`, `runtime/claude_launcher.py` |
