@@ -43,6 +43,8 @@ Changelog = "https://github.com/DaveGerson/agent-baton/releases"
 dev = [
     "pytest>=7.0,<9",
     "pytest-cov>=4.0,<8",
+    "pytest-xdist>=3.0,<4",
+    "pytest-split>=0.9,<1",
 ]
 pmo = [
     "fastapi>=0.115",

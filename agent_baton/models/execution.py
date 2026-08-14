@@ -1428,6 +1428,17 @@ class ExecutionState(BaseModel):
     pending_approval_request: PendingApprovalRequest | None = None
     phase_retries: dict[str, int] = Field(default_factory=dict)
 
+    # F093: test-immutability control.  Snapshot of the test corpus (file
+    # digests, per-file case IDs, collected count) captured by
+    # ``test_integrity.capture_baseline()`` at ``start()`` and consulted by
+    # ``record_gate_result`` on every 'test'/'build' gate so a specialist
+    # can't delete or gut a baselined test and have the gate still report
+    # PASS.  Stored as a plain dict (``TestBaseline.to_dict()`` shape)
+    # rather than the dataclass so ExecutionState stays JSON-native; ``None``
+    # for legacy state files and non-git project roots (an empty/degenerate
+    # baseline is inert -- see ``test_integrity.capture_baseline`` docstring).
+    test_baseline: dict | None = None
+
     # Goal-driven execution (G1).  ``goal_checks`` is the audit trail of
     # GoalEvaluator runs at phase boundaries; ``amend_cycles_used`` counts
     # round-out cycles spent against ``plan.max_amend_cycles``.
@@ -1755,7 +1766,7 @@ class ExecutionState(BaseModel):
         self.status = "running"
 
     def to_dict(self) -> dict:
-        return {
+        state_dict = {
             "task_id": self.task_id,
             "plan": self.plan.to_dict(),
             "current_phase": self.current_phase,
@@ -1800,6 +1811,13 @@ class ExecutionState(BaseModel):
                 else None
             ),
         }
+        # F093: omit when unset so legacy/golden state files that pre-date
+        # this field round-trip byte-for-byte (mirrors the derived_commands/
+        # agent_additions pattern on GateResult.to_dict above).
+        test_baseline = getattr(self, "test_baseline", None)
+        if test_baseline is not None:
+            state_dict["test_baseline"] = dict(test_baseline)
+        return state_dict
 
     @classmethod
     def from_dict(cls, data: dict) -> ExecutionState:
@@ -1860,6 +1878,9 @@ class ExecutionState(BaseModel):
                 if data.get("pending_approval_request") is not None
                 else None
             ),
+            # F093: absent on legacy state files -- None is the correct
+            # "no baseline captured" default, not an empty dict.
+            test_baseline=data.get("test_baseline"),
         )
 
 

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from agent_baton.core.engine.classifier import KeywordClassifier
 from agent_baton.core.engine.planner import IntelligentPlanner
 
 
@@ -114,10 +115,23 @@ def _clear_planner_gate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def _planner() -> IntelligentPlanner:
+    """Hermetic planner: inject KeywordClassifier so plan shape does not
+    depend on the ``claude`` CLI being installed or on live LLM output.
+
+    ``IntelligentPlanner()`` with no classifier defaults to
+    ``FallbackClassifier``, which shells out to the ``claude`` CLI when
+    present — making these golden snapshots non-deterministic on any
+    machine that has the CLI installed.  Matches the precedent set in
+    ``tests/planning/test_investigative_archetype_quality.py::_planner``.
+    """
+    return IntelligentPlanner(task_classifier=KeywordClassifier())
+
+
 @pytest.mark.parametrize(("case_id", "prompt", "kwargs"), GOLDEN_CASES)
 def test_representative_plan_shapes_match_golden_snapshots(
     case_id: str, prompt: str, kwargs: dict[str, Any]
 ) -> None:
-    plan = IntelligentPlanner().create_plan(prompt, **kwargs)
+    plan = _planner().create_plan(prompt, **kwargs)
 
     assert _normalize_plan(plan) == _load_snapshot(case_id)

@@ -58,3 +58,4 @@ evidence/
 .beads-credential-key
 .beads/proxieddb/
 site/
+.beads.gate.lock

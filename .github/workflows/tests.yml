@@ -70,3 +70,65 @@ jobs:
             tests/test_api_pmo_beads.py \
             tests/storage/ \
             tests/static/test_no_direct_bead_store_construction.py
+
+  # The bead-suite job above is a fast, narrowly-scoped smoke check on the bd
+  # backend. It is not a substitute for running the whole collected suite:
+  # historically only that 14-entry allowlist executed on pull requests, so
+  # entire subsystems (engine, govern, planning, api, cli, orchestration,
+  # integration, e2e, ...) were never exercised by CI. This job closes that
+  # gap by running every collected test file, sharded across the matrix (via
+  # pytest-split) and parallelised within each shard (via pytest-xdist) to
+  # keep wall-clock time reasonable — the full suite takes ~37 minutes
+  # serially. See tests/static/test_ci_covers_suite.py for the check that
+  # pins this property.
+  full-suite:
+    name: Full suite (bd backend, shard ${{ matrix.group }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install beads (bd) — the mandatory bead backend
+        env:
+          # The @beads/bd npm postinstall download is flaky on CI runners, so
+          # fetch the pinned release binary directly (deterministic + auditable).
+          BD_VERSION: "1.0.4"
+        run: |
+          set -euo pipefail
+          url="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz"
+          echo "Downloading $url"
+          curl -fsSL -o /tmp/bd.tar.gz "$url"
+          tar -xzf /tmp/bd.tar.gz -C /tmp bd
+          sudo install -m 0755 /tmp/bd /usr/local/bin/bd
+          bd version
+
+      - name: Sync bundled agents
+        run: bash scripts/sync_bundled_agents.sh
+
+      - name: Install agent-baton (+ test/api extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,pmo]"
+
+      - name: Clean shared pytest tmp root (bd workspace-discovery hermeticity guard)
+        # bd's workspace discovery walks up from cwd and can escape a per-test
+        # tmpdir into a shared pytest root left behind by an earlier run on
+        # the same runner (e.g. self-hosted pools that reuse a container),
+        # producing spurious BdNotAvailable failures. Runners are normally
+        # fresh per job, but this is cheap insurance against that reuse.
+        run: rm -rf /tmp/pytest-of-root/.beads
+
+      - name: Full suite, shard ${{ matrix.group }}/4 (every collected test file)
+        env:
+          BATON_BD_BACKEND: bd
+        run: |
+          python -m pytest -q -p no:cacheprovider -n auto \
+            --splits 4 --group ${{ matrix.group }}

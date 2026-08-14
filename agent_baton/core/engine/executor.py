@@ -1888,6 +1888,23 @@ class ExecutionEngine:
             pending_approval_request=_initial_par,
         )
 
+        # F093: capture the test-corpus baseline before any agent is
+        # dispatched, so a later 'test'/'build' gate can detect a specialist
+        # deleting or gutting a baselined test file -- git-derived, never
+        # from an agent's self-reported --files list (see F097).  Only
+        # captured when the plan actually has a test/build gate, and never
+        # allowed to block start(): a capture failure (no git, no
+        # ArtifactValidator-relevant root, etc.) degrades to "no baseline",
+        # which is inert for verify_baseline rather than a hard failure.
+        if any(
+            p.gate and p.gate.gate_type in ("test", "build") for p in plan.phases
+        ):
+            try:
+                from agent_baton.core.engine.test_integrity import capture_baseline
+                state.test_baseline = capture_baseline(self._project_root()).to_dict()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("F093: capture_baseline failed, continuing without it: %s", exc)
+
         # Initialise trace (in-memory; committed to disk on complete()).
         self._trace = self._tracer.start_trace(
             task_id=plan.task_id,
@@ -3716,6 +3733,47 @@ class ExecutionEngine:
                     {"command": d.command, "source_file": d.source_file, "rationale": d.rationale}
                     for d in av.derive_commands(files_changed)
                 ]
+
+        # ── F093: test-immutability enforcement ──────────────────────────────
+        # `passed` above is whatever the caller (orchestrator/human/daemon)
+        # reported; it is not trustworthy on its own -- a specialist can
+        # delete or gut the very tests its gate checks, report `passed=True`,
+        # and exit_code 0 from a shrunken pytest run backs that up. Overrule
+        # it here from the captured baseline, comparing against the
+        # *filesystem*, never against the caller's self-reported data (see
+        # F097). No-ops when no baseline was captured at start() (e.g. no
+        # test/build gate in the plan, or a non-git project root).
+        if gate_type in ("test", "build") and state.test_baseline:
+            from agent_baton.core.engine.test_integrity import (
+                TestBaseline as _TestBaseline,
+                parse_collected_count as _parse_collected_count,
+                verify_baseline as _verify_baseline,
+            )
+            baseline = _TestBaseline.from_dict(state.test_baseline)
+            observed_count = _parse_collected_count(output)
+            verdict = _verify_baseline(
+                baseline, self._project_root(), collected_count=observed_count
+            )
+            if not verdict.passed:
+                violation_text = "\n".join(verdict.violations)
+                logger.warning(
+                    "F093: gate result overruled for phase_id=%d gate_type=%s: %s",
+                    phase_id, gate_type, violation_text,
+                )
+                passed = False
+                output = (
+                    f"{output}\n---\n"
+                    f"TEST INTEGRITY VIOLATION (F093): {violation_text}"
+                )
+            elif passed:
+                # Ratchet the baseline forward on an honest pass so growth
+                # (new test files/cases added by this phase) becomes the
+                # reference for the next gate, without ever loosening it.
+                try:
+                    from agent_baton.core.engine.test_integrity import capture_baseline
+                    state.test_baseline = capture_baseline(self._project_root()).to_dict()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("F093: baseline re-capture failed: %s", exc)
 
         gate_result = GateResult(
             phase_id=phase_id,

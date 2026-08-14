@@ -38,6 +38,11 @@ from agent_baton.core.engine.artifact_validator import (
     ArtifactValidator,
     DerivedCommand,
 )
+from agent_baton.core.engine.test_integrity import (
+    TestBaseline,
+    parse_collected_count,
+    verify_baseline,
+)
 from agent_baton.core.govern.spec_validator import SpecValidator
 from agent_baton.models.execution import ActionType, ExecutionAction, GateResult, PlanGate
 
@@ -372,11 +377,17 @@ class GateRunner:
         gate: PlanGate,
         command_output: str,
         exit_code: int = 0,
+        *,
+        test_baseline: TestBaseline | None = None,
+        project_root: Path | str | None = None,
     ) -> GateResult:
         """Evaluate the output of a gate command.
 
         Rules:
-        - 'test' and 'build' gates: passed = (exit_code == 0)
+        - 'test' and 'build' gates: passed = (exit_code == 0), AND, when a
+          ``test_baseline`` is supplied, the test corpus must not have
+          shrunk underneath the gate (F093 -- see
+          ``agent_baton.core.engine.test_integrity``).
         - 'lint' gates: passed = (exit_code == 0 AND no error markers in output)
         - 'spec' gates: delegate to SpecValidator.run_gate with a trivial check
           on the output text (passes when output is non-empty and exit_code == 0)
@@ -387,6 +398,16 @@ class GateRunner:
             command_output: stdout/stderr captured from the gate command (or
                             the reviewer agent's output for review gates).
             exit_code: Process exit code; 0 means success for build/test/lint.
+            test_baseline: Optional pre-captured :class:`TestBaseline` for
+                            'test'/'build' gates.  When ``None`` (the
+                            default), behaviour is unchanged from before
+                            F093 -- a pure exit-code check.  Callers get
+                            this from ``ExecutionState.test_baseline``
+                            (via ``test_integrity.capture_baseline`` at
+                            execution start).
+            project_root: Repository root to verify ``test_baseline``
+                            against.  Required (non-``None``) for the
+                            baseline check to run; ignored otherwise.
 
         Returns:
             A populated GateResult.
@@ -409,6 +430,28 @@ class GateRunner:
 
         if gate_type in ("test", "build"):
             passed = exit_code == 0
+            output = command_output
+            # F093: exit_code alone can't see a deleted/gutted test file, or
+            # a run that quietly collected fewer cases than the baseline
+            # promised (e.g. an overly-broad -k deselect).  Only engaged
+            # when the caller supplies a baseline; absent one, behaviour is
+            # byte-for-byte the legacy exit_code check.
+            if test_baseline is not None and project_root is not None:
+                observed_count = parse_collected_count(command_output)
+                verdict = verify_baseline(
+                    test_baseline, project_root, collected_count=observed_count
+                )
+                if not verdict.passed:
+                    passed = False
+                    violation_text = "\n".join(verdict.violations)
+                    output = (
+                        f"{command_output}\n---\n"
+                        f"TEST INTEGRITY VIOLATION (F093): {violation_text}"
+                    )
+                    logger.warning(
+                        "Gate '%s': test-integrity check failed: %s",
+                        gate_type, violation_text,
+                    )
             logger.info(
                 "Gate '%s': %s (exit_code=%d)",
                 gate_type,
@@ -419,7 +462,7 @@ class GateRunner:
                 phase_id=0,
                 gate_type=gate_type,
                 passed=passed,
-                output=command_output,
+                output=output,
                 checked_at=checked_at,
             )
 
