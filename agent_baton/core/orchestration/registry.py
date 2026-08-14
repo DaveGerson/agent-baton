@@ -30,6 +30,13 @@ from agent_baton.utils.frontmatter import parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
+#: Markdown files that live alongside agent definitions but are not agents.
+#: ``agents/CLAUDE.md`` (per-directory Claude Code guidance) is mirrored into
+#: ``_bundled_agents/`` by the sync script; without this filter it parses as
+#: a bogus "CLAUDE" agent (filename-stem fallback) and inflates the
+#: ``baton agents`` count.
+_NON_AGENT_FILENAMES: frozenset[str] = frozenset({"CLAUDE.md", "README.md"})
+
 
 class AgentRegistry:
     """Load, index, and query agent definitions from markdown files.
@@ -85,6 +92,8 @@ class AgentRegistry:
 
         count = 0
         for path in sorted(directory.glob("*.md")):
+            if path.name in _NON_AGENT_FILENAMES:
+                continue
             agent = self._parse_agent_file(path)
             if agent is None:
                 continue
@@ -138,7 +147,7 @@ class AgentRegistry:
                     count = 0
                     for entry in pkg.iterdir():  # type: ignore[union-attr]
                         name = getattr(entry, "name", "")
-                        if not name.endswith(".md"):
+                        if not name.endswith(".md") or name in _NON_AGENT_FILENAMES:
                             continue
                         try:
                             content = entry.read_text(encoding="utf-8")  # type: ignore[union-attr]

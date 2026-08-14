@@ -21,7 +21,12 @@ agent_baton/       Python package (the orchestration engine)
                      role cards, knowledge plan, scope contracts, context
                      bundles). Config: core/config/manager.py. Models:
                      models/manager.py. See docs/internal/manager-mode-pmo-design.md.
-agents/            Distributable agent definitions (30 .md)
+  core/workflow/    Named delivery-workflow presets (baton plan --workflow):
+                     presets.py (registry, built-in adversarial-tdd),
+                     applier.py (pure/idempotent plan reshaper stamping
+                     per-stage model tiers). Config: core/config/workflow.py.
+                     See docs/internal/adversarial-tdd-workflow-design.md.
+agents/            Distributable agent definitions (31 .md)
 references/        Distributable reference procedures (20 .md)
 templates/         CLAUDE.md + settings.json + skills/ — installed to targets
 scripts/           install.sh, install.ps1, record_spec_audit_beads.py
@@ -55,7 +60,7 @@ When the `orchestrator` agent is invoked:
 
 ## Agent roster
 
-See [docs/agent-roster.md](docs/agent-roster.md) (30 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
+See [docs/agent-roster.md](docs/agent-roster.md) (31 agents). Recipes for common tasks: [docs/orchestrator-usage.md](docs/orchestrator-usage.md). For Baton's protocol contract from the agent side: [references/baton-engine.md](references/baton-engine.md).
 
 ## Code navigation
 
@@ -116,7 +121,7 @@ Any work touching regulated data, compliance systems, audit-controlled records, 
 
 Handle bugs/failures without pausing the main flow:
 
-1. **Bead it** — `baton beads create --type warning --message "<incident>"`.
+1. **Bead it** — `baton beads create --type warning --content "<incident>"`.
 2. **Fix in parallel** — launch a subagent on a separate branch (use `isolation: "worktree"` for concurrent agents).
 3. **Require a regression test.**
 4. **Continue the main flow.**

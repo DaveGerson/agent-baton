@@ -48,9 +48,9 @@ already equipped.
 
 ## How it works today
 
-### The 30 shipping agents
+### The 31 shipping agents
 
-`scripts/install.sh` installs **30 agent definitions** from `agents/` into
+`scripts/install.sh` installs **31 agent definitions** from `agents/` into
 `.claude/agents/` (project scope) or `~/.claude/agents/` (user scope). The
 `agents/CLAUDE.md` confirms the count; `baton agents` shows them at runtime,
 grouped by category.
@@ -63,7 +63,7 @@ The roster covers the full delivery lifecycle:
 | Backend | `backend-engineer`, `backend-engineer--python`, `backend-engineer--node` |
 | Frontend | `frontend-engineer`, `frontend-engineer--react`, `frontend-engineer--dotnet` |
 | Architecture | `architect` |
-| Quality | `test-engineer`, `code-reviewer`, `security-reviewer` |
+| Quality | `test-engineer`, `test-adequacy-reviewer`, `code-reviewer`, `security-reviewer` |
 | Governance | `auditor` |
 | Data | `data-engineer`, `data-analyst`, `data-scientist` |
 | Visualization | `visualization-expert` |

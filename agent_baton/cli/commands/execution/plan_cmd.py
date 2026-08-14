@@ -231,6 +231,19 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
             "meaningful with --goal. Default: 3."
         ),
     )
+    p.add_argument(
+        "--workflow",
+        dest="workflow",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Reshape the plan into a named delivery workflow preset (e.g. "
+            "'adversarial-tdd') after planning: model-tiered stages, a "
+            "harvested implementation phase, and a fanned-out final "
+            "review. Mutually exclusive with --manager-mode and --import. "
+            "See docs/internal/adversarial-tdd-workflow-design.md."
+        ),
+    )
     return p
 
 
@@ -458,6 +471,61 @@ def _render_manager_mode_explain_section(manager_artifacts, manager_config) -> s
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _render_workflow_explain_section(decisions) -> str:
+    """Render the ``## Workflow`` section appended to ``explanation.md``
+    when ``--workflow --explain`` are both set.
+
+    Reads only public fields off *decisions*
+    (``agent_baton.core.workflow.applier.WorkflowDecisions``).
+    """
+    lines: list[str] = ["## Workflow", "", f"Preset: {decisions.workflow}", ""]
+    lines.append("| Stage | Phase | Model | Agents | Steps |")
+    lines.append("|---|---|---|---|---|")
+    for entry in decisions.stages:
+        agents = ", ".join(entry.get("agents", []) or [])
+        lines.append(
+            f"| {entry.get('stage_id')} | {entry.get('phase_name')} | "
+            f"{entry.get('model')} | {agents} | {entry.get('steps')} |"
+        )
+    lines.append("")
+    lines.append(f"- Implementation units: {decisions.implementation_units}")
+    lines.append(f"- Final review reviewers: {decisions.final_review_reviewers}")
+    lines.append(f"- External verifier: {decisions.external_verifier}")
+    if decisions.carried_over_phases:
+        lines.append(
+            f"- Carried-over phases: {', '.join(decisions.carried_over_phases)}"
+        )
+
+    # §5.3: the reshape's discards must be visible in --explain, not only in
+    # plan_diagnostics["workflow"].  Same public-field contract as above.
+    dropped = getattr(decisions, "dropped_steps", None) or []
+    if dropped:
+        lines.append("")
+        lines.append("### Dropped base steps")
+        lines.append("")
+        lines.append(
+            "The reshape discarded these base-plan steps (neither harvested "
+            "into Implementation nor carried over):"
+        )
+        lines.append("")
+        for entry in dropped:
+            lines.append(
+                f"- `{entry.get('step_id')}` {entry.get('agent_name')} "
+                f"({entry.get('step_type')}, phase {entry.get('phase_name')!r}): "
+                f"{entry.get('task_description')}"
+            )
+    warnings = getattr(decisions, "warnings", None) or []
+    if warnings:
+        lines.append("")
+        lines.append("### Workflow warnings")
+        lines.append("")
+        for warning in warnings:
+            lines.append(f"- {warning}")
+    lines.append("")
+
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def _print_manager_mode_artifacts(ctx_dir: Path, plan: MachinePlan, manager_artifacts) -> None:
     """Print the ``Artifacts:`` block for a manager-mode ``--save`` run.
 
@@ -485,6 +553,48 @@ def _print_manager_mode_artifacts(ctx_dir: Path, plan: MachinePlan, manager_arti
 
 
 def handler(args: argparse.Namespace) -> None:
+    # --workflow is resolved (and its mutual-exclusion guards checked)
+    # before any planning work runs -- an unknown preset name, or an
+    # invalid flag combination, must fail fast without wasting a
+    # create_plan() call (design decision #7 for the mutual exclusions;
+    # MINOR-1 fast-fail for the preset lookup itself).
+    #
+    # --workflow is mutually exclusive with --manager-mode and --import
+    # (design decision #7): PhasePolicyApplier keys idempotency solely on
+    # the "review-" step-id prefix and would inject adversarial-review
+    # steps into all 7 workflow phases -- including the three that already
+    # ARE reviews. --import bypasses create_plan(); reshaping imported
+    # plans is untested territory.
+    workflow_name = getattr(args, "workflow", None)
+    workflow_preset = None
+    if workflow_name:
+        from agent_baton.core.workflow.presets import (
+            UnknownWorkflowError,
+            get_workflow_preset,
+        )
+
+        try:
+            workflow_preset = get_workflow_preset(workflow_name)
+        except UnknownWorkflowError as exc:
+            validation_error(
+                str(exc),
+                hint="Pass one of the preset names listed above to --workflow.",
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
+
+        if getattr(args, "manager_mode", False):
+            validation_error(
+                "--workflow is mutually exclusive with --manager-mode.",
+                hint="Drop --manager-mode, or omit --workflow.",
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
+        if getattr(args, "import_path", None):
+            validation_error(
+                "--workflow is mutually exclusive with --import.",
+                hint="Drop --import, or reshape a plan by hand after importing.",
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
+
     # --dry-run + --save are mutually exclusive: don't let the user
     # accidentally believe nothing was written when --save is set, and
     # don't let --save silently win over --dry-run.
@@ -688,6 +798,78 @@ def handler(args: argparse.Namespace) -> None:
     )
     print("  Done.", file=sys.stderr)
 
+    # Adversarial-TDD-style workflow presets (design decision #10):
+    # reshape the plan immediately after create_plan() returns, before the
+    # resumability check, goal stamping, and all three consumer branches
+    # (--dry-run, --save, print) -- so every downstream consumer sees the
+    # reshaped, re-tiered plan. See
+    # docs/internal/adversarial-tdd-workflow-design.md §4/§5.
+    # `workflow_preset` was already resolved (and validated) in the
+    # top-of-handler guard block above -- MINOR-1: an unknown preset name
+    # must fail before any planning work runs, not after.
+    workflow_decisions = None
+    if workflow_name:
+        from agent_baton.core.config.workflow import load_workflow_settings
+        from agent_baton.core.engine.planning.utils.gates import default_gate
+        from agent_baton.core.orchestration.router import StackProfile
+        from agent_baton.core.workflow.applier import (
+            WorkflowApplier,
+            WorkflowReshapeError,
+        )
+
+        workflow_settings = load_workflow_settings(project_root)
+        harvesting_stage = next(
+            (s for s in workflow_preset.stages if s.harvests_implementation), None
+        )
+        if harvesting_stage is None:
+            # Defense in depth: get_workflow_preset() only ever returns
+            # registered presets, which validate_preset() (core/workflow/
+            # presets.py) already guarantees have exactly one harvesting
+            # stage at registration time -- this should be unreachable.
+            raise ValueError(
+                f"WorkflowPreset {workflow_preset.name!r} has no harvesting "
+                "stage; this should have been caught at preset registration."
+            )
+        # This is the only filesystem-touching input the applier needs
+        # (stack-detected gate command) -- computed here, not inside the
+        # (pure) applier, per decision #4. default_gate() only reads
+        # `stack.language` -- StackProfile is a plain, cheaply-constructed
+        # dataclass (all other fields default), so there is no reason to
+        # duck-type it with a SimpleNamespace.
+        stack = (
+            StackProfile(language=plan.detected_stack.split("/", 1)[0])
+            if plan.detected_stack
+            else None
+        )
+        fallback_gate = default_gate(
+            harvesting_stage.phase_name,
+            stack=stack,
+            changed_paths=None,
+            gate_scope=gate_scope,
+            project_root=project_root,
+        )
+        try:
+            workflow_decisions = WorkflowApplier().apply(
+                plan, workflow_preset, workflow_settings, fallback_gate=fallback_gate
+            )
+        except WorkflowReshapeError as exc:
+            # §5.12: the applier's output validation failed.  The likeliest
+            # user-reachable cause is a bad `workflow:` override in baton.yaml
+            # (e.g. `stages.<stage_id>.agent: ""`), so surface it as a
+            # validation error (exit 2) with the config pointer instead of a
+            # traceback.
+            validation_error(
+                str(exc),
+                hint=(
+                    "Check the `workflow:` block in baton.yaml "
+                    "(.claude/baton.yaml or ./baton.yaml) -- especially "
+                    "`stages.<stage_id>.agent` overrides -- or re-run without "
+                    "--workflow. If the config is clean, this is an "
+                    "agent-baton bug: please report it."
+                ),
+                docs="docs/internal/adversarial-tdd-workflow-design.md",
+            )
+
     # A1.d: surface claude-teams + long-running resumability warnings.
     # Strict mode (BATON_TEAMS_STRICT_RESUMABILITY=1) treats the warning
     # as a hard error and refuses the plan, matching the design's
@@ -767,6 +949,20 @@ def handler(args: argparse.Namespace) -> None:
             )
 
     manager_requested = _manager_mode_flag or manager_config.manager_mode.enabled_by_default
+    if workflow_name and manager_requested and not _manager_mode_flag:
+        # CLI interaction matrix (§5): only the explicit --manager-mode +
+        # --workflow combination is a hard error. When manager mode comes
+        # solely from manager_mode.enabled_by_default, suppress it for this
+        # plan with a warning instead -- PhasePolicyApplier would otherwise
+        # inject adversarial-review steps into all 7 workflow phases.
+        print(
+            f"warning: --workflow={workflow_name!r} suppresses manager mode "
+            "for this plan (manager_mode.enabled_by_default was set in "
+            "config; only the explicit --manager-mode + --workflow "
+            "combination is an error).",
+            file=sys.stderr,
+        )
+        manager_requested = False
     if manager_requested:
         plan.manager_mode = True
 
@@ -895,6 +1091,10 @@ def handler(args: argparse.Namespace) -> None:
             if manager_artifacts is not None:
                 explanation_text += "\n\n" + _render_manager_mode_explain_section(
                     manager_artifacts, manager_config
+                )
+            if workflow_decisions is not None:
+                explanation_text += "\n\n" + _render_workflow_explain_section(
+                    workflow_decisions
                 )
             explanation_path = ctx_dir / "explanation.md"
             explanation_path.write_text(explanation_text, encoding="utf-8")

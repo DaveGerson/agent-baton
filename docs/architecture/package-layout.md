@@ -352,6 +352,17 @@ Wraps the synchronous engine in an async loop. Implements daemon mode.
 |--------|-------|---------|
 | [`project_config.py`](../../agent_baton/core/config/project_config.py) | `ProjectConfig` | Optional `baton.yaml` loader (walks up from cwd). |
 | [`manager.py`](../../agent_baton/core/config/manager.py) | `ManagerConfig` | Manager-mode PMO config (`manager_mode`/`team`/`scoping`/`context`/`knowledge_packs`/`policies`/`gates`/`reporting` sections) from the same `baton.yaml`; fails early on invalid values. |
+| [`workflow.py`](../../agent_baton/core/config/workflow.py) | `WorkflowSettings` | Workflow-preset overrides (`workflow:` section of the same `baton.yaml`): per-stage `{agent, model}`, external verifier command, final-review fan-out knobs. |
+
+### `core/workflow/` — named delivery-workflow presets
+
+Post-processor around `IntelligentPlanner.create_plan()` output — see
+[`docs/internal/adversarial-tdd-workflow-design.md`](../internal/adversarial-tdd-workflow-design.md).
+
+| Module | Class | Purpose |
+|--------|-------|---------|
+| [`presets.py`](../../agent_baton/core/workflow/presets.py) | `WorkflowPreset`, `WorkflowStage` | Frozen preset registry; built-in `adversarial-tdd` (spec → architecture → TDD test authoring → adversarial test verification → implementation → implementation verification → final review, tiered fable/fable/opus/opus/sonnet/opus/fable). |
+| [`applier.py`](../../agent_baton/core/workflow/applier.py) | `WorkflowApplier` | Pure, idempotent reshape of an assembled `MachinePlan`: harvests implement-like steps, stamps per-stage `step.model`/`workflow_stage`, preserves gates/approvals, carries over Audit phases, fans out final review, appends the optional external-verifier automation step. |
 
 ### `core/manager/` — manager-mode PMO layer
 

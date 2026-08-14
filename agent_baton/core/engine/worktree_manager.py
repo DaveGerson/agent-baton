@@ -10,16 +10,36 @@ The worktree is created at ``mark_dispatched`` time, used as the subprocess
 branch on successful completion.  Failed worktrees are retained on disk for
 Wave 5.1 takeover and reclaimed by ``gc_stale()`` after 72h.
 
+Team-context hand-off
+---------------------
+Agent briefings reference per-task deliverables by the *relative* path
+``.claude/team-context/executions/<task_id>/<file>`` (spec.md, architecture
+notes, …).  Inside a worktree that path resolves under the worktree root, and
+``.claude/team-context/`` is gitignored by design — so without help a
+deliverable written by one step is invisible to the next step and is destroyed
+by worktree cleanup.  The manager therefore:
+
+* **seeds** ``<worktree>/.claude/team-context/executions/<task_id>/`` from the
+  parent project on ``create()``, and
+* **harvests** that directory back into the parent on ``fold_back()`` and
+  before any worktree removal (``cleanup()`` / ``gc_stale()``).
+
+Both directions are plain file copies (newest-wins) and are deliberately
+independent of git.
+
 Configuration (env vars until baton.yaml Wave 1.2 lands):
     BATON_WORKTREE_ENABLED   ``1`` (default) / ``0`` to disable entirely.
     BATON_WORKTREE_GC_HOURS  default ``72``; max age for GC reclaim.
     BATON_WORKTREE_ROOT      default ``.claude/worktrees`` relative to project root.
+    BATON_TEAM_CONTEXT_ROOT  parent team-context dir; default
+                             ``<project_root>/.claude/team-context``.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -51,6 +71,45 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Team-context hand-off constants
+# ---------------------------------------------------------------------------
+
+#: Path of the team-context root *relative to a project/worktree root*.  This
+#: is the literal prefix agent briefings use, so it must not be configurable
+#: on the worktree side.
+_TEAM_CONTEXT_RELATIVE: tuple[str, ...] = (".claude", "team-context")
+
+#: Per-file cap for team-context sync copies.  Deliverables are prose/JSON
+#: artifacts; anything larger is almost certainly stray build output and is
+#: skipped rather than duplicated into (or out of) every worktree.
+_TEAM_CONTEXT_MAX_FILE_BYTES: int = 8 * 1024 * 1024
+
+#: Path components never synced in either direction — engine-owned bookkeeping
+#: whose sole writer is the parent process.  Copying these *into* a worktree
+#: would give a nested ``baton`` invocation a stale execution state to discover
+#: (upward walk finds the worktree-local ``.claude/team-context`` first), and
+#: copying them *back* would race the live parent state.  Only agent-authored
+#: deliverables (spec.md, architecture notes, …) cross the boundary.
+_TEAM_CONTEXT_SKIP_PARTS: frozenset[str] = frozenset(
+    {
+        "events",
+        ".lock",
+        "baton.db",
+        "baton.db-wal",
+        "baton.db-shm",
+        "execution-state.json",
+        "plan.json",
+        "plan.md",
+        "viz.html",
+        "mission-log.md",
+        "trace.json",
+        "usage.json",
+        "retrospective.md",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Error hierarchy
@@ -132,6 +191,19 @@ class WorktreeHandle:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _default_team_context_root(project_root: Path) -> Path:
+    """Return the parent project's team-context directory.
+
+    ``$BATON_TEAM_CONTEXT_ROOT`` wins when set (the same variable the launcher
+    exports into worktree subprocesses), otherwise the canonical
+    ``<project_root>/.claude/team-context``.
+    """
+    env_root = os.environ.get("BATON_TEAM_CONTEXT_ROOT", "").strip()
+    if env_root:
+        return Path(env_root)
+    return project_root.joinpath(*_TEAM_CONTEXT_RELATIVE)
 
 
 def _is_inside_worktree(project_dir: Path) -> bool:
@@ -323,6 +395,10 @@ class WorktreeManager:
             a dummy handle and no git commands are run.
         trace_recorder: Optional ``TraceRecorder`` for observability events.
         bead_store: Optional ``BeadStore`` for filing warning beads.
+        team_context_root: Parent project's team-context directory, used for
+            the per-task deliverable hand-off (seed on create / harvest on
+            fold-back + cleanup).  Defaults to ``$BATON_TEAM_CONTEXT_ROOT``
+            when set, else ``<project_root>/.claude/team-context``.
     """
 
     def __init__(
@@ -333,8 +409,14 @@ class WorktreeManager:
         trace_recorder: object | None = None,  # TraceRecorder | None
         bead_store: object | None = None,       # BeadStore | None
         max_concurrent: int = 16,               # Wave 6.2 (bd-707d): concurrency cap
+        team_context_root: Path | None = None,
     ) -> None:
         self._project_root = project_root.resolve()
+        self._team_context_root = (
+            team_context_root
+            if team_context_root is not None
+            else _default_team_context_root(self._project_root)
+        ).resolve()
         self._worktrees_root = (
             worktrees_root or self._project_root / ".claude" / "worktrees"
         ).resolve()
@@ -438,6 +520,131 @@ class WorktreeManager:
         except Exception as exc:
             _log.debug("WorktreeManager: bead warning failed (non-fatal): %s", exc)
 
+    # ── Team-context hand-off ────────────────────────────────────────────────
+
+    def parent_execution_dir(self, task_id: str) -> Path:
+        """Parent project's per-task team-context directory."""
+        return self._team_context_root / "executions" / task_id
+
+    @staticmethod
+    def worktree_execution_dir(worktree_path: Path, task_id: str) -> Path:
+        """Per-task team-context directory *inside* a worktree.
+
+        Always ``<worktree>/.claude/team-context/executions/<task_id>``: agent
+        briefings reference that path relatively from their cwd (the worktree
+        root), so it is fixed by the briefing contract, not configurable.
+        """
+        return worktree_path.joinpath(*_TEAM_CONTEXT_RELATIVE, "executions", task_id)
+
+    def seed_team_context(self, handle: WorktreeHandle) -> list[str]:
+        """Copy the parent's per-task deliverables into *handle*'s worktree.
+
+        Gives a worktree-isolated agent the same
+        ``.claude/team-context/executions/<task_id>/`` view its briefing
+        assumes (spec.md and friends written by earlier steps).  Best-effort:
+        never raises — a failed seed degrades to "context file missing", the
+        pre-existing behaviour.
+
+        Returns the list of relative paths copied.
+        """
+        return self._sync_team_context(handle, harvest=False)
+
+    def harvest_team_context(self, handle: WorktreeHandle) -> list[str]:
+        """Copy deliverables written inside *handle*'s worktree back to the parent.
+
+        Called before the worktree can disappear (fold-back, cleanup, GC).
+        ``.claude/team-context/`` is gitignored by design, so committed-work
+        fold-back never carries these files — this copy is what makes a
+        step's deliverable visible to downstream steps and to the human.
+
+        Newest-wins: a parent file modified *after* the worktree copy is kept
+        and the conflict is logged + beaded.  Best-effort: never raises.
+
+        Returns the list of relative paths copied.
+        """
+        return self._sync_team_context(handle, harvest=True)
+
+    def _sync_team_context(self, handle: WorktreeHandle, *, harvest: bool) -> list[str]:
+        """One direction of the team-context copy.  Never raises."""
+        copied: list[str] = []
+        try:
+            if str(handle.path) == "/dev/null" or not handle.task_id:
+                return copied
+            wt_dir = self.worktree_execution_dir(handle.path, handle.task_id)
+            parent_dir = self.parent_execution_dir(handle.task_id)
+            src, dst = (wt_dir, parent_dir) if harvest else (parent_dir, wt_dir)
+            if not src.is_dir():
+                return copied
+
+            for src_file in sorted(src.rglob("*")):
+                rel = src_file.relative_to(src)
+                if any(part in _TEAM_CONTEXT_SKIP_PARTS for part in rel.parts):
+                    continue
+                if src_file.is_symlink() or not src_file.is_file():
+                    continue
+                try:
+                    src_stat = src_file.stat()
+                    if src_stat.st_size > _TEAM_CONTEXT_MAX_FILE_BYTES:
+                        _log.debug(
+                            "team-context sync: skipping oversized %s (%d bytes)",
+                            src_file, src_stat.st_size,
+                        )
+                        continue
+                    dst_file = dst / rel
+                    if dst_file.exists():
+                        dst_stat = dst_file.stat()
+                        if dst_stat.st_mtime > src_stat.st_mtime:
+                            # Destination is newer — newest wins, keep it.
+                            if harvest:
+                                msg = (
+                                    f"team-context harvest conflict: parent "
+                                    f"{dst_file} is newer than the worktree copy "
+                                    f"from step {handle.step_id}; keeping the parent file"
+                                )
+                                _log.warning("%s", msg)
+                                self._file_bead_warning(
+                                    task_id=handle.task_id,
+                                    step_id=handle.step_id,
+                                    content=f"BEAD_WARNING: {msg}",
+                                )
+                            continue
+                        if (
+                            dst_stat.st_mtime == src_stat.st_mtime
+                            and dst_stat.st_size == src_stat.st_size
+                        ):
+                            # Unmodified copy of what we already seeded.
+                            continue
+                    dst_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_file, dst_file)
+                    copied.append(str(rel))
+                except OSError as exc:
+                    _log.debug(
+                        "team-context sync: could not copy %s (%s)", src_file, exc
+                    )
+
+            if copied:
+                _log.info(
+                    "team-context %s: %d file(s) task=%s step=%s (%s -> %s)",
+                    "harvest" if harvest else "seed",
+                    len(copied), handle.task_id, handle.step_id, src, dst,
+                )
+                self._emit(
+                    "worktree_context_harvest" if harvest else "worktree_context_seed",
+                    {
+                        "task_id": handle.task_id,
+                        "step_id": handle.step_id,
+                        "files": copied,
+                        "source": str(src),
+                        "destination": str(dst),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 — hand-off is best-effort
+            _log.warning(
+                "team-context %s failed for step=%s (non-fatal): %s",
+                "harvest" if harvest else "seed", handle.step_id, exc,
+            )
+        return copied
+
     # ── Primary lifecycle ────────────────────────────────────────────────────
 
     def create(
@@ -530,6 +737,10 @@ class WorktreeManager:
                         "WorktreeManager.create: reusing existing worktree at %s (step=%s)",
                         worktree_path, step_id,
                     )
+                    # Re-seed: deliverables may have landed in the parent since
+                    # this worktree was first created (newest-wins, so a file
+                    # the agent already edited in here is not clobbered).
+                    self.seed_team_context(handle)
                     return handle
                 except Exception as exc:
                     _log.warning(
@@ -601,6 +812,10 @@ class WorktreeManager:
 
             self._handles[(task_id, step_id)] = handle
 
+            # Seed the per-task team-context deliverables the agent's briefing
+            # references by relative path (spec.md et al).  Best-effort.
+            self.seed_team_context(handle)
+
             _log.info(
                 "WorktreeManager.create: done task=%s step=%s path=%s elapsed_ms=%d",
                 task_id, step_id, worktree_path, elapsed_ms,
@@ -633,6 +848,11 @@ class WorktreeManager:
         """
         if not self._enabled or str(handle.path) == "/dev/null":
             return ""
+
+        # Rescue non-git deliverables BEFORE any git work: team-context is
+        # gitignored, so fold-back alone would never carry spec.md & friends
+        # back to the parent, and cleanup would then delete them.
+        self.harvest_team_context(handle)
 
         if not commit_hash:
             # Check if the worktree HEAD differs from base_sha; skip fold if not.
@@ -809,7 +1029,10 @@ class WorktreeManager:
             reason = "gc"
 
         if on_failure and not force:
-            # Retain the worktree — no-op + trace + bead
+            # Retain the worktree — no-op + trace + bead.  Still harvest: a
+            # step can fail *after* writing a usable deliverable, and the
+            # retained worktree may later be reclaimed by gc_stale().
+            self.harvest_team_context(handle)
             _log.info(
                 "WorktreeManager.cleanup: RETAINING worktree for failed step=%s path=%s",
                 handle.step_id, handle.path,
@@ -849,7 +1072,14 @@ class WorktreeManager:
         })
 
     def _do_cleanup(self, handle: WorktreeHandle, force: bool) -> None:
-        """Internal: actually remove the worktree + branch."""
+        """Internal: actually remove the worktree + branch.
+
+        Harvests the worktree's team-context deliverables first — this is the
+        last point at which they exist.  Covers every removal path
+        (``cleanup()`` and ``gc_stale()``).
+        """
+        self.harvest_team_context(handle)
+
         # Remove .baton-worktree.json so list_active() won't resurrect it
         manifest = handle.path / ".baton-worktree.json"
         try:

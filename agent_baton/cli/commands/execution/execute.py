@@ -651,6 +651,15 @@ def _print_action(action: dict, *, terse: bool = False) -> None:
             print("--- Command ---")
             print(action.get("command", ""))
             print("--- End Command ---")
+            # ADDITIVE (protocol surface — do not reshape the lines above):
+            # automation dispatches previously ended here with no instruction
+            # for closing the loop, leaving the orchestrator with a step it
+            # could never record.  Emit the same record hint the agent
+            # DISPATCH form emits, with the reserved agent name "automation".
+            print()
+            print("When complete, record the result:")
+            print(f"  baton execute record --step {step_id} --agent automation --status complete --outcome \"summary\"")
+            print(f"  baton execute record --step {step_id} --agent automation --status failed --error \"what went wrong\"")
         else:
             print(f"  Agent: {action.get('agent_name', '')}")
             print(f"  Model: {action.get('agent_model', '')}")
@@ -2598,10 +2607,17 @@ def _run_loop(
                     print(f"  [DRY RUN] Would run: {command}", file=sys.stderr)
                 else:
                     import subprocess as _subprocess
+                    from agent_baton.core.runtime.worker import (
+                        resolve_automation_timeout as _resolve_automation_timeout,
+                    )
+                    # Honour the step's own timeout_seconds (e.g.
+                    # workflow.external_timeout_seconds, default 1800) instead
+                    # of silently truncating every automation step at 300s.
+                    _auto_timeout = _resolve_automation_timeout(engine, step_id)
                     try:
                         proc = _subprocess.run(
                             command, shell=True, capture_output=True,
-                            text=True, timeout=300,
+                            text=True, timeout=_auto_timeout,
                         )
                         succeeded = proc.returncode == 0
                         engine.record_step_result(
@@ -2619,7 +2635,10 @@ def _run_loop(
                         engine.record_step_result(
                             step_id=step_id, agent_name="automation",
                             status="failed",
-                            error=f"Automation command timed out after 300s: {command}",
+                            error=(
+                                f"Automation command timed out after "
+                                f"{int(_auto_timeout)}s: {command}"
+                            ),
                         )
                         print(f"  [{step_id}] {color_error('TIMEOUT')}", file=sys.stderr)
             else:

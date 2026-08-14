@@ -31,6 +31,13 @@ plan, the team, and the guardrails.
   right*, not just whether it lints. Humans are one kind of check; the engine
   enforces the rest through policy gates and an auditable trail.
 
+Baton also ships a batteries-included delivery workflow:
+`baton plan "<task>" --workflow adversarial-tdd` reshapes any plan into a staged,
+model-tiered, adversarially verified TDD pipeline — spec and architecture at the
+top tier, tests written and independently verified *before* implementation, then
+double verification and a top-tier final review. See
+[Delivery workflows](#delivery-workflows).
+
 For regulated work, Baton can also run as a **governance harness** (policy hooks
 evaluate every tool call and evidence bundles are generated automatically) or a
 **managed loop** (full plan→dispatch→gate→approval), and can import specs from
@@ -59,6 +66,154 @@ so you keep control and oversight while the agents do the heavy lifting.
 | Hope the AI got it *right* | Independent auditor / SME verification on risky work |
 | No record of what happened | Full traces, usage logs, retrospectives |
 | Single point of failure | Crash recovery via `baton execute resume` |
+
+---
+
+## Get Started in 5 Minutes
+
+### 1. Install the Python engine
+
+**From PyPI (recommended):**
+
+```bash
+pip install agent-baton          # Core engine + CLI
+pip install agent-baton[pmo]     # + REST API and PMO server
+pip install agent-baton[classify] # + AI risk classification
+```
+
+**From source (for development):**
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git
+cd agent-baton
+pip install -e ".[dev]"          # Core engine + CLI + test deps
+```
+
+Requires Python 3.10+. Runtime dependencies: PyYAML, pydantic, cryptography. The
+`pmo` extra adds FastAPI + uvicorn; `classify` adds the Anthropic SDK for
+AI-powered risk classification.
+
+The engine goes first because the asset installer in step 2 finishes by running
+`baton validate` over the agents it just copied — that verification only works if
+the CLI is already importable.
+
+### 2. Install the Claude Code assets
+
+```bash
+git clone https://github.com/DaveGerson/agent-baton.git   # skip if already cloned
+cd agent-baton
+scripts/install.sh          # Linux/macOS
+# or: scripts/install.ps1   # Windows (no admin required)
+```
+
+The installer prompts for **scope** — user-level (`~/.claude/`, every project) or
+project-level (`.claude/`, this project only) — then copies **31 agent
+definitions**, **20 reference procedures**, **3 skills** (`baton-help`,
+`baton-beads`, `baton-learn`), 3 agent templates, and a `settings.json` carrying
+the policy hooks, and creates the `team-context/` and `knowledge/` working
+directories. A template `CLAUDE.md` is written to your project root (or
+`~/.claude/`) **only when none exists** — an existing `CLAUDE.md` is never
+overwritten; the installer tells you to merge it manually instead. It then offers
+an optional knowledge-infrastructure choice (knowledge packs, local RAG, or skip),
+notes the `~/.baton/central.db` it will create on first use, configures **git-notes
+refspecs** (`+refs/notes/*:refs/notes/*` on `remote.origin.fetch` and
+`remote.origin.push`) so bead anchors replicate on fetch and push — set
+`BATON_SKIP_GIT_NOTES_SETUP=1` to skip — and auto-installs **`bd`**, the mandatory
+bead backend, via npm or Homebrew (`--no-beads` or `BATON_SKIP_BEADS_INSTALL=1` to
+skip). Re-run it with `--upgrade` to refresh agents, references, and skills while
+preserving your `CLAUDE.md` and merging new hooks into an existing
+`settings.json`.
+
+### 3. Verify
+
+```bash
+# In Claude Code
+/agents                     # Should list ~31 agents
+
+# In terminal
+baton agents                # List agents from Python registry
+baton detect                # Detect your project's stack
+```
+
+### 4. Optional: install cymbal (recommended)
+
+[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter code indexer that
+agents use for symbol lookup (`cymbal investigate <symbol>`) and blast-radius
+analysis (`cymbal impact <symbol>`) before edits. Without it, agents fall back to
+grep — slower and less precise.
+
+```bash
+cymbal --help               # Check if already installed
+# If not, install the binary to ~/.local/bin/
+# (see cymbal docs for platform-specific instructions)
+```
+
+### 5. Run your first delivery
+
+The shortest path to a *correct* first result is the `adversarial-tdd` delivery
+workflow — tests get written and independently audited before any implementation
+runs:
+
+```bash
+cd ~/my-project
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --dry-run
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+baton execute start          # then drive the action loop
+# or, fully headless:
+baton execute run
+```
+
+`--dry-run` prints the reshaped plan, the agent and model tier per
+step, the gate that will block, and a cost forecast — nothing is written.
+`--save --explain` commits `plan.json` + `plan.md` to `.claude/team-context/` and
+appends a `## Workflow` stage table to `explanation.md`. The first dispatch writes
+the spec to `.claude/team-context/executions/<task_id>/spec.md`; every later stage
+reads it. Full walkthrough: [Delivery workflows](#delivery-workflows).
+
+**Or hand the whole thing to the orchestrator** in a Claude Code session:
+
+```
+Use the orchestrator to add a health check endpoint with tests
+```
+
+The orchestrator plans the work (pillar 1), creates or selects the right
+specialists (pillar 2), dispatches each to its phase and runs QA gates between
+them (pillar 3), and invokes the auditor if risk warrants it (pillar 4). It
+delivers tested, committed code.
+
+### Usage examples
+
+**Orchestrated task** — complex, multi-domain work (add `--workflow
+adversarial-tdd` to the planning step when correctness outweighs speed):
+
+```
+Use the orchestrator to build a health check API with tests and documentation
+```
+
+**Engine-driven workflow** — explicit control over each step:
+
+```bash
+baton plan "Add input validation to the API" --save --explain
+baton execute start
+baton execute next              # Get next action
+baton execute record --step-id 1.1 --agent backend-engineer --status complete
+baton execute gate --phase-id 2 --result pass
+baton execute complete
+```
+
+**Direct agent invocation** — single-domain tasks that don't need a full plan:
+
+```
+Use the data-analyst to investigate our fleet utilization trends
+Use the security-reviewer to audit our authentication flow
+Use the test-engineer to add unit tests for the payment module
+```
+
+**Autonomous execution** — no Claude Code session required:
+
+```bash
+baton execute run               # Full loop: plan -> dispatch -> gate -> complete
+```
 
 ---
 
@@ -145,112 +300,76 @@ Team](#pillar-2--compose-the-right-team).
 
 ---
 
-## Get Started in 5 Minutes
+## Delivery workflows
 
-### 1. Install agent definitions
-
-```bash
-git clone https://github.com/DaveGerson/agent-baton.git
-cd agent-baton
-scripts/install.sh          # Linux/macOS
-# or: scripts/install.ps1   # Windows (no admin required)
-```
-
-The installer prompts for scope: user-level (`~/.claude/`) for all projects, or
-project-level (`.claude/`) for the current project only. It copies 30 agent
-definitions, 20 reference procedures, a template `CLAUDE.md`, `settings.json`
-hooks, and skills. It also attempts to install `bd` (the bead backend) via npm or
-Homebrew.
-
-### 2. Install the Python engine
-
-**From PyPI (recommended):**
+A **workflow preset** is a named reshaping of a finished plan. `baton plan
+--workflow NAME` runs the normal deterministic pipeline first — classification,
+roster, risk, decomposition, foresight, validation — and then rewrites the phase
+list into the preset's stages, keeping your routed implementation steps and
+re-tiering them. One preset ships today: **`adversarial-tdd`**. An unknown name
+exits 2 and lists the presets that do exist.
 
 ```bash
-pip install agent-baton          # Core engine + CLI
-pip install agent-baton[pmo]     # + REST API and PMO server
-pip install agent-baton[classify] # + AI risk classification
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --dry-run
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
+baton goal "per-tenant rate limiting is enforced and the integration tests pass" \
+  --workflow adversarial-tdd
 ```
 
-**From source (for development):**
+| # | Stage | Agent | Model |
+|---|-------|-------|-------|
+| 1 | Brainstorm & Spec | `architect` | `fable` |
+| 2 | Architecture | `architect` | `fable` |
+| 3 | Test Authoring | `test-engineer` | `opus` |
+| 4 | Test Verification | `test-adequacy-reviewer` | `opus` |
+| 5 | Implementation | *your routed implementers* | `sonnet` |
+| 6 | Implementation Verification | `code-reviewer` | `opus` |
+| 7 | Final Review | `code-reviewer` (fanned out) | `fable` |
 
-```bash
-pip install -e ".[dev]"          # Core engine + CLI + test deps
+Stage 1 writes the spec to `.claude/team-context/executions/<task_id>/spec.md`;
+stages 2, 3, 4, and 6 brief their agents against that file. Stage 4 reviews the
+tests against the spec *only* — it never
+sees an implementation, because none exists yet. Stage 5 is your own planned
+implementation steps, flattened into one phase and re-tiered to `sonnet`, gated on
+the first test-or-build gate harvested from the base plan (for Python plans this is
+often a build/import check), falling back to a stack-derived gate when the base
+plan has none. Stage 7 fans out to up to three reviewers based on the number of
+implementation units.
+
+> **Runtime caveat.** The `fable`-tiered stages assume the Claude Code runtime you
+> dispatch through resolves the `fable` model alias. Verify that with a `--dry-run`
+> and one live dispatch before relying on it, or re-tier those stages in
+> `baton.yaml`.
+
+Stages are overridable per project in `baton.yaml` (see
+[`templates/baton.yaml.example`](templates/baton.yaml.example)):
+
+```yaml
+workflow:
+  stages:
+    final_review: {model: opus}
+    implementation_verification: {agent: security-reviewer}
+  external_command: ""            # e.g. a second-opinion CLI, run as an engine automation step
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3
 ```
 
-Requires Python 3.10+. Runtime dependencies: PyYAML, pydantic, cryptography. The
-`pmo` extra adds FastAPI + uvicorn; `classify` adds the Anthropic SDK for
-AI-powered risk classification.
+Three caveats worth knowing up front:
 
-### 3. Verify
+- `--workflow` is **mutually exclusive** with `--manager-mode` and `--import`.
+- `external_command` is appended to Implementation Verification as an engine
+  automation step, so any CLI or script can act as an independent verifier.
+  The automation runners enforce the step's `external_timeout_seconds`
+  (default 1800s); a command with no declared budget falls back to a 300s
+  default. Expiry records the step as failed.
+- Audit phases from a regulated-domain plan are carried over verbatim *after*
+  Final Review, keeping their own gates and approvals.
 
-```bash
-# In Claude Code
-/agents                     # Should list ~30 agents
-
-# In terminal
-baton agents                # List agents from Python registry
-baton detect                # Detect your project's stack
-```
-
-### 4. Optional: install cymbal (recommended)
-
-[cymbal](https://github.com/1broseidon/cymbal) is a tree-sitter code indexer that
-agents use for symbol lookup (`cymbal investigate <symbol>`) and blast-radius
-analysis (`cymbal impact <symbol>`) before edits. Without it, agents fall back to
-grep — slower and less precise.
-
-```bash
-cymbal --help               # Check if already installed
-# If not, install the binary to ~/.local/bin/
-# (see cymbal docs for platform-specific instructions)
-```
-
-### 5. Run your first task
-
-In a Claude Code session:
-
-```
-Use the orchestrator to add a health check endpoint with tests
-```
-
-The orchestrator plans the work (pillar 1), creates or selects the right
-specialists (pillar 2), dispatches each to its phase and runs QA gates between
-them (pillar 3), and invokes the auditor if risk warrants it (pillar 4). It
-delivers tested, committed code.
-
-### Usage examples
-
-**Orchestrated task** — complex, multi-domain work:
-
-```
-Use the orchestrator to build a health check API with tests and documentation
-```
-
-**Engine-driven workflow** — explicit control over each step:
-
-```bash
-baton plan "Add input validation to the API" --save --explain
-baton execute start
-baton execute next              # Get next action
-baton execute record --step-id 1.1 --agent backend-engineer --status complete
-baton execute gate --phase-id 2 --result pass
-baton execute complete
-```
-
-**Direct agent invocation** — single-domain tasks that don't need a full plan:
-
-```
-Use the data-analyst to investigate our fleet utilization trends
-Use the security-reviewer to audit our authentication flow
-Use the test-engineer to add unit tests for the payment module
-```
-
-**Autonomous execution** — no Claude Code session required:
-
-```bash
-baton execute run               # Full loop: plan -> dispatch -> gate -> complete
-```
+Full flag and config reference: [docs/cli-reference.md](docs/cli-reference.md).
+Orchestrator recipe: [docs/orchestrator-usage.md](docs/orchestrator-usage.md).
+Agent-facing playbook:
+[templates/playbooks/adversarial-tdd.md](templates/playbooks/adversarial-tdd.md).
 
 ---
 
@@ -298,13 +417,18 @@ not a hope.
 
 ```bash
 # Preview the plan, cost forecast, and gate timing without saving
-baton plan "Add OAuth2 login" --dry-run
+baton plan "Add CSV export to the reports page" --dry-run
 
-# Save the plan and see why these agents and phases were chosen
-baton plan "Add OAuth2 login" --save --explain
+# Save the plan and see why these agents and phases were chosen.
+# Auth work is compliance-routed: the validator requires the auditor
+# on the roster, so include it (or let `baton plan` tell you to).
+baton plan "Add OAuth2 login" --agents architect,backend-engineer,security-reviewer,auditor,code-reviewer --save --explain
 
 # Override complexity when you know more than the classifier
 baton plan "Rename a constant across 2 files" --complexity light
+
+# Reshape the plan into the staged adversarial-TDD delivery workflow
+baton plan "Add per-tenant rate limiting" --workflow adversarial-tdd --save --explain
 
 # Start execution after saving
 baton execute start
@@ -318,7 +442,9 @@ signal, not a bill.
 Plans are not frozen: `baton execute amend` adds phases or steps while an
 execution is running, and goal-driven mode (`baton goal "<condition>"`) evaluates
 the condition at phase boundaries and proposes amendments until the goal is met
-or the amend budget is exhausted.
+or the amend budget is exhausted. `--workflow` composes with `baton goal`, so a
+goal-driven run can also be staged into a delivery workflow — see
+[Delivery workflows](#delivery-workflows).
 
 ## Pillar 2 — Compose the Right Team
 
@@ -335,7 +461,7 @@ phase.
 
 ### The talent-builder: specialists on demand
 
-The 30 agents that ship with Baton cover the common roles. When you hit a domain
+The 31 agents that ship with Baton cover the common roles. When you hit a domain
 they don't cover — a new compliance framework, a specialized data system, a
 regulatory area — the `talent-builder` builds the specialist you need:
 
@@ -351,7 +477,7 @@ The naming convention is `role--flavor` (e.g. `backend-engineer--python`,
 `talent-builder` can create `backend-engineer--go`. From then on, the routing
 table finds it automatically.
 
-### The agent roster (30 agents)
+### The agent roster (31 agents)
 
 | Category | Agents |
 |----------|--------|
@@ -359,7 +485,7 @@ table finds it automatically.
 | Backend | `backend-engineer`, `--python`, `--node` |
 | Frontend | `frontend-engineer`, `--react`, `--dotnet` |
 | Architecture | `architect` |
-| Quality | `test-engineer`, `code-reviewer`, `security-reviewer` |
+| Quality | `test-engineer`, `test-adequacy-reviewer`, `code-reviewer`, `security-reviewer` |
 | Governance | `auditor` (independent veto power) |
 | Data | `data-engineer`, `data-analyst`, `data-scientist` |
 | Visualization | `visualization-expert` |
@@ -704,15 +830,9 @@ can be added by implementing the `ExternalSourceAdapter` protocol.
 
 ### Experimental (feature-flagged)
 
-These surfaces emit stub warnings to stderr on invocation and are **not
-production-ready**. Do not rely on them.
-
-| Feature | Flag | Status |
-|---------|------|--------|
-| Immune-system daemon | `BATON_IMMUNE_ENABLED=1` | Wave 6.2 Part B stub |
-| Predictive watcher | feature flag in `core/intel/` | Wave 6.2 Part C stub |
-| Executable beads | `BATON_EXEC_BEADS_ENABLED=1` | Process-level sandbox only; unsafe for external-origin beads |
-| Persistent agent souls | `BATON_SOULS_ENABLED=1` | Cross-project cryptographic agent identities |
+Four surfaces are feature-flagged, emit stub warnings to stderr, and are **not
+production-ready** — see [Experimental Features](#experimental-features) under
+Project Status for the flags and their status.
 
 ---
 
@@ -728,7 +848,8 @@ The `baton` CLI provides 60+ commands organized into groups.
 | `baton plan "<task>"` | Generate a data-driven execution plan |
 | `baton plan --dry-run` | Preview plan + cost/token forecast (±50% range) without saving |
 | `baton plan --from-template NAME` | Instantiate a saved plan template with a new task |
-| `baton goal "<condition>"` | Plan against a completion condition; engine drives amend cycles until met |
+| `baton plan --workflow NAME` | Reshape the plan into a named delivery-workflow preset (built-in: `adversarial-tdd`) |
+| `baton goal "<condition>"` | Plan against a completion condition; engine drives amend cycles until met (accepts `--workflow`, passed through to `baton plan`) |
 | `baton execute start` | Start execution from a saved plan |
 | `baton execute next [--all]` | Get next action(s) to perform |
 | `baton execute record` | Record a step completion |
@@ -874,7 +995,7 @@ on every invocation. Update scripts to use the new paths.
 ## Project Structure
 
 ```
-agents/            <- 30 agent definitions (Markdown + YAML frontmatter)
+agents/            <- 31 agent definitions (Markdown + YAML frontmatter)
 references/        <- 20 reference procedures (shared knowledge)
 templates/         <- CLAUDE.md, settings.json, skills, packs, and playbooks
 scripts/           <- Install scripts (Linux/macOS + Windows) and maintenance
@@ -947,16 +1068,30 @@ The variables a user is most likely to set. For the full internal list see
 | `--knowledge PATH` / `--knowledge-pack NAME` | Attach knowledge documents / packs (repeatable) |
 | `--model MODEL` | Default model for dispatched agents (haiku, sonnet, opus) |
 | `--complexity LEVEL` | Override complexity: light, medium, heavy |
+| `--workflow NAME` | Reshape the plan into a named delivery-workflow preset (built-in: `adversarial-tdd`); mutually exclusive with `--manager-mode` and `--import` |
+
+Full flag reference: [docs/cli-reference.md](docs/cli-reference.md).
+
+### Project config (`baton.yaml`)
+
+Per-project defaults — routing rules, default gates, excluded paths, and the
+`workflow:` block that overrides delivery-workflow stage agents/models, the
+external verifier command, and final-review fan-out — live in `baton.yaml`
+(`.claude/baton.yaml` takes precedence over the project root). Start from
+[`templates/baton.yaml.example`](templates/baton.yaml.example); see
+[Delivery workflows](#delivery-workflows) for the `workflow:` keys.
 
 ### Files Installed to Target Projects
 
 | File | Purpose |
 |------|---------|
-| `.claude/agents/*.md` | Agent definitions (30 files) |
-| `.claude/references/*.md` | Reference procedures (19 files) |
-| `.claude/CLAUDE.md` | Project development guide (from template) |
+| `.claude/agents/*.md` | Agent definitions (31 files) |
+| `.claude/references/*.md` | Reference procedures (20 files) |
+| `.claude/skills/` | Reusable skills (`baton-help`, `baton-beads`, `baton-learn`) |
+| `.claude/templates/agents/*.md` | Agent authoring templates (base, flavored, reviewer) |
 | `.claude/settings.json` | Hook configuration (write-protect, policy-check, compliance logging) |
-| `.claude/skills/` | Reusable skills |
+| `.claude/team-context/`, `.claude/knowledge/` | Plan/execution artifacts and knowledge packs |
+| `CLAUDE.md` (project root, or `~/.claude/CLAUDE.md`) | Project development guide, copied from the template only when none exists |
 
 ---
 
@@ -1002,11 +1137,11 @@ Requires Python 3.10+. Runtime dependencies: `pyyaml`, `pydantic`, `cryptography
 
 ## Project Status
 
-Agent Baton is in active development (v0.1.0). The orchestration engine, all 30
-agents, 20 reference procedures, knowledge delivery, bead memory system, PMO
-subsystem with end-to-end plan-to-merge workflow, REST API with webhooks,
-federated sync, event system, learning automation, and the improvement pipeline
-are implemented and tested.
+Agent Baton is in active development (v0.1.0). The orchestration engine, all 31
+agents, 20 reference procedures, the `adversarial-tdd` delivery-workflow preset,
+knowledge delivery, bead memory system, PMO subsystem with end-to-end
+plan-to-merge workflow, REST API with webhooks, federated sync, event system,
+learning automation, and the improvement pipeline are implemented and tested.
 
 - **Python**: 3.10+ (tested on 3.10–3.13)
 - **Runtime dependencies**: pyyaml, pydantic, cryptography
@@ -1033,6 +1168,9 @@ work.
 
 - **Say "use the orchestrator"** explicitly for your first few runs so Claude
   Code routes to the right agent.
+- **Correctness-critical new capability?** Reach for `baton plan --workflow
+  adversarial-tdd` — tests are written and adversarially verified before any
+  implementation runs.
 - **3–5 specialists per task.** More than that and coordination overhead
   outweighs the benefits.
 - **Crash recovery is automatic.** Session dies mid-task? New session +

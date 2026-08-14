@@ -45,7 +45,8 @@ Agent Baton gives Claude Code a project-management layer. You stay in control wh
 
 - **[The Four Pillars](pillars.md)** — what Baton is for, with a visual of the workflow
 - **[Orchestrator Usage](orchestrator-usage.md)** — how to drive a task end-to-end through the engine
-- **[Agent Roster](agent-roster.md)** — the 30 specialist agents Baton can dispatch
+- **[Delivery Workflows](delivery-workflows.md)** — optimal usage journeys for `baton plan --workflow adversarial-tdd`
+- **[Agent Roster](agent-roster.md)** — the 31 specialist agents Baton can dispatch
 - **[Architecture Overview](architecture.md)** — the orchestration engine, storage, and supporting subsystems
 - **[CLI Reference](cli-reference.md)** — every `baton` subcommand
 - **[Examples](examples/first-run.md)** — first-run walkthrough and knowledge-pack samples

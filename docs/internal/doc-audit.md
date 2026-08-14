@@ -579,3 +579,107 @@ and `agent_baton/cli/commands/diagnostics_cmd.py` +
 `agent_baton/cli/commands/knowledge/doctor_cmd.py`. Tests live in
 `tests/test_api_pmo.py`, `tests/cli/test_doctor.py`, and
 `tests/knowledge/test_knowledge_doctor.py`.
+
+## 2026-08-09 — Adversarial-TDD workflow presets (ADR-26)
+
+New `--workflow` CLI surface + `core/workflow/` package documented across
+the matrix: `docs/cli-reference.md` (flag row + Workflow presets section,
+`baton goal` passthrough row), `docs/agent-roster.md`
+(`test-adequacy-reviewer`, count 30→31), `docs/orchestrator-usage.md`
+(recipe 15), `docs/architecture/package-layout.md` (`core/workflow/`,
+`core/config/workflow.py`), `references/baton-engine.md` (plan flag
+table), `templates/baton.yaml.example` (`workflow:` section),
+`templates/playbooks/adversarial-tdd.md` (PMO gallery), root
+`CLAUDE.md`/`GEMINI.md` layout rows, `docs/design-decisions.md` ADR-26.
+Deliberately NOT modified: `templates/CLAUDE.md` (distributable artifact —
+an earlier edit was reverted). Known deferrals recorded in the design
+doc's §7 non-goals (no DB columns, no PMO-UI surface, no
+`baton workflows` command). Design doc:
+`docs/internal/adversarial-tdd-workflow-design.md` (Accepted, v2.3).
+
+## 2026-08-13 — Delivery-workflow usage journeys: new how-to page (WS-B)
+
+**Decision:** the four optimal-usage journeys for `--workflow` get **one
+new public page**, `docs/delivery-workflows.md` (Diátaxis **how-to**),
+rather than four more recipes in `docs/orchestrator-usage.md`.
+
+Rationale:
+
+1. All four journeys are task-oriented, so how-to is the correct quadrant
+   (an Explanation page was rejected — these are tasks, not concepts).
+2. `orchestrator-usage.md` already carries 15 recipes at ~560 lines; four
+   deep journeys would roughly double it. Recipe 15 stays as the quick
+   recipe and gains a "Deep journeys" pointer.
+3. `docs/cli-reference.md#workflow-presets` remains the **canonical**
+   flag/config reference. The journey page narrates and links; it
+   duplicates only the condensed stage list and the `baton.yaml` snippet.
+
+Wired in: `mkdocs.yml` nav (Getting Started, after Orchestrator Usage),
+`docs/index.md` ("Where to go next"), `docs/orchestrator-usage.md`
+(Recipe 15), `docs/cli-reference.md` (end of Workflow presets),
+`docs/examples/first-run.md` (Common Variations). Companion workstreams:
+README restructure (WS-A) and agent-facing discovery — baton-help SKILL,
+`references/baton-patterns.md`, `agents/orchestrator.md` (WS-C).
+
+**Accuracy fixes shipped in the same pass** (all confirmed against
+`agent_baton/core/workflow/applier.py` and smoke-tested plans):
+
+- `docs/cli-reference.md`, `docs/orchestrator-usage.md`, and
+  `docs/internal/adversarial-tdd-workflow-design.md` §3 claimed the
+  Implementation phase is "gated on the stack test command". It is not:
+  `_first_moveable_gate()` harvests the **first test- or build-type gate on
+  a non-carryover phase of the base plan** (for a Python plan typically the
+  build/import check; the later `pytest` gate is discarded with its phase),
+  falling back to the stack-derived `default_gate()` only when the base
+  plan has no such gate.
+- `docs/orchestrator-usage.md` Recipe 15 gave the spec path as
+  `executions/<task_id>/spec.md`; the applier writes
+  `.claude/team-context/executions/<task_id>/spec.md`.
+- `docs/pillars/compose-the-right-team.md` said "The 30 shipping agents"
+  and its Quality row omitted `test-adequacy-reviewer` (roster is 31);
+  `docs/index.md` said "the 30 specialist agents". Both corrected.
+
+Three caveats are mandatory wherever the relevant subject appears and are
+carried on the new page: `fable` is a **runtime alias** the installed
+Claude Code runtime must resolve (smoke-test before relying on
+fable-pinned stages); the v1 automation runner caps `external_command` at
+**300s** (`external_timeout_seconds` is forward-compatibility only); and
+goal amend-cycle phases carry **no** `workflow_stage` and no stage model
+pinning.
+
+---
+
+## 2026-08-13 — Final-review pass: docs re-synced to the patch-wave behavior
+
+Status: Accepted
+
+The two adversarial patch waves that followed the docs overhaul changed
+shipped behavior; the docs written mid-fleet still described v1. Fixed:
+
+- **The 300s automation cap is gone.** Both automation runners now enforce
+  the step's own `timeout_seconds` (stamped from
+  `workflow.external_timeout_seconds`, default 1800s) via
+  `runtime/worker.resolve_automation_timeout`, with a `plan.json` rescue
+  for the SQLite reload gap and a 300s last-resort default. Corrected in
+  `README.md` (Delivery workflows caveats), `docs/delivery-workflows.md`
+  (Journey 4 admonition + config table), `docs/cli-reference.md`
+  (Workflow presets note), and `references/baton-patterns.md` (Pattern 5).
+  The previous audit entry's "300s cap" mandatory caveat is **superseded**
+  by this wording; the other two caveats (fable runtime alias, amend-cycle
+  phases) stand.
+- **README Pillar-1 key commands** used `baton plan "Add OAuth2 login"`
+  bare, which the deterministic classifier blocks in a clean project
+  (`audit_missing`: auth work is compliance-routed and requires the
+  auditor). The dry-run example now uses a neutral task; the `--save
+  --explain` example keeps OAuth2 but adds the auditor-bearing `--agents`
+  roster with a one-line explanation. All README/docs example plan
+  commands smoke-tested from a temp project.
+- **`agents/orchestrator.md`** gained an "Automation DISPATCH variant"
+  section (run the command with Bash, record with `--agent automation`,
+  timeout semantics) matching the additive `_print_action()` record
+  hints; bundled mirror re-synced via `scripts/sync_bundled_agents.sh`.
+- **Spec** `docs/internal/adversarial-tdd-workflow-design.md` bumped to
+  v2.4 with inline amendments (§2#6, §3, §5.2/5.3/5.4/5.5/5.7/5.12, §7)
+  and a §10 post-ship amendment log.
+- **Root `CLAUDE.md` / `GEMINI.md`**: `baton beads create` takes
+  `--content`, not `--message` (verified against the CLI).

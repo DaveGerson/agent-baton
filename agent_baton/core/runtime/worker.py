@@ -38,6 +38,108 @@ from agent_baton.core.runtime.scheduler import StepScheduler, SchedulerConfig
 from agent_baton.models.decision import DecisionRequest
 from agent_baton.models.execution import ActionType
 
+#: Fallback wall-clock budget (seconds) for an automation step whose plan step
+#: declares no ``timeout_seconds`` (and with no ``BATON_DEFAULT_STEP_TIMEOUT_S``
+#: in the environment).  Historically this 300s value was hard-coded in both
+#: automation runners, which silently truncated any longer per-step budget —
+#: e.g. ``workflow.external_timeout_seconds`` (default 1800).
+DEFAULT_AUTOMATION_TIMEOUT_S: int = 300
+
+
+def _declared_timeout_from_plan_file(engine: object, step_id: str) -> int:
+    """Read ``timeout_seconds`` for *step_id* straight from the saved ``plan.json``.
+
+    Rescue path for a known storage gap: the SQLite backend's ``plan_steps``
+    table has no ``timeout_seconds`` column and ``_load_plan_struct()`` does
+    not hydrate the field, so a step's declared budget does **not** survive a
+    state round-trip — every reload reports ``0``.  ``plan.json`` (written by
+    ``baton plan --save``) still carries the planner's value, so we consult it
+    when the loaded state has none.
+
+    Best-effort and non-fatal; returns ``0`` when unavailable.  Note the file
+    holds the *original* plan, so a post-save amendment to a step's timeout is
+    not reflected here — remove this fallback once the field is persisted.
+    """
+    try:
+        import json
+
+        root = getattr(engine, "_root", None)
+        if root is None:
+            return 0
+        plan_file = Path(root) / "plan.json"
+        if not plan_file.is_file():
+            return 0
+        data = json.loads(plan_file.read_text(encoding="utf-8"))
+        for phase in data.get("phases", []) or []:
+            for step in phase.get("steps", []) or []:
+                if step.get("step_id") == step_id:
+                    return int(step.get("timeout_seconds", 0) or 0)
+    except Exception:  # noqa: BLE001 — rescue path is best-effort
+        pass
+    return 0
+
+
+def resolve_automation_timeout(
+    engine: object,
+    step_id: str,
+    *,
+    default: int = DEFAULT_AUTOMATION_TIMEOUT_S,
+) -> int:
+    """Return the wall-clock timeout (seconds) to enforce for an automation step.
+
+    Single resolver shared by *both* automation runners (this module's
+    :meth:`TaskWorker._run_automation` and the synchronous
+    ``baton execute run`` loop in
+    ``agent_baton/cli/commands/execution/execute.py``) so a plan step's
+    ``timeout_seconds`` is honoured identically on either path.
+
+    Resolution order:
+
+    1. ``timeout_seconds`` on the loaded plan step (explicit per-step budget,
+       e.g. ``workflow.external_timeout_seconds``).
+    2. The same field read from the saved ``plan.json`` — see
+       :func:`_declared_timeout_from_plan_file` for why that is necessary.
+    3. ``BATON_DEFAULT_STEP_TIMEOUT_S`` via
+       :func:`agent_baton.core.engine._executor_helpers.effective_timeout`.
+    4. *default* — automation subprocesses must always carry *some* timeout,
+       otherwise a hung command wedges the run forever.
+
+    Args:
+        engine: The execution driver/engine (anything exposing
+            ``_load_execution()``).  Lookup failures are non-fatal.
+        step_id: The automation step being run.
+        default: Fallback when nothing declares a timeout.
+
+    Returns:
+        A positive number of seconds.
+    """
+    step = None
+    try:
+        from agent_baton.core.engine._executor_helpers import find_step
+
+        loader = getattr(engine, "_load_execution", None)
+        state = loader() if callable(loader) else None
+        step = find_step(state, step_id) if state is not None else None
+        if step is not None and step.timeout_seconds > 0:
+            return step.timeout_seconds
+    except Exception:  # noqa: BLE001 — resolution is best-effort by design
+        step = None
+
+    declared = _declared_timeout_from_plan_file(engine, step_id)
+    if declared > 0:
+        return declared
+
+    if step is not None:
+        try:
+            from agent_baton.core.engine._executor_helpers import effective_timeout
+
+            env_resolved = effective_timeout(step)
+            if env_resolved > 0:
+                return env_resolved
+        except Exception:  # noqa: BLE001
+            pass
+    return default
+
 
 class TaskWorker:
     """Drives a single task's execution asynchronously.
@@ -256,19 +358,29 @@ class TaskWorker:
                                     error=proc.stderr,
                                 )
                             )
-                    except subprocess.TimeoutExpired:
+                    except subprocess.TimeoutExpired as _timeout_exc:
+                        # Report the timeout that was actually enforced (the
+                        # step's own budget when it declares one), not a
+                        # hard-coded 300s that may not be what expired.
+                        _timeout_s = getattr(_timeout_exc, "timeout", None) or (
+                            resolve_automation_timeout(self._engine, a.step_id)
+                        )
+                        _timeout_msg = (
+                            f"Automation command timed out after "
+                            f"{int(_timeout_s)}s: {a.command}"
+                        )
                         self._engine.record_step_result(
                             step_id=a.step_id,
                             agent_name="automation",
                             status="failed",
-                            error=f"Automation command timed out after 300s: {a.command}",
+                            error=_timeout_msg,
                         )
                         self._bus.publish(
                             evt.step_failed(
                                 task_id=task_id,
                                 step_id=a.step_id,
                                 agent_name="automation",
-                                error=f"Automation command timed out after 300s: {a.command}",
+                                error=_timeout_msg,
                             )
                         )
 
@@ -359,7 +471,11 @@ class TaskWorker:
         """Run an automation step's shell command in a thread pool.
 
         Uses ``asyncio.to_thread`` so the event loop stays unblocked while the
-        subprocess runs.  A 5-minute timeout is enforced — callers must handle
+        subprocess runs.  The timeout comes from
+        :func:`resolve_automation_timeout` — the step's own
+        ``timeout_seconds`` when it declares one (e.g.
+        ``workflow.external_timeout_seconds``), otherwise
+        :data:`DEFAULT_AUTOMATION_TIMEOUT_S`.  Callers must handle
         ``subprocess.TimeoutExpired``.
 
         The working directory is the project root (``Path.cwd()`` at the time of
@@ -375,13 +491,16 @@ class TaskWorker:
             ``stdout``, and ``stderr`` populated.
         """
         command = getattr(action, "command", "")
+        timeout_s = resolve_automation_timeout(
+            self._engine, getattr(action, "step_id", "")
+        )
         return await asyncio.to_thread(
             subprocess.run,
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout_s,
             cwd=str(Path.cwd()),
         )
 

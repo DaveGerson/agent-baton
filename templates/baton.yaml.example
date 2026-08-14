@@ -16,3 +16,20 @@ auto_route_rules:
 excluded_paths:
   - "node_modules/**"
   - ".venv/**"
+
+# Workflow presets (baton plan --workflow NAME) — all fields optional.
+# Per-stage overrides apply to the named preset stage; the external
+# command runs as an engine automation step in Implementation
+# Verification (plug in any CLI: gemini, codex, a script).
+workflow:
+  # stages:
+  #   final_review: {model: opus}
+  #   implementation_verification: {agent: security-reviewer}
+  external_command: ""
+  # Wall-clock budget for external_command. Stamped onto the automation step
+  # as timeout_seconds and enforced by the automation runner (both
+  # `baton execute run` and the daemon worker); on expiry the step is
+  # recorded as failed.
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3

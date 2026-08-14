@@ -41,6 +41,20 @@ class TestLoadDirectory:
         count = registry.load_directory(agents_dir)
         assert count == 1
 
+    def test_ignores_non_agent_markdown_files(self, tmp_path: Path):
+        # agents/CLAUDE.md (directory guidance) is mirrored into
+        # _bundled_agents/ by the sync script; it must not parse as an agent.
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "CLAUDE.md").write_text("# guidance, not an agent\n", encoding="utf-8")
+        (agents_dir / "README.md").write_text("# docs, not an agent\n", encoding="utf-8")
+        valid_md = "---\nname: real-agent\ndescription: test\n---\n# Body\n"
+        (agents_dir / "real-agent.md").write_text(valid_md, encoding="utf-8")
+        registry = AgentRegistry()
+        count = registry.load_directory(agents_dir)
+        assert count == 1
+        assert registry.names == ["real-agent"]
+
     def test_name_derived_from_filename_when_missing_from_frontmatter(self, tmp_path: Path):
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()

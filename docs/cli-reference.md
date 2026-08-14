@@ -82,6 +82,28 @@ baton plan SUMMARY [options]
 | `--intervention LEVEL` | No | `low` | Escalation threshold for knowledge gaps: `low`, `medium`, `high` |
 | `--goal CONDITION` | No | -- | Completion condition (G1). The engine evaluates the goal after each gate passes and uses `amend_plan` to round out gaps until met, exhausted, or the token ceiling is hit. |
 | `--max-amend-cycles N` | No | `3` | Goal round-out budget (meaningful only with `--goal`). |
+| `--workflow NAME` | No | -- | Reshape the plan into a named delivery-workflow preset after planning. Built-in: `adversarial-tdd`. Mutually exclusive with `--manager-mode` and `--import`. See [Workflow presets](#workflow-presets) below. |
+
+#### Workflow presets
+
+`--workflow adversarial-tdd` reshapes the assembled plan into a staged, model-tiered, adversarially verified TDD pipeline: Brainstorm & Spec (`architect`, fable) → Architecture (`architect`, fable) → Test Authoring (`test-engineer`, opus) → Test Verification (`test-adequacy-reviewer`, opus; scoped to spec + tests only) → Implementation (the base plan's implement steps, re-tiered to sonnet, carrying the first test- or build-type gate found on a non-carryover phase of the base plan — often a build/import check rather than the base plan's later `pytest` gate, which is discarded with its phase; a stack-derived default gate is used when the base plan has no such gate) → Implementation Verification (`code-reviewer`, opus; optional external-vendor automation step) → Final Review (`code-reviewer`, fable; fans out to up to 3 reviewers for large slices). Base Audit phases containing `auditor` steps are carried over after Final Review, so regulated-domain coverage survives the reshape.
+
+Per-stage agents/models, the final-review fan-out, and an external verifier command (e.g. a gemini or codex CLI invocation, run as an engine automation step) are configurable in `baton.yaml`:
+
+```yaml
+workflow:
+  stages:
+    final_review: {model: opus}        # retarget a stage tier
+    implementation_verification: {agent: security-reviewer}
+  external_command: "codex exec 'review the diff against spec.md'"
+  external_timeout_seconds: 1800
+  final_review_fanout_divisor: 4
+  final_review_max_reviewers: 3
+```
+
+Notes: `external_timeout_seconds` (default 1800) is stamped onto the automation step's `timeout_seconds` and enforced by both automation runners (`baton execute run` and the daemon worker); a step with no declared budget falls back to a 300s default, and expiry records the step as failed. `--workflow --explain --save` appends a `## Workflow` stage table to `explanation.md`. When `manager_mode.enabled_by_default` is set in config, `--workflow` suppresses manager mode for that plan with a warning (only the explicit `--manager-mode` flag combination is an error). The `workflow` / `workflow_stage` fields live in `plan.json` (canonical); the SQLite copy does not carry them. Design: [internal/adversarial-tdd-workflow-design.md](internal/adversarial-tdd-workflow-design.md).
+
+Task-oriented journeys (everyday delivery, goal-driven, regulated, external verifiers): [delivery-workflows.md](delivery-workflows.md).
 
 **Manager mode:**
 
@@ -135,6 +157,7 @@ baton goal CONDITION [options]
 |----------|----------|---------|-------------|
 | `CONDITION` | Yes | -- | A single quoted sentence describing what "done" means |
 | `--max-amend-cycles N` | No | `3` | Maximum goal-driven round-out cycles |
+| `--workflow NAME` | No | -- | Passed through to `baton plan` — reshape the goal plan into a named workflow preset (see [Workflow presets](#workflow-presets)). |
 | `--task-type TYPE` | No | auto | Passed through to `baton plan` |
 | `--complexity LEVEL` | No | auto | `light` / `medium` / `heavy` |
 | `--project PATH` | No | cwd | Project root |

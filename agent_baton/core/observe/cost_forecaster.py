@@ -51,12 +51,21 @@ _FALLBACK_PRICE: tuple[float, float] = _PRICE_PER_1M.get("sonnet", (3.0, 15.0))
 
 
 def _model_key(model: str) -> str:
-    """Normalise a model string to haiku / sonnet / opus."""
+    """Normalise a model string to haiku / sonnet / opus / fable.
+
+    ``fable`` is matched the same way as the other tiers (substring, case
+    insensitive) so ``claude-fable-5`` and a bare ``fable`` both resolve to
+    the ``fable`` rows in :data:`_DEFAULT_TOKENS` / :data:`_PRICE_PER_1M`.
+    Without this branch every fable step fell through to ``sonnet`` and was
+    priced roughly an order of magnitude too cheaply.
+    """
     m = model.lower()
     if "haiku" in m:
         return "haiku"
     if "opus" in m:
         return "opus"
+    if "fable" in m:
+        return "fable"
     return "sonnet"
 
 

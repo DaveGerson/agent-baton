@@ -13,7 +13,7 @@ see-also:
 !!! abstract "Pillar context"
     This page details **Pillar 2 — Compose the right team**. For the high-level map of all four pillars, see [The Four Pillars](pillars.md).
 
-This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **30** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
+This page mirrors `agents/*.md` — the distributable agent definitions installed by `scripts/install.sh`. There are **31** agents. The orchestrator picks among them based on task domain, risk tier, and budget. To dispatch one directly inside Claude Code, name it in the `Agent` tool with `subagent_type`.
 
 To inspect runtime registration: `baton agents`.
 
@@ -62,6 +62,7 @@ generated-agent contract in [`references/agent-authoring.md`](../references/agen
 | `security-reviewer` | opus | Auth flows, input validation, secrets management, OWASP top 10, dependency vulns. |
 | `auditor` | opus | Independent safety/compliance/governance review. Has veto authority. Required for MEDIUM+ risk plans. |
 | `test-engineer` | sonnet | Unit, integration, and E2E tests. Test infrastructure. |
+| `test-adequacy-reviewer` | opus | Adversarial review of tests against a spec: coverage gaps, vacuous/tautological/over-mocked tests. Scoped to spec + tests only — never reads implementation. Stage 4 of the `adversarial-tdd` workflow. |
 
 ## Data & analysis
 

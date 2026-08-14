@@ -63,6 +63,7 @@ The engine returns these action types from `baton execute start` and
 - `baton plan --knowledge PATH` — attach knowledge documents
 - `baton plan --knowledge-pack NAME` — attach knowledge packs
 - `baton plan --intervention low|medium|high` — escalation threshold
+- `baton plan --workflow adversarial-tdd` — reshape the plan into the staged, model-tiered adversarial-TDD delivery workflow (spec/architecture → tests → adversarial test verification → implementation → double verification → final review); also available on `baton goal`
 - `baton execute amend --description "why" --add-phase "name:agent"` — amend plan mid-execution
 
 ## Troubleshooting
